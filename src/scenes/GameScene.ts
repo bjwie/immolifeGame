@@ -1,19 +1,96 @@
 import Phaser from 'phaser'
 import { GameManager } from '../managers/GameManager'
-import { Property, PropertyType, TimeSpeed, MarketTrend } from '../types/GameTypes'
+import { Property, PropertyType, TimeSpeed, MarketTrend, GameTime } from '../types/GameTypes'
 
 export class GameScene extends Phaser.Scene {
   private gameManager!: GameManager
-  private propertySprites: Map<string, Phaser.GameObjects.Rectangle> = new Map()
+  private propertySprites: Map<string, Phaser.GameObjects.Container> = new Map()
   private selectedProperty: Property | null = null
   private uiElements!: Phaser.GameObjects.Group
   private timeText!: Phaser.GameObjects.Text
   private isPaused: boolean = false
   private timePanelContainer!: Phaser.GameObjects.Container
   private infoPanelContainer!: Phaser.GameObjects.Container
+  private particleEmitters: Map<string, Phaser.GameObjects.Particles.ParticleEmitter> = new Map()
 
   constructor() {
     super({ key: 'GameScene' })
+  }
+
+  preload() {
+    // Fallback: Erstelle einfache farbige Rechtecke als Texturen falls keine Bilder vorhanden
+    this.createFallbackTextures()
+    
+    // Versuche echte Assets zu laden (falls vorhanden)
+    this.load.on('filecomplete', (key: string) => {
+      console.log(`Asset geladen: ${key}`)
+    })
+    
+    this.load.on('loaderror', (file: any) => {
+      console.log(`Asset nicht gefunden: ${file.key}, verwende Fallback`)
+    })
+
+    // Gebäude-Sprites (falls vorhanden)
+    this.load.image('apartment', 'assets/buildings/apartment.png')
+    this.load.image('house', 'assets/buildings/house.png')
+    this.load.image('commercial', 'assets/buildings/commercial.png')
+    this.load.image('office', 'assets/buildings/office.png')
+    
+    // Effekt-Sprites
+    this.load.image('coin', 'assets/effects/coin.png')
+    this.load.image('sparkle', 'assets/effects/sparkle.png')
+    this.load.image('dust', 'assets/effects/dust.png')
+    
+    // UI-Elemente
+    this.load.image('panel-bg', 'assets/ui/panel-bg.png')
+    
+    // Spritesheet für Animationen (falls vorhanden)
+    this.load.spritesheet('money-animation', 'assets/effects/money-animation.png', {
+      frameWidth: 32,
+      frameHeight: 32
+    })
+  }
+
+  private createFallbackTextures() {
+    // Erstelle farbige Rechtecke als Fallback-Texturen
+    const graphics = this.add.graphics()
+    
+    // Apartment - Blau
+    graphics.fillStyle(0x3498db)
+    graphics.fillRect(0, 0, 64, 64)
+    graphics.generateTexture('apartment-fallback', 64, 64)
+    
+    // House - Grün
+    graphics.clear()
+    graphics.fillStyle(0x27ae60)
+    graphics.fillRect(0, 0, 64, 64)
+    graphics.generateTexture('house-fallback', 64, 64)
+    
+    // Commercial - Orange
+    graphics.clear()
+    graphics.fillStyle(0xf39c12)
+    graphics.fillRect(0, 0, 64, 64)
+    graphics.generateTexture('commercial-fallback', 64, 64)
+    
+    // Office - Lila
+    graphics.clear()
+    graphics.fillStyle(0x9b59b6)
+    graphics.fillRect(0, 0, 64, 64)
+    graphics.generateTexture('office-fallback', 64, 64)
+    
+    // Coin - Gold
+    graphics.clear()
+    graphics.fillStyle(0xf1c40f)
+    graphics.fillCircle(8, 8, 8)
+    graphics.generateTexture('coin-fallback', 16, 16)
+    
+    // Sparkle - Weiß (einfacher Kreis)
+    graphics.clear()
+    graphics.fillStyle(0xffffff)
+    graphics.fillCircle(8, 8, 6)
+    graphics.generateTexture('sparkle-fallback', 16, 16)
+    
+    graphics.destroy()
   }
 
   create() {
@@ -68,18 +145,20 @@ export class GameScene extends Phaser.Scene {
   private drawStreets() {
     const { width, height } = this.cameras.main
     
-    // Dynamisches Straßenraster - angepasst für größere Immobilien
+    // Dynamisches Straßenraster - angepasst für UI-Panels unten
     const cols = 5 // Weniger Spalten wegen größerer Sprites
     const rows = 4
     const marginX = width * 0.08
-    const marginY = height * 0.12
+    const marginY = height * 0.08 // Weniger Abstand oben
+    const bottomUISpace = 250 // Platz für UI-Panels unten
+    const usableHeight = height - marginY - bottomUISpace
     const spacingX = (width - 2 * marginX) / (cols - 1)
-    const spacingY = (height - 2 * marginY) / (rows - 1)
+    const spacingY = usableHeight / (rows - 1)
     
     // Horizontale Straßen
     for (let row = 0; row < rows; row++) {
       const y = marginY + row * spacingY - 50 // Mehr Platz für größere Sprites
-      if (y > 0 && y < height) {
+      if (y > 0 && y < height - bottomUISpace) { // Nicht in UI-Bereich zeichnen
         const street = this.add.rectangle(width / 2, y, width, 20, 0x2c3e50) // Breitere Straßen
         street.setDepth(-1)
       }
@@ -89,7 +168,8 @@ export class GameScene extends Phaser.Scene {
     for (let col = 0; col < cols; col++) {
       const x = marginX + col * spacingX
       if (x > 0 && x < width) {
-        const street = this.add.rectangle(x, height / 2, 20, height, 0x2c3e50) // Breitere Straßen
+        const streetHeight = height - bottomUISpace // Straßen nur bis UI-Bereich
+        const street = this.add.rectangle(x, (marginY + streetHeight) / 2, 20, streetHeight, 0x2c3e50) // Breitere Straßen
         street.setDepth(-1)
       }
     }
@@ -100,13 +180,15 @@ export class GameScene extends Phaser.Scene {
     const playerProperties = this.gameManager.getPlayer().properties
     const { width, height } = this.cameras.main
 
-    // Dynamische Positionierung berechnen - angepasst für größere Sprites
+    // Dynamische Positionierung berechnen - Platz für UI-Panels unten lassen
     const cols = 5 // Weniger Spalten
     const rows = Math.ceil(20 / cols)
     const marginX = width * 0.08
-    const marginY = height * 0.12
+    const marginY = height * 0.08 // Weniger Abstand oben
+    const bottomUISpace = 250 // Platz für UI-Panels unten
+    const usableHeight = height - marginY - bottomUISpace
     const spacingX = (width - 2 * marginX) / (cols - 1)
-    const spacingY = (height - 2 * marginY) / (rows - 1)
+    const spacingY = usableHeight / (rows - 1)
 
     // Verfügbare Immobilien (grün)
     availableProperties.forEach((property, index) => {
@@ -124,50 +206,95 @@ export class GameScene extends Phaser.Scene {
   }
 
   private createPropertySprite(property: Property, color: number, isOwned: boolean) {
-    const sprite = this.add.rectangle(property.x, property.y, 120, 90, color)
-    sprite.setStrokeStyle(3, 0xffffff)
-    sprite.setInteractive()
-
-    // Property Icon basierend auf Typ
-    const icon = this.getPropertyIcon(property.type)
-    const iconText = this.add.text(property.x, property.y - 15, icon, {
-      fontSize: '28px',
-      color: '#ffffff'
-    })
-    iconText.setOrigin(0.5)
-
+    // Container für alle Sprite-Elemente erstellen
+    const container = this.add.container(property.x, property.y)
+    
+    // Sprite-Key bestimmen (mit Fallback)
+    const spriteKey = this.textures.exists(property.type) ? property.type : `${property.type}-fallback`
+    
+    // Hauptgebäude-Sprite
+    const buildingSprite = this.add.image(0, 0, spriteKey)
+    buildingSprite.setScale(1.2) // Größer machen
+    // buildingSprite.setTint(isOwned ? 0x3498db : 0x27ae60) // Farb-Tint für Status
+    
+    // Zustandsindikator
+    const conditionColor = property.condition > 80 ? 0x2ecc71 : 
+                          property.condition > 50 ? 0xf39c12 : 0xe74c3c
+    const conditionBar = this.add.rectangle(-30, -35, 20, 4, conditionColor)
+    
+    // Eigentümer-Indikator
+    if (isOwned) {
+      const crownIcon = this.add.text(-40, -45, '👑', {
+        fontSize: '16px'
+      })
+      container.add(crownIcon)
+    }
+    
+    // Vermietungs-Status
+    if (property.isRented) {
+      const rentedIcon = this.add.text(25, -45, '👥', {
+        fontSize: '16px'
+      })
+      container.add(rentedIcon)
+    }
+    
     // Preis/Miete Text
     const priceText = isOwned 
       ? `€${property.monthlyRent}/M`
       : `€${Math.round(property.price / 1000)}k`
     
-    const price = this.add.text(property.x, property.y + 20, priceText, {
-      fontSize: '16px',
+    const price = this.add.text(0, 35, priceText, {
+      fontSize: '14px',
       color: '#ffffff',
       fontFamily: 'Arial, sans-serif',
       fontStyle: 'bold'
     })
     price.setOrigin(0.5)
+    
+    // Alle Elemente zum Container hinzufügen
+    container.add([buildingSprite, conditionBar, price])
+    
+    // Interaktivität
+    container.setSize(80, 80)
+    container.setInteractive({ useHandCursor: true })
 
     // Click Event
-    sprite.on('pointerdown', () => {
+    container.on('pointerdown', () => {
       this.selectProperty(property, isOwned)
     })
 
-    // Hover Effekte
-    sprite.on('pointerover', () => {
-      sprite.setFillStyle(isOwned ? 0x5dade2 : 0x2ecc71)
+    // Hover Effekte mit Animationen
+    container.on('pointerover', () => {
+      // Hover-Animation
+      this.tweens.add({
+        targets: container,
+        scaleX: 1.1,
+        scaleY: 1.1,
+        duration: 200,
+        ease: 'Back.easeOut'
+      })
+      
       this.input.setDefaultCursor('pointer')
-      this.showPropertyTooltip(property, sprite.x, sprite.y - 50)
+      this.showPropertyTooltip(property, container.x, container.y - 80)
     })
 
-    sprite.on('pointerout', () => {
-      sprite.setFillStyle(color)
+    container.on('pointerout', () => {
+      // Zurück zur normalen Größe
+      this.tweens.add({
+        targets: container,
+        scaleX: 1.0,
+        scaleY: 1.0,
+        duration: 200,
+        ease: 'Back.easeOut'
+      })
+      
       this.input.setDefaultCursor('default')
       this.hidePropertyTooltip()
     })
 
-    this.propertySprites.set(property.id, sprite)
+    this.propertySprites.set(property.id, container)
+    
+    return container
   }
 
   private getPropertyIcon(type: PropertyType): string {
@@ -745,22 +872,22 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
   private createUI() {
     const { width, height } = this.cameras.main
 
-    // Verschiebbare Info-Panel erstellen
+    // Verschiebbare Info-Panel erstellen - unten links
     this.createInfoPanel(width, height)
 
-    // Zeit-Steuerung Panel
+    // Zeit-Steuerung Panel - unten mitte
     this.createTimeControlPanel(width, height)
 
-    // Bank Button als separates Panel
+    // Bank Button als separates Panel - unten rechts
     this.createBankPanel(width, height)
 
-    // Menü Button - größer
-    const menuButton = this.add.rectangle(70, 40, 120, 40, 0x34495e) // Größer
+    // Menü Button - oben links bleibt
+    const menuButton = this.add.rectangle(80, 40, 140, 35, 0x34495e)
     menuButton.setInteractive({ useHandCursor: true })
-    menuButton.setStrokeStyle(3, 0x2c3e50) // Dickerer Rahmen
+    menuButton.setStrokeStyle(2, 0x2c3e50)
 
-    const menuText = this.add.text(70, 40, 'Menü', {
-      fontSize: '18px', // Größer
+    const menuText = this.add.text(80, 40, '🏠 Hauptmenü', {
+      fontSize: '14px',
       color: '#ffffff',
       fontFamily: 'Arial, sans-serif',
       fontStyle: 'bold'
@@ -773,24 +900,26 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
 
     menuButton.on('pointerover', () => {
       menuButton.setFillStyle(0x2c3e50)
+      menuButton.setStrokeStyle(2, 0x3498db)
     })
 
     menuButton.on('pointerout', () => {
       menuButton.setFillStyle(0x34495e)
+      menuButton.setStrokeStyle(2, 0x2c3e50)
     })
   }
 
   private createInfoPanel(width: number, height: number) {
-    // Info-Panel Container erstellen
-    this.infoPanelContainer = this.add.container(width - 250, 80) // Größere Position
+    // Info-Panel Container erstellen - unten links
+    this.infoPanelContainer = this.add.container(140, height - 90)
     
-    // Panel Hintergrund
-    const panelBg = this.add.rectangle(0, 0, 220, 140, 0x000000, 0.7) // Größer
-    panelBg.setStrokeStyle(2, 0x3498db) // Dickerer Rahmen
+    // Panel Hintergrund - kompakter
+    const panelBg = this.add.rectangle(0, 0, 260, 160, 0x000000, 0.85)
+    panelBg.setStrokeStyle(2, 0x3498db)
     
     // Panel Titel
-    const titleText = this.add.text(0, -50, '📊 Spiel-Info', {
-      fontSize: '18px', // Größer
+    const titleText = this.add.text(0, -65, '📊 Spiel-Info', {
+      fontSize: '16px',
       color: '#ecf0f1',
       fontFamily: 'Arial, sans-serif',
       fontStyle: 'bold'
@@ -798,16 +927,27 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
     titleText.setOrigin(0.5)
     
     // Zeit Text
-    this.timeText = this.add.text(0, -20, this.gameManager.getFormattedDate(), {
-      fontSize: '16px', // Größer
+    this.timeText = this.add.text(0, -40, this.gameManager.getFormattedDate(), {
+      fontSize: '14px',
       color: '#ecf0f1',
       fontFamily: 'Arial, sans-serif'
     })
     this.timeText.setOrigin(0.5)
 
+    // Geld anzeigen
+    const player = this.gameManager.getPlayer()
+    const moneyText = this.add.text(0, -20, `💰 €${Math.round(player.money).toLocaleString('de-DE')}`, {
+      fontSize: '14px',
+      color: '#f1c40f',
+      fontFamily: 'Arial, sans-serif',
+      fontStyle: 'bold'
+    })
+    moneyText.setOrigin(0.5)
+    moneyText.setName('moneyText')
+
     // Geschwindigkeit Text
-    const speedText = this.add.text(0, 5, 'Geschwindigkeit: Normal', {
-      fontSize: '14px', // Größer
+    const speedText = this.add.text(0, 0, 'Geschwindigkeit: Normal', {
+      fontSize: '12px',
       color: '#bdc3c7',
       fontFamily: 'Arial, sans-serif'
     })
@@ -816,18 +956,28 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
 
     // Portfolio-Wert Text
     const portfolioValue = this.calculatePortfolioValue()
-    const portfolioText = this.add.text(0, 30, `Portfolio: €${Math.round(portfolioValue).toLocaleString('de-DE')}`, {
-      fontSize: '14px', // Größer
+    const portfolioText = this.add.text(0, 20, `🏠 Portfolio: €${Math.round(portfolioValue).toLocaleString('de-DE')}`, {
+      fontSize: '12px',
       color: '#2ecc71',
       fontFamily: 'Arial, sans-serif'
     })
     portfolioText.setOrigin(0.5)
     portfolioText.setName('portfolioText')
 
+    // Monatliches Einkommen
+    const monthlyIncome = this.calculateMonthlyIncome()
+    const incomeText = this.add.text(0, 40, `💵 Einkommen: €${Math.round(monthlyIncome).toLocaleString('de-DE')}/M`, {
+      fontSize: '12px',
+      color: monthlyIncome >= 0 ? '#2ecc71' : '#e74c3c',
+      fontFamily: 'Arial, sans-serif'
+    })
+    incomeText.setOrigin(0.5)
+    incomeText.setName('incomeText')
+
     // Markt-Info Text
     const availableCount = this.gameManager.getAvailableProperties().length
-    const marketText = this.add.text(0, 55, `🏠 Markt: ${availableCount} Immobilien`, {
-      fontSize: '14px', // Größer
+    const marketText = this.add.text(0, 60, `🏪 Markt: ${availableCount} Immobilien`, {
+      fontSize: '12px',
       color: '#3498db',
       fontFamily: 'Arial, sans-serif'
     })
@@ -835,49 +985,58 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
     marketText.setName('marketText')
 
     // Elemente zum Container hinzufügen
-    this.infoPanelContainer.add([panelBg, titleText, this.timeText, speedText, portfolioText, marketText])
+    this.infoPanelContainer.add([panelBg, titleText, this.timeText, moneyText, speedText, portfolioText, incomeText, marketText])
     
     // Drag & Drop aktivieren
     this.makeDraggable(this.infoPanelContainer, panelBg, '📊 Spiel-Info')
   }
 
+  private calculateMonthlyIncome(): number {
+    const player = this.gameManager.getPlayer()
+    return player.properties.reduce((total, property) => {
+      const rent = property.isRented ? property.monthlyRent : 0
+      return total + rent - property.maintenanceCost
+    }, 0)
+  }
+
   private createTimeControlPanel(width: number, height: number) {
-    // Zeit-Panel Container erstellen
-    this.timePanelContainer = this.add.container(width - 220, 280) // Angepasste Position
+    // Zeit-Panel Container erstellen - unten mitte
+    this.timePanelContainer = this.add.container(width / 2, height - 110)
     
-    const panelWidth = 200 // Größer
-    const panelHeight = 220 // Größer
+    const panelWidth = 260
+    const panelHeight = 200
 
     // Panel Hintergrund
-    const panelBg = this.add.rectangle(0, 0, panelWidth, panelHeight, 0x000000, 0.7)
-    panelBg.setStrokeStyle(2, 0x3498db) // Dickerer Rahmen
+    const panelBg = this.add.rectangle(0, 0, panelWidth, panelHeight, 0x000000, 0.85)
+    panelBg.setStrokeStyle(2, 0xf39c12)
 
     // Panel Titel
-    const titleText = this.add.text(0, -90, '⏰ Zeit-Steuerung', {
-      fontSize: '18px', // Größer
+    const titleText = this.add.text(0, -85, '⏰ Zeit-Steuerung', {
+      fontSize: '16px',
       color: '#ecf0f1',
       fontFamily: 'Arial, sans-serif',
       fontStyle: 'bold'
     })
     titleText.setOrigin(0.5)
 
-    // Pause/Play Button
-    const pauseButton = this.add.rectangle(0, -55, 150, 35, 0xf39c12) // Größer
+    // Pause/Play Button - zentriert
+    const pauseButton = this.add.rectangle(0, -55, 180, 30, 0xf39c12)
     pauseButton.setInteractive({ useHandCursor: true })
-    pauseButton.setStrokeStyle(2, 0xe67e22) // Dickerer Rahmen
+    pauseButton.setStrokeStyle(2, 0xe67e22)
     pauseButton.setName('pauseButton')
 
     const pauseText = this.add.text(0, -55, '⏸️ Pause', {
-      fontSize: '16px', // Größer
+      fontSize: '14px',
       color: '#ffffff',
-      fontFamily: 'Arial, sans-serif'
+      fontFamily: 'Arial, sans-serif',
+      fontStyle: 'bold'
     })
     pauseText.setOrigin(0.5)
     pauseText.setName('pauseButtonText')
 
     // Geschwindigkeits-Label
-    const speedLabel = this.add.text(0, -15, 'Geschwindigkeit:', {
-      fontSize: '14px', // Größer
+    const speedLabel = this.add.text(0, -25, 'Geschwindigkeit wählen:', {
+      fontSize: '12px',
       color: '#bdc3c7',
       fontFamily: 'Arial, sans-serif'
     })
@@ -886,25 +1045,26 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
     // Container für alle Elemente
     const elements = [panelBg, titleText, pauseButton, pauseText, speedLabel]
 
-    // Geschwindigkeits-Buttons - größer und besser positioniert
+    // Geschwindigkeits-Buttons - 3x2 Grid Layout
     const speeds = [
-      { speed: TimeSpeed.SLOW, label: '🐌 0.5x', x: -45, y: 15 },
-      { speed: TimeSpeed.NORMAL, label: '🚶 1x', x: -45, y: 45 },
-      { speed: TimeSpeed.FAST, label: '🏃 2x', x: -45, y: 75 },
-      { speed: TimeSpeed.VERY_FAST, label: '🚀 4x', x: 45, y: 15 },
-      { speed: TimeSpeed.ULTRA_FAST, label: '⚡ 8x', x: 45, y: 45 }
+      { speed: TimeSpeed.SLOW, label: '🐌 0.5x', x: -60, y: 5 },
+      { speed: TimeSpeed.NORMAL, label: '🚶 1x', x: 0, y: 5 },
+      { speed: TimeSpeed.FAST, label: '🏃 2x', x: 60, y: 5 },
+      { speed: TimeSpeed.VERY_FAST, label: '🚀 4x', x: -30, y: 35 },
+      { speed: TimeSpeed.ULTRA_FAST, label: '⚡ 8x', x: 30, y: 35 }
     ]
 
     speeds.forEach(({ speed, label, x, y }) => {
       const isRed = speed >= TimeSpeed.VERY_FAST
-      const button = this.add.rectangle(x, y, 80, 25, isRed ? 0xe74c3c : 0x3498db) // Größer
+      const button = this.add.rectangle(x, y, 70, 22, isRed ? 0xe74c3c : 0x3498db)
       button.setInteractive({ useHandCursor: true })
-      button.setStrokeStyle(2, isRed ? 0xc0392b : 0x2980b9) // Dickerer Rahmen
+      button.setStrokeStyle(1, isRed ? 0xc0392b : 0x2980b9)
 
       const text = this.add.text(x, y, label, {
-        fontSize: '12px', // Größer
+        fontSize: '10px',
         color: '#ffffff',
-        fontFamily: 'Arial, sans-serif'
+        fontFamily: 'Arial, sans-serif',
+        fontStyle: 'bold'
       })
       text.setOrigin(0.5)
 
@@ -941,6 +1101,131 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
     
     // Drag & Drop aktivieren
     this.makeDraggable(this.timePanelContainer, panelBg, '⏰ Zeit-Steuerung')
+  }
+
+  private createBankPanel(width: number, height: number) {
+    // Bank-Panel Container - unten rechts
+    const bankContainer = this.add.container(width - 140, height - 80)
+    
+    // Panel Hintergrund - kompakter
+    const panelBg = this.add.rectangle(0, 0, 260, 140, 0x000000, 0.85)
+    panelBg.setStrokeStyle(2, 0x8e44ad)
+    
+    // Panel Titel
+    const titleText = this.add.text(0, -55, '🏦 Aktionen', {
+      fontSize: '16px',
+      color: '#ecf0f1',
+      fontFamily: 'Arial, sans-serif',
+      fontStyle: 'bold'
+    })
+    titleText.setOrigin(0.5)
+    
+    // Bank Button
+    const bankButton = this.add.rectangle(0, -25, 200, 25, 0x8e44ad)
+    bankButton.setInteractive({ useHandCursor: true })
+    bankButton.setStrokeStyle(1, 0x9b59b6)
+
+    const bankText = this.add.text(0, -25, '🏦 Bank (Bald verfügbar)', {
+      fontSize: '12px',
+      color: '#ffffff',
+      fontFamily: 'Arial, sans-serif'
+    })
+    bankText.setOrigin(0.5)
+
+    // Save/Load Button
+    const saveButton = this.add.rectangle(0, 5, 200, 25, 0x27ae60)
+    saveButton.setInteractive({ useHandCursor: true })
+    saveButton.setStrokeStyle(1, 0x2ecc71)
+
+    const saveText = this.add.text(0, 5, '💾 Speichern & Laden', {
+      fontSize: '12px',
+      color: '#ffffff',
+      fontFamily: 'Arial, sans-serif'
+    })
+    saveText.setOrigin(0.5)
+
+    // Quick Save Button
+    const quickSaveButton = this.add.rectangle(-60, 35, 90, 25, 0xf39c12)
+    quickSaveButton.setInteractive({ useHandCursor: true })
+    quickSaveButton.setStrokeStyle(1, 0xe67e22)
+
+    const quickSaveText = this.add.text(-60, 35, '⚡ Quick Save', {
+      fontSize: '10px',
+      color: '#ffffff',
+      fontFamily: 'Arial, sans-serif'
+    })
+    quickSaveText.setOrigin(0.5)
+
+    // Debug Button (for testing income)
+    const debugButton = this.add.rectangle(60, 35, 90, 25, 0xe74c3c)
+    debugButton.setInteractive({ useHandCursor: true })
+    debugButton.setStrokeStyle(1, 0xc0392b)
+
+    const debugText = this.add.text(60, 35, '⚡ Next Month', {
+      fontSize: '10px',
+      color: '#ffffff',
+      fontFamily: 'Arial, sans-serif'
+    })
+    debugText.setOrigin(0.5)
+
+    // Events
+    bankButton.on('pointerdown', () => {
+      this.showBankDialog()
+    })
+
+    bankButton.on('pointerover', () => {
+      bankButton.setFillStyle(0x9b59b6)
+    })
+
+    bankButton.on('pointerout', () => {
+      bankButton.setFillStyle(0x8e44ad)
+    })
+
+    saveButton.on('pointerdown', () => {
+      this.showSaveLoadDialog()
+    })
+
+    saveButton.on('pointerover', () => {
+      saveButton.setFillStyle(0x2ecc71)
+    })
+
+    saveButton.on('pointerout', () => {
+      saveButton.setFillStyle(0x27ae60)
+    })
+
+    quickSaveButton.on('pointerdown', () => {
+      if (this.gameManager.quickSave()) {
+        this.showNotification('Spiel gespeichert!', 0x27ae60)
+      } else {
+        this.showNotification('Fehler beim Speichern!', 0xe74c3c)
+      }
+    })
+
+    quickSaveButton.on('pointerover', () => {
+      quickSaveButton.setFillStyle(0xe67e22)
+    })
+
+    quickSaveButton.on('pointerout', () => {
+      quickSaveButton.setFillStyle(0xf39c12)
+    })
+
+    debugButton.on('pointerdown', () => {
+      this.gameManager.forceAdvanceToNextMonth()
+    })
+
+    debugButton.on('pointerover', () => {
+      debugButton.setFillStyle(0xc0392b)
+    })
+
+    debugButton.on('pointerout', () => {
+      debugButton.setFillStyle(0xe74c3c)
+    })
+
+    // Elemente zum Container hinzufügen
+    bankContainer.add([panelBg, titleText, bankButton, bankText, saveButton, saveText, quickSaveButton, quickSaveText, debugButton, debugText])
+    
+    // Drag & Drop aktivieren
+    this.makeDraggable(bankContainer, panelBg, '🏦 Aktionen')
   }
 
   private makeDraggable(container: Phaser.GameObjects.Container, dragHandle: Phaser.GameObjects.Rectangle, title: string) {
@@ -1071,40 +1356,49 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
   }
 
   private setupEventListeners() {
-    this.gameManager.on('propertyBought', () => {
-      this.refreshPropertyDisplay()
-    })
-
-    this.gameManager.on('propertySold', () => {
-      this.refreshPropertyDisplay()
-    })
-
-    this.gameManager.on('propertyRented', () => {
-      this.refreshPropertyDisplay()
-    })
-
-    this.gameManager.on('dayAdvanced', () => {
+    // GameManager Events
+    this.gameManager.on('timeUpdated', (gameTime: GameTime) => {
       this.timeText.setText(this.gameManager.getFormattedDate())
+    })
+
+    this.gameManager.on('monthPassed', () => {
+      this.updatePortfolioDisplay()
+      this.showMoneyEffect() // Geld-Effekt bei Monatsende
+    })
+
+    this.gameManager.on('propertyPurchased', (data: any) => {
+      this.showNotification(`🏠 ${data.property.name} gekauft!`, 0x2ecc71)
+      this.showPurchaseEffect(data.property) // Kauf-Effekt
+      this.refreshPropertyDisplay()
       this.updatePortfolioDisplay()
     })
 
-    this.gameManager.on('monthAdvanced', (data: any) => {
-      // Monatliche Events können hier behandelt werden
-      console.log(`Neuer Monat: ${data.month}/${data.year}`)
+    this.gameManager.on('propertySold', (data: any) => {
+      this.showNotification(`💰 ${data.property.name} verkauft für €${data.salePrice.toLocaleString()}!`, 0xf39c12)
+      this.showSaleEffect(data.property) // Verkaufs-Effekt
+      this.refreshPropertyDisplay()
       this.updatePortfolioDisplay()
     })
 
-    this.gameManager.on('yearAdvanced', (data: any) => {
-      console.log(`Neues Jahr: ${data.year}`)
+    this.gameManager.on('propertyRenovated', (data: any) => {
+      this.showNotification(`🔨 ${data.property.name} renoviert!`, 0x3498db)
+      this.showRenovationEffect(data.property) // Renovierungs-Effekt
+      this.refreshPropertyDisplay()
     })
 
-    this.gameManager.on('timeSpeedChanged', (data: any) => {
-      this.updateSpeedDisplay(data.speed, data.isPaused)
+    this.gameManager.on('tenantMoved', (data: any) => {
+      if (data.type === 'in') {
+        this.showNotification(`👥 Neuer Mieter in ${data.property.name}`, 0x2ecc71)
+        this.showTenantEffect(data.property, true)
+      } else {
+        this.showNotification(`👋 Mieter ausgezogen aus ${data.property.name}`, 0xe74c3c)
+        this.showTenantEffect(data.property, false)
+      }
+      this.refreshPropertyDisplay()
     })
 
-    // Markt-Update Events
-    this.gameManager.on('newPropertiesAdded', (data: any) => {
-      this.showNotification(`🏠 ${data.count} neue Immobilien verfügbar!`, 0x2ecc71)
+    this.gameManager.on('propertiesAdded', (data: any) => {
+      this.showNotification(`📈 ${data.count} neue Immobilien am Markt`, 0x3498db)
       this.refreshPropertyDisplay()
     })
 
@@ -1125,122 +1419,142 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
     })
   }
 
-  private createBankPanel(width: number, height: number) {
-    // Bank-Panel Container
-    const bankContainer = this.add.container(width - 130, 520) // Angepasste Position
+  // ===== EFFEKT-METHODEN =====
+
+  private showMoneyEffect() {
+    const { width, height } = this.cameras.main
     
-    // Panel Hintergrund
-    const panelBg = this.add.rectangle(0, 0, 150, 150, 0x000000, 0.7) // Größer
-    panelBg.setStrokeStyle(2, 0x8e44ad) // Dickerer Rahmen
+    // Münzen-Partikel vom Info-Panel
+    const emitter = this.add.particles(width - 150, 150, 'coin-fallback', {
+      speed: { min: 50, max: 150 },
+      scale: { start: 0.3, end: 0 },
+      lifespan: 1000,
+      quantity: 5,
+      alpha: { start: 1, end: 0 },
+      gravityY: 100
+    })
     
-    // Bank Button
-    const bankButton = this.add.rectangle(0, -50, 130, 30, 0x8e44ad) // Größer
-    bankButton.setInteractive({ useHandCursor: true })
-    bankButton.setStrokeStyle(2, 0x9b59b6) // Dickerer Rahmen
-
-    const bankText = this.add.text(0, -50, '🏦 Bank', {
-      fontSize: '16px', // Größer
-      color: '#ffffff',
-      fontFamily: 'Arial, sans-serif'
+    // Automatisch nach 2 Sekunden stoppen
+    this.time.delayedCall(2000, () => {
+      emitter.destroy()
     })
-    bankText.setOrigin(0.5)
+  }
 
-    // Save/Load Button
-    const saveButton = this.add.rectangle(0, -15, 130, 30, 0x27ae60) // Größer
-    saveButton.setInteractive({ useHandCursor: true })
-    saveButton.setStrokeStyle(2, 0x2ecc71) // Dickerer Rahmen
-
-    const saveText = this.add.text(0, -15, '💾 Speichern', {
-      fontSize: '14px', // Größer
-      color: '#ffffff',
-      fontFamily: 'Arial, sans-serif'
-    })
-    saveText.setOrigin(0.5)
-
-    // Quick Save Button
-    const quickSaveButton = this.add.rectangle(0, 20, 130, 30, 0xf39c12) // Größer
-    quickSaveButton.setInteractive({ useHandCursor: true })
-    quickSaveButton.setStrokeStyle(2, 0xe67e22) // Dickerer Rahmen
-
-    const quickSaveText = this.add.text(0, 20, '⚡ Quick Save', {
-      fontSize: '13px', // Größer
-      color: '#ffffff',
-      fontFamily: 'Arial, sans-serif'
-    })
-    quickSaveText.setOrigin(0.5)
-
-    // Debug Button (for testing income)
-    const debugButton = this.add.rectangle(0, 55, 130, 30, 0xe74c3c) // Größer
-    debugButton.setInteractive({ useHandCursor: true })
-    debugButton.setStrokeStyle(2, 0xc0392b) // Dickerer Rahmen
-
-    const debugText = this.add.text(0, 55, '⚡ Next Month', {
-      fontSize: '13px', // Größer
-      color: '#ffffff',
-      fontFamily: 'Arial, sans-serif'
-    })
-    debugText.setOrigin(0.5)
-
-    bankButton.on('pointerdown', () => {
-      this.showBankDialog()
-    })
-
-    bankButton.on('pointerover', () => {
-      bankButton.setFillStyle(0x9b59b6)
-    })
-
-    bankButton.on('pointerout', () => {
-      bankButton.setFillStyle(0x8e44ad)
-    })
-
-    // Save Button Events
-    saveButton.on('pointerdown', () => {
-      this.showSaveLoadDialog()
-    })
-
-    saveButton.on('pointerover', () => {
-      saveButton.setFillStyle(0x2ecc71)
-    })
-
-    saveButton.on('pointerout', () => {
-      saveButton.setFillStyle(0x27ae60)
-    })
-
-    // Quick Save Events
-    quickSaveButton.on('pointerdown', () => {
-      if (this.gameManager.quickSave()) {
-        this.showNotification('Spiel gespeichert!', 0x27ae60)
-      } else {
-        this.showNotification('Fehler beim Speichern!', 0xe74c3c)
-      }
-    })
-
-    quickSaveButton.on('pointerover', () => {
-      quickSaveButton.setFillStyle(0xe67e22)
-    })
-
-    quickSaveButton.on('pointerout', () => {
-      quickSaveButton.setFillStyle(0xf39c12)
-    })
-
-    // Debug button events
-    debugButton.on('pointerdown', () => {
-      this.gameManager.forceAdvanceToNextMonth()
-    })
-
-    debugButton.on('pointerover', () => {
-      debugButton.setFillStyle(0xc0392b)
-    })
-
-    debugButton.on('pointerout', () => {
-      debugButton.setFillStyle(0xe74c3c)
-    })
-
-    // Elemente zum Container hinzufügen
-    bankContainer.add([panelBg, bankButton, bankText, saveButton, saveText, quickSaveButton, quickSaveText, debugButton, debugText])
+  private showPurchaseEffect(property: Property) {
+    const container = this.propertySprites.get(property.id)
+    if (!container) return
     
-    // Drag & Drop aktivieren
-    this.makeDraggable(bankContainer, panelBg, '🏦 Bank')
+    // Funkeln-Effekt
+    const sparkleEmitter = this.add.particles(container.x, container.y, 'sparkle-fallback', {
+      speed: { min: 20, max: 80 },
+      scale: { start: 0.5, end: 0 },
+      lifespan: 800,
+      quantity: 3,
+      alpha: { start: 1, end: 0 },
+      emitZone: { type: 'edge', source: new Phaser.Geom.Circle(0, 0, 40), quantity: 8 }
+    })
+    
+    // Kauf-Animation
+    this.tweens.add({
+      targets: container,
+      scaleX: 1.3,
+      scaleY: 1.3,
+      duration: 300,
+      yoyo: true,
+      ease: 'Back.easeOut'
+    })
+    
+    this.time.delayedCall(1500, () => {
+      sparkleEmitter.destroy()
+    })
+  }
+
+  private showSaleEffect(property: Property) {
+    const container = this.propertySprites.get(property.id)
+    if (!container) return
+    
+    // Geld-Effekt
+    const coinEmitter = this.add.particles(container.x, container.y, 'coin-fallback', {
+      speed: { min: 100, max: 200 },
+      scale: { start: 0.4, end: 0 },
+      lifespan: 1200,
+      quantity: 8,
+      alpha: { start: 1, end: 0 },
+      gravityY: 50,
+      emitZone: { type: 'edge', source: new Phaser.Geom.Circle(0, 0, 30), quantity: 12 }
+    })
+    
+    this.time.delayedCall(2000, () => {
+      coinEmitter.destroy()
+    })
+  }
+
+  private showRenovationEffect(property: Property) {
+    const container = this.propertySprites.get(property.id)
+    if (!container) return
+    
+    // Staub/Bau-Effekt
+    const dustEmitter = this.add.particles(container.x, container.y, 'sparkle-fallback', {
+      speed: { min: 30, max: 100 },
+      scale: { start: 0.2, end: 0 },
+      lifespan: 1500,
+      quantity: 2,
+      alpha: { start: 0.7, end: 0 },
+      tint: 0x8e44ad, // Lila für Renovierung
+      x: { min: -40, max: 40 },
+      y: { min: -40, max: 40 }
+    })
+    
+    // Renovierungs-Animation (Schütteln)
+    this.tweens.add({
+      targets: container,
+      x: container.x + 5,
+      duration: 100,
+      yoyo: true,
+      repeat: 5,
+      ease: 'Power2'
+    })
+    
+    this.time.delayedCall(2000, () => {
+      dustEmitter.destroy()
+    })
+  }
+
+  private showTenantEffect(property: Property, moveIn: boolean) {
+    const container = this.propertySprites.get(property.id)
+    if (!container) return
+    
+    if (moveIn) {
+      // Einzugs-Effekt (grüne Herzen)
+      const heartEmitter = this.add.particles(container.x, container.y, 'sparkle-fallback', {
+        speed: { min: 20, max: 60 },
+        scale: { start: 0.3, end: 0 },
+        lifespan: 1000,
+        quantity: 3,
+        alpha: { start: 1, end: 0 },
+        tint: 0x2ecc71, // Grün für Einzug
+        emitZone: { type: 'edge', source: new Phaser.Geom.Circle(0, 0, 25), quantity: 6 }
+      })
+      
+      this.time.delayedCall(1500, () => {
+        heartEmitter.destroy()
+      })
+    } else {
+      // Auszugs-Effekt (rote Partikel)
+      const sadEmitter = this.add.particles(container.x, container.y, 'sparkle-fallback', {
+        speed: { min: 40, max: 80 },
+        scale: { start: 0.2, end: 0 },
+        lifespan: 800,
+        quantity: 2,
+        alpha: { start: 0.8, end: 0 },
+        tint: 0xe74c3c, // Rot für Auszug
+        gravityY: 100
+      })
+      
+      this.time.delayedCall(1200, () => {
+        sadEmitter.destroy()
+      })
+    }
   }
 
   private updateSpeedDisplay(speed: TimeSpeed, isPaused: boolean) {
@@ -1309,6 +1623,16 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
   }
 
   private updatePortfolioDisplay(): void {
+    // Geld-Text im Info-Panel aktualisieren
+    const moneyText = this.infoPanelContainer?.list.find(child => 
+      child instanceof Phaser.GameObjects.Text && child.name === 'moneyText'
+    ) as Phaser.GameObjects.Text
+    
+    if (moneyText) {
+      const player = this.gameManager.getPlayer()
+      moneyText.setText(`💰 €${Math.round(player.money).toLocaleString('de-DE')}`)
+    }
+
     // Portfolio-Text im Info-Panel aktualisieren
     const portfolioText = this.infoPanelContainer?.list.find(child => 
       child instanceof Phaser.GameObjects.Text && child.name === 'portfolioText'
@@ -1316,7 +1640,18 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
     
     if (portfolioText) {
       const portfolioValue = this.calculatePortfolioValue()
-      portfolioText.setText(`Portfolio: €${Math.round(portfolioValue).toLocaleString('de-DE')}`)
+      portfolioText.setText(`🏠 Portfolio: €${Math.round(portfolioValue).toLocaleString('de-DE')}`)
+    }
+
+    // Einkommen-Text aktualisieren
+    const incomeText = this.infoPanelContainer?.list.find(child => 
+      child instanceof Phaser.GameObjects.Text && child.name === 'incomeText'
+    ) as Phaser.GameObjects.Text
+    
+    if (incomeText) {
+      const monthlyIncome = this.calculateMonthlyIncome()
+      incomeText.setText(`💵 Einkommen: €${Math.round(monthlyIncome).toLocaleString('de-DE')}/M`)
+      incomeText.setColor(monthlyIncome >= 0 ? '#2ecc71' : '#e74c3c')
     }
 
     // Markt-Text aktualisieren
@@ -1326,7 +1661,7 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
     
     if (marketText) {
       const availableCount = this.gameManager.getAvailableProperties().length
-      marketText.setText(`🏠 Markt: ${availableCount} Immobilien`)
+      marketText.setText(`🏪 Markt: ${availableCount} Immobilien`)
     }
   }
 
@@ -1663,4 +1998,4 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
     // Zeit-System wird jetzt vom GameManager verwaltet
     // Keine lokale Zeit-Schleife mehr nötig
   }
-} 
+}
