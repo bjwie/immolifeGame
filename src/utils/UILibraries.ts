@@ -28,7 +28,7 @@ export class UILibraries {
       duration: duration,
       close: true,
       gravity: "top",
-      position: "right",
+      position: "center",
       className: className,
       stopOnFocus: true,
       onClick: () => {} // Verhindert Auto-Close beim Click

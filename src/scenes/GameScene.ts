@@ -231,12 +231,28 @@ export class GameScene extends Phaser.Scene {
                           property.condition > 50 ? 0xf39c12 : 0xe74c3c
     const conditionBar = this.add.rectangle(-30, -35, 20, 4, conditionColor)
     
-    // Eigentümer-Indikator
+    // Eigentümer-Indikator mit Rahmen
     if (isOwned) {
+      // Goldener Rahmen um eigene Immobilien
+      const ownerFrame = this.add.rectangle(0, 0, 90, 90, 0x000000, 0) // Transparenter Inhalt
+      ownerFrame.setStrokeStyle(4, 0xf1c40f, 1) // Goldener Rahmen
+      container.add(ownerFrame)
+      
+      // Crown Icon
       const crownIcon = this.add.text(-40, -45, '👑', {
         fontSize: '16px'
       })
       container.add(crownIcon)
+      
+      // Zusätzlicher "MEIN" Text
+      const ownedText = this.add.text(0, -55, 'MEIN', {
+        fontSize: '10px',
+        color: '#f1c40f',
+        fontFamily: 'Arial, sans-serif',
+        fontStyle: 'bold'
+      })
+      ownedText.setOrigin(0.5)
+      container.add(ownedText)
     }
     
     // Vermietungs-Status
@@ -1086,13 +1102,40 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
     // Container für alle Elemente
     const elements = [panelBg, titleText, pauseButton, pauseText, speedLabel]
 
-    // Geschwindigkeits-Buttons - 3x2 Grid Layout
+    // "Nächsten Monat" Button - oben
+    const nextMonthButton = this.add.rectangle(0, -25, 180, 22, 0x2ecc71)
+    nextMonthButton.setInteractive({ useHandCursor: true })
+    nextMonthButton.setStrokeStyle(1, 0x27ae60)
+
+    const nextMonthText = this.add.text(0, -25, '⏭️ Nächsten Monat', {
+      fontSize: '11px',
+      color: '#ffffff',
+      fontFamily: 'Arial, sans-serif',
+      fontStyle: 'bold'
+    })
+    nextMonthText.setOrigin(0.5)
+
+    nextMonthButton.on('pointerdown', () => {
+      this.gameManager.forceAdvanceToNextMonth()
+    })
+
+    nextMonthButton.on('pointerover', () => {
+      nextMonthButton.setFillStyle(0x27ae60)
+    })
+
+    nextMonthButton.on('pointerout', () => {
+      nextMonthButton.setFillStyle(0x2ecc71)
+    })
+
+    elements.push(nextMonthButton, nextMonthText)
+
+    // Geschwindigkeits-Buttons - 3x2 Grid Layout  
     const speeds = [
-      { speed: TimeSpeed.SLOW, label: '🐌 0.5x', x: -60, y: 5 },
-      { speed: TimeSpeed.NORMAL, label: '🚶 1x', x: 0, y: 5 },
-      { speed: TimeSpeed.FAST, label: '🏃 2x', x: 60, y: 5 },
-      { speed: TimeSpeed.VERY_FAST, label: '🚀 4x', x: -30, y: 35 },
-      { speed: TimeSpeed.ULTRA_FAST, label: '⚡ 8x', x: 30, y: 35 }
+      { speed: TimeSpeed.SLOW, label: '🐌 0.5x', x: -60, y: 15 },
+      { speed: TimeSpeed.NORMAL, label: '🚶 1x', x: 0, y: 15 },
+      { speed: TimeSpeed.FAST, label: '🏃 2x', x: 60, y: 15 },
+      { speed: TimeSpeed.VERY_FAST, label: '🚀 4x', x: -30, y: 45 },
+      { speed: TimeSpeed.ULTRA_FAST, label: '⚡ 8x', x: 30, y: 45 }
     ]
 
     speeds.forEach(({ speed, label, x, y }) => {
