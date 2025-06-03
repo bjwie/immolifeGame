@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ImmoLife - Immobilien Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #1a1a1a;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+        
+        #game-container {
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        canvas {
+            display: block;
+        }
+        
+        #ui-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 14px;
+            pointer-events: none;
+        }
+        
+        .money {
+            color: #4CAF50;
+            font-weight: bold;
+        }
+        
+        .property-count {
+            color: #2196F3;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container"></div>
+    
+    <div id="ui-overlay">
+        <div>💰 Geld: <span class="money" id="money">€50.000</span></div>
+        <div>🏠 Immobilien: <span class="property-count" id="properties">0</span></div>
+        <div>📊 Monatseinkommen: <span class="money" id="income">€0</span></div>
+    </div>
+    
+    <script type="module" src="/src/main.ts"></script>
+</body>
+</html> 
