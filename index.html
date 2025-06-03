@@ -5,6 +5,12 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ImmoLife - Immobilien Simulation</title>
+    
+    <!-- External Library CSS -->
+    <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/toastify-js/src/toastify.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.min.css">
+    <link rel="stylesheet" href="https://unpkg.com/tippy.js@6/dist/tippy.css">
+    
     <style>
         body {
             margin: 0;
@@ -45,10 +51,136 @@
             color: #2196F3;
             font-weight: bold;
         }
+        
+        /* Portfolio Chart Container */
+        #portfolio-chart-container {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 300px;
+            height: 200px;
+            background: rgba(0, 0, 0, 0.8);
+            border-radius: 8px;
+            padding: 15px;
+            z-index: 1001;
+            display: none;
+        }
+        
+        #portfolio-chart-container h3 {
+            color: white;
+            margin: 0 0 10px 0;
+            font-size: 16px;
+        }
+        
+        #portfolio-chart {
+            width: 100%;
+            height: 150px;
+        }
+        
+        /* Custom Toastify Styles */
+        .toastify.success {
+            background: linear-gradient(to right, #00b09b, #96c93d) !important;
+        }
+        
+        .toastify.error {
+            background: linear-gradient(to right, #ff5f6d, #ffc371) !important;
+        }
+        
+        .toastify.info {
+            background: linear-gradient(to right, #667eea, #764ba2) !important;
+        }
+        
+        .toastify.warning {
+            background: linear-gradient(to right, #f093fb, #f5576c) !important;
+        }
+        
+        /* Custom Tippy.js Themes */
+        .tippy-box[data-theme~='property'] {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        
+        .tippy-box[data-theme~='property'] .tippy-content {
+            padding: 15px;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+        
+        .tippy-box[data-theme~='success'] {
+            background: linear-gradient(135deg, #2ecc71 0%, #27ae60 100%);
+            border-radius: 8px;
+        }
+        
+        .tippy-box[data-theme~='warning'] {
+            background: linear-gradient(135deg, #f39c12 0%, #e67e22 100%);
+            border-radius: 8px;
+        }
+        
+        .tippy-box[data-theme~='info'] {
+            background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+            border-radius: 8px;
+        }
+        
+        .tippy-box[data-theme~='game'] {
+            background: linear-gradient(135deg, #8e44ad 0%, #9b59b6 100%);
+            border-radius: 10px;
+            border: 2px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .tippy-box[data-theme~='game'] .tippy-content {
+            padding: 12px;
+            font-size: 13px;
+        }
+        
+        /* Property Popover Content Styling */
+        .property-popover {
+            max-width: 280px;
+        }
+        
+        .property-popover .header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .property-popover .icon {
+            font-size: 20px;
+            margin-right: 8px;
+        }
+        
+        .property-popover .stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 8px;
+        }
+        
+        .property-popover .stat {
+            font-size: 11px;
+            opacity: 0.9;
+        }
+        
+        .property-popover .highlight {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 6px 8px;
+            border-radius: 4px;
+            margin-top: 8px;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
-    <div id="game-container"></div>   
+    <div id="game-container"></div>
+    
+    <!-- Portfolio Chart Container -->
+    <div id="portfolio-chart-container">
+        <h3>📊 Portfolio Entwicklung</h3>
+        <canvas id="portfolio-chart"></canvas>
+    </div>
+    
     <script type="module" src="/src/main.ts"></script>
 </body>
 </html> 

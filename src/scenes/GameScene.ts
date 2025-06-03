@@ -1,6 +1,7 @@
 import Phaser from 'phaser'
 import { GameManager } from '../managers/GameManager'
 import { Property, PropertyType, TimeSpeed, MarketTrend, GameTime } from '../types/GameTypes'
+import { UILibraries } from '../utils/UILibraries'
 
 export class GameScene extends Phaser.Scene {
   private gameManager!: GameManager
@@ -126,8 +127,16 @@ export class GameScene extends Phaser.Scene {
     // Keyboard Shortcuts
     this.setupKeyboardShortcuts()
 
-    // Zeit-System starten
+    // Zeit-System starten und sicherstellen, dass es läuft
     this.startTimeSystem()
+    
+    // GameManager Zeit-System sicherstellen
+    this.gameManager.resumeTimeSystem()
+  }
+
+  shutdown() {
+    // Alle Popovers beim Verlassen der Szene entfernen
+    UILibraries.removeAllPopovers()
   }
 
   private handleResize(gameSize: any) {
@@ -150,7 +159,7 @@ export class GameScene extends Phaser.Scene {
     const rows = 4
     const marginX = width * 0.08
     const marginY = height * 0.08 // Weniger Abstand oben
-    const bottomUISpace = 250 // Platz für UI-Panels unten
+    const bottomUISpace = 280 // Mehr Platz für UI-Panels unten
     const usableHeight = height - marginY - bottomUISpace
     const spacingX = (width - 2 * marginX) / (cols - 1)
     const spacingY = usableHeight / (rows - 1)
@@ -185,7 +194,7 @@ export class GameScene extends Phaser.Scene {
     const rows = Math.ceil(20 / cols)
     const marginX = width * 0.08
     const marginY = height * 0.08 // Weniger Abstand oben
-    const bottomUISpace = 250 // Platz für UI-Panels unten
+    const bottomUISpace = 280 // Mehr Platz für UI-Panels unten
     const usableHeight = height - marginY - bottomUISpace
     const spacingX = (width - 2 * marginX) / (cols - 1)
     const spacingY = usableHeight / (rows - 1)
@@ -263,7 +272,9 @@ export class GameScene extends Phaser.Scene {
       this.selectProperty(property, isOwned)
     })
 
-    // Hover Effekte mit Animationen
+    // Hover Effekte mit Animationen und Tippy.js Popover
+    let popoverInstance: any = null
+    
     container.on('pointerover', () => {
       // Hover-Animation
       this.tweens.add({
@@ -275,7 +286,30 @@ export class GameScene extends Phaser.Scene {
       })
       
       this.input.setDefaultCursor('pointer')
-      this.showPropertyTooltip(property, container.x, container.y - 80)
+      
+      // Tippy.js Popover erstellen
+      if (!popoverInstance) {
+        popoverInstance = UILibraries.createPropertyPopover(
+          this.sys.canvas, 
+          property, 
+          isOwned
+        )
+        
+        // Position dynamisch setzen basierend auf Maus-Position
+        popoverInstance.setProps({
+          getReferenceClientRect: () => ({
+            width: 0,
+            height: 0,
+            top: this.input.activePointer.worldY - 100,
+            bottom: this.input.activePointer.worldY - 100,
+            left: this.input.activePointer.worldX,
+            right: this.input.activePointer.worldX,
+          })
+        })
+        
+        UILibraries.registerPopover(`property_${property.id}`, popoverInstance)
+        popoverInstance.show()
+      }
     })
 
     container.on('pointerout', () => {
@@ -289,7 +323,14 @@ export class GameScene extends Phaser.Scene {
       })
       
       this.input.setDefaultCursor('default')
-      this.hidePropertyTooltip()
+      
+      // Popover entfernen
+      if (popoverInstance) {
+        popoverInstance.hide()
+        popoverInstance.destroy()
+        popoverInstance = null
+        UILibraries.removePopover(`property_${property.id}`)
+      }
     })
 
     this.propertySprites.set(property.id, container)
@@ -312,49 +353,49 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private showPropertyTooltip(property: Property, x: number, y: number) {
-    // Markt-Informationen berechnen
-    const currentMonth = this.gameManager.getGameTime().month + (this.gameManager.getGameTime().year - 2024) * 12
-    const monthsOnMarket = currentMonth - property.marketEntryMonth
-    const monthsRemaining = property.marketLifetime - monthsOnMarket
-    
-    // Tooltip Box - größer
-    const tooltip = this.add.rectangle(x, y, 320, 150, 0x2c3e50, 0.9) // Größer
-    tooltip.setStrokeStyle(3, 0x3498db) // Dickerer Rahmen
-    tooltip.setName('tooltip')
 
-    // Tooltip Text mit Markt-Info
-    const marketInfo = monthsRemaining > 0 
-      ? `Noch ${monthsRemaining} Monat(e) verfügbar`
-      : 'Bald vom Markt genommen'
-    
-    const tooltipText = `${property.name}\n${property.location.district}\nZustand: ${Math.round(property.condition)}%\n${property.isRented ? 'Vermietet' : 'Leer'}\n${marketInfo}`
-    
-    const text = this.add.text(x, y, tooltipText, {
-      fontSize: '16px', // Größer
-      color: '#ecf0f1',
-      fontFamily: 'Arial, sans-serif',
-      align: 'center'
-    })
-    text.setOrigin(0.5)
-    text.setName('tooltipText')
-  }
 
-  private hidePropertyTooltip() {
-    const tooltip = this.children.getByName('tooltip')
-    const tooltipText = this.children.getByName('tooltipText')
-    
-    if (tooltip) tooltip.destroy()
-    if (tooltipText) tooltipText.destroy()
-  }
-
-  private selectProperty(property: Property, isOwned: boolean) {
+  private async selectProperty(property: Property, isOwned: boolean) {
     this.selectedProperty = property
     
-    if (isOwned) {
-      this.showOwnedPropertyDialog(property)
-    } else {
-      this.showBuyPropertyDialog(property)
+    // Verwende neue moderne UI Library
+    const result = await UILibraries.showPropertyDialog(property, isOwned)
+    
+    switch (result) {
+      case 'buy':
+        if (this.gameManager.buyProperty(property.id)) {
+          this.refreshPropertyDisplay()
+          this.updatePortfolioDisplay()
+        }
+        break
+      case 'sell':
+        const confirmed = await UILibraries.showConfirmDialog(
+          '💸 Immobilie verkaufen?',
+          `Möchten Sie ${property.name} wirklich verkaufen? Sie erhalten ca. 90% des aktuellen Wertes.`,
+          'Verkaufen',
+          'Abbrechen'
+        )
+        if (confirmed && this.gameManager.sellProperty(property.id)) {
+          this.refreshPropertyDisplay()
+          this.updatePortfolioDisplay()
+        }
+        break
+             case 'renovate':
+         const renovations = this.gameManager.getRenovationOptions(property.id)
+         const selectedRenovation = await UILibraries.showRenovationDialog(renovations)
+         if (selectedRenovation && this.gameManager.renovateProperty(property.id, selectedRenovation)) {
+           this.refreshPropertyDisplay()
+         }
+         break
+      case 'tenant':
+        const tenant = this.gameManager.findTenant(property.id)
+        if (tenant) {
+          this.gameManager.rentToTenant(property.id, tenant)
+          this.refreshPropertyDisplay()
+        } else {
+          UILibraries.showToast('❌ Kein geeigneter Mieter gefunden', 'error')
+        }
+        break
     }
   }
 
@@ -911,7 +952,7 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
 
   private createInfoPanel(width: number, height: number) {
     // Info-Panel Container erstellen - unten links
-    this.infoPanelContainer = this.add.container(140, height - 90)
+    this.infoPanelContainer = this.add.container(140, height - 160)
     
     // Panel Hintergrund - kompakter
     const panelBg = this.add.rectangle(0, 0, 260, 160, 0x000000, 0.85)
@@ -1001,7 +1042,7 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
 
   private createTimeControlPanel(width: number, height: number) {
     // Zeit-Panel Container erstellen - unten mitte
-    this.timePanelContainer = this.add.container(width / 2, height - 110)
+    this.timePanelContainer = this.add.container(width / 2, height - 120)
     
     const panelWidth = 260
     const panelHeight = 200
@@ -1105,7 +1146,7 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
 
   private createBankPanel(width: number, height: number) {
     // Bank-Panel Container - unten rechts
-    const bankContainer = this.add.container(width - 140, height - 80)
+    const bankContainer = this.add.container(width - 140, height - 100)
     
     // Panel Hintergrund - kompakter
     const panelBg = this.add.rectangle(0, 0, 260, 140, 0x000000, 0.85)
@@ -1156,17 +1197,17 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
     })
     quickSaveText.setOrigin(0.5)
 
-    // Debug Button (for testing income)
-    const debugButton = this.add.rectangle(60, 35, 90, 25, 0xe74c3c)
-    debugButton.setInteractive({ useHandCursor: true })
-    debugButton.setStrokeStyle(1, 0xc0392b)
+    // Chart Toggle Button
+    const chartButton = this.add.rectangle(60, 35, 90, 25, 0x3498db)
+    chartButton.setInteractive({ useHandCursor: true })
+    chartButton.setStrokeStyle(1, 0x2980b9)
 
-    const debugText = this.add.text(60, 35, '⚡ Next Month', {
+    const chartText = this.add.text(60, 35, '📊 Chart', {
       fontSize: '10px',
       color: '#ffffff',
       fontFamily: 'Arial, sans-serif'
     })
-    debugText.setOrigin(0.5)
+    chartText.setOrigin(0.5)
 
     // Events
     bankButton.on('pointerdown', () => {
@@ -1195,9 +1236,9 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
 
     quickSaveButton.on('pointerdown', () => {
       if (this.gameManager.quickSave()) {
-        this.showNotification('Spiel gespeichert!', 0x27ae60)
+        UILibraries.showToast('💾 Spiel gespeichert!', 'success')
       } else {
-        this.showNotification('Fehler beim Speichern!', 0xe74c3c)
+        UILibraries.showToast('❌ Fehler beim Speichern!', 'error')
       }
     })
 
@@ -1209,20 +1250,32 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
       quickSaveButton.setFillStyle(0xf39c12)
     })
 
-    debugButton.on('pointerdown', () => {
-      this.gameManager.forceAdvanceToNextMonth()
+    chartButton.on('pointerdown', () => {
+      // Chart anzeigen/verstecken
+      const container = document.getElementById('portfolio-chart-container') as HTMLElement
+      if (container) {
+        if (container.style.display === 'none' || container.style.display === '') {
+          const player = this.gameManager.getPlayer()
+          const currentMonth = this.gameManager.getCurrentMonth()
+          UILibraries.updatePortfolioChart(player, currentMonth)
+          UILibraries.showToast('📊 Portfolio Chart angezeigt', 'info')
+        } else {
+          UILibraries.hidePortfolioChart()
+          UILibraries.showToast('📊 Portfolio Chart versteckt', 'info')
+        }
+      }
     })
 
-    debugButton.on('pointerover', () => {
-      debugButton.setFillStyle(0xc0392b)
+    chartButton.on('pointerover', () => {
+      chartButton.setFillStyle(0x2980b9)
     })
 
-    debugButton.on('pointerout', () => {
-      debugButton.setFillStyle(0xe74c3c)
+    chartButton.on('pointerout', () => {
+      chartButton.setFillStyle(0x3498db)
     })
 
     // Elemente zum Container hinzufügen
-    bankContainer.add([panelBg, titleText, bankButton, bankText, saveButton, saveText, quickSaveButton, quickSaveText, debugButton, debugText])
+    bankContainer.add([panelBg, titleText, bankButton, bankText, saveButton, saveText, quickSaveButton, quickSaveText, chartButton, chartText])
     
     // Drag & Drop aktivieren
     this.makeDraggable(bankContainer, panelBg, '🏦 Aktionen')
@@ -1293,7 +1346,8 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
   }
 
   private togglePause() {
-    this.isPaused = !this.isPaused
+    // Entfernt - wird jetzt vom GameManager verwaltet
+    this.gameManager.togglePause()
   }
 
   private showBankDialog() {
@@ -1357,53 +1411,58 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
 
   private setupEventListeners() {
     // GameManager Events
-    this.gameManager.on('timeUpdated', (gameTime: GameTime) => {
+    this.gameManager.on('dayAdvanced', (data: any) => {
       this.timeText.setText(this.gameManager.getFormattedDate())
     })
 
-    this.gameManager.on('monthPassed', () => {
-      this.updatePortfolioDisplay()
-      this.showMoneyEffect() // Geld-Effekt bei Monatsende
+    // Speed und Pause Events hinzufügen
+    this.gameManager.on('timeSpeedChanged', (data: any) => {
+      this.updateSpeedDisplay(data.speed, data.isPaused)
     })
 
-    this.gameManager.on('propertyPurchased', (data: any) => {
-      this.showNotification(`🏠 ${data.property.name} gekauft!`, 0x2ecc71)
-      this.showPurchaseEffect(data.property) // Kauf-Effekt
+    this.gameManager.on('monthAdvanced', (data: any) => {
+      this.updatePortfolioDisplay()
+      this.showMoneyEffect() // Geld-Effekt bei Monatsende
+      
+      // Portfolio Chart aktualisieren
+      const player = this.gameManager.getPlayer()
+      const currentMonth = this.gameManager.getCurrentMonth()
+      UILibraries.updatePortfolioChart(player, currentMonth)
+    })
+
+    this.gameManager.on('propertyBought', (property: Property) => {
+      UILibraries.showToast(`🏠 ${property.name} gekauft!`, 'success')
+      this.showPurchaseEffect(property) // Kauf-Effekt
       this.refreshPropertyDisplay()
       this.updatePortfolioDisplay()
     })
 
-    this.gameManager.on('propertySold', (data: any) => {
-      this.showNotification(`💰 ${data.property.name} verkauft für €${data.salePrice.toLocaleString()}!`, 0xf39c12)
-      this.showSaleEffect(data.property) // Verkaufs-Effekt
+    this.gameManager.on('propertySold', (property: Property) => {
+      UILibraries.showToast(`💰 ${property.name} verkauft!`, 'info')
+      this.showSaleEffect(property) // Verkaufs-Effekt
       this.refreshPropertyDisplay()
       this.updatePortfolioDisplay()
     })
 
     this.gameManager.on('propertyRenovated', (data: any) => {
-      this.showNotification(`🔨 ${data.property.name} renoviert!`, 0x3498db)
+      UILibraries.showToast(`🔨 ${data.property.name} renoviert!`, 'success')
       this.showRenovationEffect(data.property) // Renovierungs-Effekt
       this.refreshPropertyDisplay()
     })
 
-    this.gameManager.on('tenantMoved', (data: any) => {
-      if (data.type === 'in') {
-        this.showNotification(`👥 Neuer Mieter in ${data.property.name}`, 0x2ecc71)
-        this.showTenantEffect(data.property, true)
-      } else {
-        this.showNotification(`👋 Mieter ausgezogen aus ${data.property.name}`, 0xe74c3c)
-        this.showTenantEffect(data.property, false)
-      }
+    this.gameManager.on('propertyRented', (data: any) => {
+      UILibraries.showToast(`👥 Neuer Mieter in ${data.property.name}`, 'success')
+      this.showTenantEffect(data.property, true)
       this.refreshPropertyDisplay()
     })
 
-    this.gameManager.on('propertiesAdded', (data: any) => {
-      this.showNotification(`📈 ${data.count} neue Immobilien am Markt`, 0x3498db)
+    this.gameManager.on('newPropertiesAdded', (data: any) => {
+      UILibraries.showToast(`📈 ${data.count} neue Immobilien am Markt`, 'info')
       this.refreshPropertyDisplay()
     })
 
     this.gameManager.on('propertiesRemoved', (data: any) => {
-      this.showNotification(`📤 ${data.count} Immobilien vom Markt genommen`, 0xf39c12)
+      UILibraries.showToast(`📤 ${data.count} Immobilien vom Markt genommen`, 'warning')
       this.refreshPropertyDisplay()
     })
 
@@ -1762,7 +1821,7 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
         slotBox.on('pointerdown', () => {
           const slotName = `save_${i + 1}`
           if (this.gameManager.saveGame(slotName)) {
-            this.showNotification(`Gespeichert in Slot ${i + 1}!`, 0x27ae60)
+            UILibraries.showToast(`💾 Gespeichert in Slot ${i + 1}!`, 'success')
             this.closeSaveLoadDialog()
           }
         })
@@ -1821,7 +1880,7 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
         // Events
         loadBtn.on('pointerdown', () => {
           if (this.gameManager.loadGame(slot.name)) {
-            this.showNotification('Spiel geladen!', 0x27ae60)
+            UILibraries.showToast('📂 Spiel geladen!', 'success')
             this.closeSaveLoadDialog()
             this.refreshPropertyDisplay()
           }
@@ -1829,7 +1888,7 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
 
         deleteBtn.on('pointerdown', () => {
           if (this.gameManager.deleteSave(slot.name)) {
-            this.showNotification('Spielstand gelöscht!', 0xf39c12)
+            UILibraries.showToast('🗑️ Spielstand gelöscht!', 'info')
             this.closeSaveLoadDialog()
             this.showSaveLoadDialog() // Dialog neu öffnen
           }
@@ -1856,7 +1915,7 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
     newGameButton.on('pointerdown', () => {
       // Neues Spiel starten
       this.gameManager.startNewGame()
-      this.showNotification('Neues Spiel gestartet!', 0x2ecc71)
+      UILibraries.showToast('🆕 Neues Spiel gestartet!', 'success')
       this.closeSaveLoadDialog()
       this.refreshPropertyDisplay()
       this.updatePortfolioDisplay()
@@ -1865,7 +1924,7 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
     manualSaveButton.on('pointerdown', () => {
       const timestamp = new Date().toISOString().slice(0, 19).replace(/[:-]/g, '')
       if (this.gameManager.saveGame(`manual_${timestamp}`)) {
-        this.showNotification('Manuell gespeichert!', 0x27ae60)
+        UILibraries.showToast('💾 Manuell gespeichert!', 'success')
         this.closeSaveLoadDialog()
       }
     })
@@ -1956,7 +2015,7 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
     // F5 - Quick Save
     this.input.keyboard?.on('keydown-F5', () => {
       if (this.gameManager.quickSave()) {
-        this.showNotification('Quick Save erstellt!', 0x27ae60)
+        UILibraries.showToast('⚡ Quick Save erstellt!', 'success')
       }
     })
 
@@ -1966,10 +2025,10 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
       const quickSave = saveSlots.find(slot => slot.name.startsWith('quicksave_'))
       
       if (quickSave && this.gameManager.loadGame(quickSave.name)) {
-        this.showNotification('Quick Load erfolgreich!', 0x3498db)
+        UILibraries.showToast('⚡ Quick Load erfolgreich!', 'success')
         this.refreshPropertyDisplay()
       } else {
-        this.showNotification('Kein Quick Save gefunden!', 0xe74c3c)
+        UILibraries.showToast('❌ Kein Quick Save gefunden!', 'error')
       }
     })
 
@@ -1996,6 +2055,14 @@ Netto-Einkommen: €${property.monthlyRent - property.maintenanceCost}/Monat`
 
   private startTimeSystem() {
     // Zeit-System wird jetzt vom GameManager verwaltet
-    // Keine lokale Zeit-Schleife mehr nötig
+    // Sicherstellen, dass es läuft
+    const timeSettings = this.gameManager.getTimeSettings()
+    
+    // Initiale UI-Updates
+    this.updateSpeedDisplay(timeSettings.speed, timeSettings.isPaused)
+    this.timeText.setText(this.gameManager.getFormattedDate())
+    this.updatePortfolioDisplay()
+    
+    console.log('Zeit-System gestartet:', timeSettings)
   }
 }
