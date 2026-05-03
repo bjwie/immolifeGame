@@ -129,6 +129,20 @@ export interface Property {
   /** When this property is just one unit inside a larger building (= player only owns part),
    *  this membership info enables Hausgeld + Eigentuemerversammlung. */
   wegMembership?: WEGMembership
+  /** Optional Hausverwaltung (M8). When hired, the property auto-pays capex (if
+   *  cash allows), auto-finds tenants for vacant units, and auto-starts eviction
+   *  on chronic non-payers — at the cost of a monthly fee. */
+  management?: PropertyManagement
+}
+
+export interface PropertyManagement {
+  hiredMonth: number
+  /** Auto-pay pendingCapex when cash >= cost. */
+  autoCapex: boolean
+  /** Auto-pick & sign a tenant for vacant units after 1+ month of vacancy. */
+  autoTenant: boolean
+  /** Auto-startEviction once a tenant is 3+ months behind / outed nomad. */
+  autoEviction: boolean
 }
 
 export interface Loan {

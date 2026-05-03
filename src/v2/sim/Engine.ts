@@ -383,6 +383,9 @@ export class Engine {
       // Hausgeld for WEG members (when player only owns part of the building)
       if (p.wegMembership) expenses += p.wegMembership.hausgeldMonthly
 
+      // Hausverwaltung (M8): fee + auto-tasks (capex / tenant / eviction)
+      if (p.management) expenses += this.runManagement(p, rng)
+
       // capex roll — major repairs based on age + condition
       this.tickCapex(p, rng)
 
@@ -1406,6 +1409,90 @@ export class Engine {
     a.decided = true
     this.autoSave()
     return { ok: true }
+  }
+
+  // ============ HAUSVERWALTUNG (M8) ============
+
+  /** Compute the monthly Hausverwaltung fee for a property: 5% of total Kaltmiete,
+   *  with an 80€/Monat minimum so even tiny rentals cost something. */
+  managementFeeFor(p: Property): number {
+    const totalKalt = p.units.reduce((s, u) => s + u.baseKalt, 0)
+    return Math.max(80, Math.round(totalKalt * 0.05))
+  }
+
+  hireManagement(propertyId: string): { ok: boolean; reason?: string; fee?: number } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    if (p.management) return { ok: false, reason: 'Verwaltung bereits beauftragt' }
+    p.management = {
+      hiredMonth: this.gameMonth(),
+      autoCapex: true,
+      autoTenant: true,
+      autoEviction: true,
+    }
+    const fee = this.managementFeeFor(p)
+    this.emit('toast', { kind: 'success', text: `Hausverwaltung fuer ${this.nameFor(p)} beauftragt — ${formatEuro(fee)}/M.` })
+    this.autoSave()
+    return { ok: true, fee }
+  }
+
+  cancelManagement(propertyId: string): { ok: boolean; reason?: string } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    if (!p.management) return { ok: false, reason: 'Keine Verwaltung beauftragt' }
+    p.management = undefined
+    this.emit('toast', { kind: 'info', text: `Hausverwaltung fuer ${this.nameFor(p)} gekuendigt.` })
+    this.autoSave()
+    return { ok: true }
+  }
+
+  /** Run the Hausverwaltung's automations once per property per month. Returns the
+   *  monthly fee (already deducted from cash by the caller). */
+  private runManagement(p: Property, rng: () => number): number {
+    const m = p.management
+    if (!m) return 0
+    const fee = this.managementFeeFor(p)
+
+    // 1. Auto-pay capex if affordable. Skip if it'd push us under 5k cash buffer.
+    if (m.autoCapex && p.pendingCapex && this.state.player.cash >= p.pendingCapex.cost + 5000) {
+      const capName = p.pendingCapex.title
+      const r = this.payCapex(p.id)
+      if (r.ok) this.emit('toast', { kind: 'info', text: `Verwaltung: ${capName} bezahlt (${this.nameFor(p)}).` })
+    }
+
+    // 2. Auto-eviction on chronic non-payers / outed nomads.
+    if (m.autoEviction) {
+      for (const u of p.units) {
+        const t = u.tenant
+        if (!t) continue
+        const isOutedNomad = t.personality === 'nomad' && !t.disguisePersonality
+        if ((t.monthsBehind >= 3 || isOutedNomad) && !this.state.lawsuits.some(l => l.propertyId === p.id && l.tenantId === t.id && l.outcome === 'pending')) {
+          const r = this.startEviction(p.id, u.id)
+          if (r.ok) this.emit('toast', { kind: 'info', text: `Verwaltung: Raeumungsklage gegen ${t.name} eingeleitet.` })
+        }
+      }
+    }
+
+    // 3. Auto-tenant: pick the best applicant once a unit has been vacant 1+ month.
+    if (m.autoTenant) {
+      for (const u of p.units) {
+        if (u.tenant) continue
+        if (u.vacantMonths < 1) continue  // give the player a month to react first
+        const askingKalt = u.baseKalt
+        const apps = this.getApplicants(p.id, askingKalt, 5)
+        if (apps.length === 0) continue
+        // Pick the highest reliability that fits the warm budget. Avoid obvious
+        // nomad-suspects when possible (we don't see secretPersonality, but we
+        // can prefer disguise candidates with believable income/reliability).
+        apps.sort((a, b) => b.reliability - a.reliability)
+        const pick = apps[0]
+        const leaseMonths = pick.preferredLeaseMonths
+        const r = this.signLease(p.id, pick, askingKalt, leaseMonths, u.id)
+        if (r.ok) this.emit('toast', { kind: 'info', text: `Verwaltung: ${pick.name} eingezogen in ${this.nameFor(p)} (${u.label}).` })
+      }
+    }
+    void rng
+    return fee
   }
 
   /** Tick the active renovation: advance current step, complete steps, roll risks. */

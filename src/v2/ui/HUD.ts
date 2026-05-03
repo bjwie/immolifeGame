@@ -112,6 +112,15 @@ export class HUD {
       chip.title = `${s.player.schwarzJobsThisYear} Schwarzarbeit-Jobs in diesem Jahr — Audit-Risiko steigt mit jedem. Reset im Januar.\nGesamt: ${s.player.totalSchwarzJobs} · Audits erlebt: ${s.player.taxAuditsExperienced}`
       events.appendChild(chip)
     }
+    const managed = s.owned.filter(p => p.management)
+    if (managed.length > 0) {
+      const chip = document.createElement('div')
+      chip.className = 'event-chip mgmt'
+      const totalFee = managed.reduce((sum, p) => sum + this.engine.managementFeeFor(p), 0)
+      chip.textContent = `🏢 ${managed.length} Verwaltung (${formatEuro(totalFee)}/M)`
+      chip.title = managed.map(p => `${this.engine.nameFor(p)} — ${formatEuro(this.engine.managementFeeFor(p))}/M`).join('\n')
+      events.appendChild(chip)
+    }
     const pendingWeg = s.wegAssemblies.filter(a => !a.decided)
     if (pendingWeg.length > 0) {
       const chip = document.createElement('div')

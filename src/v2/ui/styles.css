@@ -103,6 +103,16 @@ body {
 .event-chip.reno { border-color: var(--accent); background: rgba(78, 180, 224, 0.12); }
 .event-chip.schwarz { border-color: #6e6e6e; background: rgba(110, 110, 110, 0.18); color: #cccccc; }
 .event-chip.weg { border-color: var(--accent-2); background: rgba(132, 92, 242, 0.12); }
+.event-chip.mgmt { border-color: var(--good); background: rgba(95, 220, 120, 0.12); }
+
+.mgmt-card {
+  background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 10px; padding: 12px; margin-bottom: 14px;
+}
+.mgmt-card.active { background: rgba(95, 220, 120, 0.08); border-color: rgba(95, 220, 120, 0.45); }
+.mgmt-card.active .card-title { color: var(--good); }
+.mgmt-card .micro { margin-bottom: 6px; }
+.mgmt-card button { margin-top: 6px; width: auto; }
 
 /* =========== Toasts =========== */
 

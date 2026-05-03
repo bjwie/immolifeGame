@@ -478,6 +478,23 @@ export class DealSheet {
       </div>
     ` : ''
 
+    const mgmtFee = this.engine.managementFeeFor(p)
+    const mgmtHtml = p.management ? `
+      <div class="mgmt-card active">
+        <div class="card-title">🏢 HAUSVERWALTUNG AKTIV</div>
+        <div class="micro">Auto-Capex · Auto-Bewerbersuche · Auto-Raeumungsklage. Beauftragt seit ${p.management.hiredMonth} Mon.</div>
+        <div class="fin-row"><span>Monatliche Gebuehr</span><b>${formatEuro(mgmtFee)}/M</b></div>
+        <button class="ghost small" data-cancel-mgmt>Verwaltung kuendigen</button>
+      </div>
+    ` : `
+      <div class="mgmt-card">
+        <div class="card-title">HAUSVERWALTUNG</div>
+        <div class="micro">Eine professionelle Verwaltung uebernimmt: Capex automatisch zahlen, vakante Wohnungen nachvermieten, bei Mietnomaden Raeumungsklage einleiten.</div>
+        <div class="fin-row"><span>Gebuehr (5% Kaltmiete, min 80€)</span><b>${formatEuro(mgmtFee)}/M</b></div>
+        <button class="primary small" data-hire-mgmt>Hausverwaltung beauftragen</button>
+      </div>
+    `
+
     this.root.querySelector('#ds-actions')!.innerHTML = `
       ${wegHtml}
       ${capexHtml}
@@ -488,6 +505,7 @@ export class DealSheet {
       ${renoBoxHtml}
       ${wgHtml}
       ${umlageHtml}
+      ${mgmtHtml}
       <div class="sell-box">
         <div class="fin-row"><span>Verkaufspreis (- 4% Gebuehren)</span><b>${formatEuro(sellPrice)}</b></div>
         ${loan ? `<div class="fin-row"><span>Hypothek tilgen (+1% Penalty)</span><b>-${formatEuro(payoff)}</b></div>` : ''}
@@ -527,6 +545,15 @@ export class DealSheet {
     this.root.querySelector('[data-apply-umlage]')?.addEventListener('click', () => {
       const r = this.engine.applyModernisierungUmlage(p.id)
       if (!r.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: r.reason ?? 'Umlage fehlgeschlagen' })
+      this.refresh()
+    })
+    this.root.querySelector('[data-hire-mgmt]')?.addEventListener('click', () => {
+      const r = this.engine.hireManagement(p.id)
+      if (!r.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: r.reason ?? 'Beauftragung fehlgeschlagen' })
+      this.refresh()
+    })
+    this.root.querySelector('[data-cancel-mgmt]')?.addEventListener('click', () => {
+      this.engine.cancelManagement(p.id)
       this.refresh()
     })
     this.root.querySelector('[data-convert-wg]')?.addEventListener('click', () => {
