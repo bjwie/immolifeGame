@@ -264,6 +264,8 @@ export class CityScene extends Phaser.Scene {
     container.setInteractive(new Phaser.Geom.Rectangle(-style.width / 2, -style.height + 6, style.width, style.height), Phaser.Geom.Rectangle.Contains)
 
     container.on('pointerover', () => {
+      // Don't show hover tooltip while any modal covers the world.
+      if (ModalManager.get().size() > 0) return
       this.tweens.add({ targets: img, scale: 1.06, duration: 140, ease: 'Sine.out' })
       this.hoveredPropertyId = p.id
       this.showTooltip(p, container.x, container.y, isOwned)
@@ -278,6 +280,10 @@ export class CityScene extends Phaser.Scene {
       this.input.setDefaultCursor('default')
     })
     container.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      // Defensive: if any modal is open, the click belongs to the modal, not
+      // to a building behind it. Phaser's pointer events can leak through if
+      // a modal closes between mousedown and the event reaching the canvas.
+      if (ModalManager.get().size() > 0) return
       // ignore if it was a pan drag
       if (pointer.getDistance && pointer.getDistance() > 6) return
       // ignore right click / middle click — they are pan

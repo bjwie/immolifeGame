@@ -399,6 +399,8 @@ export class Engine {
     this.tickKfw()
     // Annual Schwarz audit (only triggers in January)
     this.maybeRollTaxAudit()
+    // Annual Mietspiegel adjustment — once per year tracking inflation + district trend
+    this.maybeAdjustMietspiegel()
 
     // loans
     for (const ln of this.state.loans) {
@@ -622,11 +624,15 @@ export class Engine {
       event = {
         id: 'gentrify_' + this.gameMonth(),
         title: `Gentrifizierungs-Welle: ${targetName}`,
-        body: `Junge Kreative entdecken ${targetName}. Mieten und Preise steigen.`,
+        body: `Junge Kreative entdecken ${targetName}. Mieten und Preise steigen leicht.`,
         expiresMonth: expires,
         affects: target,
         apply: (p) => {
-          if (p.district === target) { p.marketValue *= 1.04; p.baseRent = Math.round(p.baseRent * 1.05); p.price = Math.round(p.price * 1.04) }
+          if (p.district !== target) return
+          // Mutate per-unit baseKalt so the boost actually persists (the headline
+          // p.baseRent is overwritten by syncHeadlineFromUnits each month).
+          for (const u of p.units) u.baseKalt = Math.round(u.baseKalt * 1.02)
+          p.marketValue *= 1.03; p.price = Math.round(p.price * 1.03)
         },
       }
     } else if (r < 0.32) {
@@ -662,10 +668,14 @@ export class Engine {
       event = {
         id: 'boom_' + this.gameMonth(),
         title: `Tech-Boom in ${targetName}`,
-        body: `Konzern siedelt sich an — Mietnachfrage steigt deutlich.`,
+        body: `Konzern siedelt sich an — Mietnachfrage steigt.`,
         expiresMonth: expires,
         affects: target,
-        apply: (p) => { if (p.district === target) { p.baseRent = Math.round(p.baseRent * 1.08); p.marketValue *= 1.06; p.price = Math.round(p.price * 1.06) } },
+        apply: (p) => {
+          if (p.district !== target) return
+          for (const u of p.units) u.baseKalt = Math.round(u.baseKalt * 1.035)
+          p.marketValue *= 1.04; p.price = Math.round(p.price * 1.04)
+        },
       }
     } else {
       // no event this round
@@ -1562,6 +1572,28 @@ export class Engine {
       this.emit('toast', { kind: 'success', text: `KfW-Foerderung eingegangen: ${formatEuro(k.amount)}.` })
     }
     this.state.kfwPending = this.state.kfwPending.filter(k => k.triggerMonth > m)
+  }
+
+  /**
+   * Annual Mietspiegel update — runs in January. Each district's reference
+   * Kaltmiete drifts up by `district.trend% + market.cycle * 0.5` per year so
+   * the legal rent baseline tracks inflation and district demand.
+   *
+   * Without this, the player's rents (which they hike opportunistically) outpace
+   * the Mietspiegel forever, locking them into Mietpreisbremse jail. With it,
+   * after holding a property for a few years the Mietspiegel rises enough to
+   * unlock another legal hike round.
+   */
+  private maybeAdjustMietspiegel() {
+    if (this.state.time.month !== 1) return
+    const cycleBoost = this.state.market.cycle * 0.005  // 0.4 cycle → +0.2pp
+    const all = [...this.state.listings, ...this.state.owned]
+    for (const p of all) {
+      const districtDef = this.districtById(p.district)
+      const annual = (districtDef.trend / 100) + cycleBoost  // e.g. mitte 1.5% + cycle ~ 1.7%/yr
+      p.mietspiegelKalt = Math.round(p.mietspiegelKalt * (1 + annual))
+    }
+    this.emit('toast', { kind: 'info', text: `Neuer Mietspiegel veroeffentlicht — Referenzmieten leicht angehoben.` })
   }
 
   /** Once a year (January), roll for a tax audit. Probability depends on Schwarz job count,
