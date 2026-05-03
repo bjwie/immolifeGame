@@ -397,6 +397,21 @@ button.danger.small { padding: 4px 8px; font-size: 11px; }
   border-radius: 8px; padding: 12px; margin-top: 6px;
 }
 
+.sell-broker-picker {
+  margin: 10px 0;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.sell-broker-row {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 10px; cursor: pointer; font-size: 12px;
+  transition: border-color 0.1s, background 0.1s;
+}
+.sell-broker-row:hover { border-color: var(--accent); }
+.sell-broker-row.sel { border-color: var(--gold); background: rgba(241, 196, 15, 0.08); }
+.sell-broker-num { text-align: right; min-width: 110px; }
+.sell-broker-num > div:first-child { font-weight: 700; }
+
 .rent-hike-row {
   display: flex; flex-direction: column; gap: 4px; margin-top: 8px;
 }

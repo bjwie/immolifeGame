@@ -739,7 +739,10 @@ export class Engine {
     return { ok: true }
   }
 
-  sell(propertyId: string): { ok: boolean; reason?: string; net?: number } {
+  /** Sell an owned property. Optionally engage a sell-broker per transaction —
+   *  their commission is deducted from the sale price (M4: seller pays, not buyer).
+   *  `sellBrokerId` is one of the broker IDs in `state.brokers` or null/undefined for DIY. */
+  sell(propertyId: string, sellBrokerId?: string | null): { ok: boolean; reason?: string; net?: number; commission?: number } {
     const idx = this.state.owned.findIndex(p => p.id === propertyId)
     if (idx < 0) return { ok: false, reason: 'Nicht im Besitz' }
     const p = this.state.owned[idx]
@@ -752,13 +755,21 @@ export class Engine {
         this.state.loans = this.state.loans.filter(l => l.id !== p.loanId)
       }
     }
-    const net = sellPrice - payoff
+    let commission = 0
+    if (sellBrokerId) {
+      const broker = this.state.brokers.find(b => b.id === sellBrokerId)
+      if (broker && broker.id !== 'do_it_yourself') {
+        commission = Math.round(sellPrice * broker.commissionPct)
+      }
+    }
+    const net = sellPrice - payoff - commission
     this.state.player.cash += net
     this.state.owned.splice(idx, 1)
-    this.emit('sold', { property: p, sellPrice, payoff, net })
-    this.emit('toast', { kind: 'success', text: `${this.nameFor(p)} verkauft (Netto ${formatEuro(net)})` })
+    this.emit('sold', { property: p, sellPrice, payoff, net, commission })
+    const commTag = commission > 0 ? `, Provision -${formatEuro(commission)}` : ''
+    this.emit('toast', { kind: 'success', text: `${this.nameFor(p)} verkauft (Netto ${formatEuro(net)}${commTag})` })
     this.autoSave()
-    return { ok: true, net }
+    return { ok: true, net, commission }
   }
 
   // ============ RENOVATION (M2.5) ============
@@ -1712,27 +1723,14 @@ export class Engine {
     return this.state.brokers.find(b => b.id === id) ?? null
   }
 
-  /** Strength = how much the player can push the seller down. Higher = better deals. 0..100 */
-  negotiationStrength(p?: Property): number {
+  /** Strength = how much the player can push the seller down. Higher = better deals. 0..100
+   *  Buy-side has no player broker any more (M4 refactor) — only player skill + reputation
+   *  count, plus the listing-agent (if `Property.seller.channel === 'agent'`) influences
+   *  the seller's floor inside the negotiation flow elsewhere. */
+  negotiationStrength(_p?: Property): number {
     const player = this.state.player
     let s = player.negotiationSkill
     s += player.reputation * 0.15
-    const broker = this.currentBroker()
-    if (broker) {
-      let bonus = broker.negotiationBonus
-      if (p) {
-        const isLuxury = p.type === 'villa' || p.type === 'tower'
-        const isCommercial = p.type === 'shop' || p.type === 'office'
-        const isBudget = p.price < 200_000
-        if ((isLuxury && broker.specialty === 'luxury') ||
-            (isCommercial && broker.specialty === 'commercial') ||
-            (isBudget && broker.specialty === 'budget') ||
-            (!isLuxury && !isCommercial && broker.specialty === 'residential')) {
-          bonus += 5
-        }
-      }
-      s += bonus
-    }
     return Math.max(0, Math.min(100, s))
   }
 
@@ -1751,11 +1749,8 @@ export class Engine {
     const personaMod = personaFloorMod(seller.ownerPersona)
     // listing agent (if any) tightens or loosens floor
     const agentFloorMod = seller.channel === 'agent' ? listingAgentFloorMod(seller.agentPersonality!) : 0
-    // buyer's broker synergy with owner persona
-    const buyerBroker = this.currentBroker()
-    const personaBrokerSynergy = buyerBroker ? sellerBrokerSynergy(seller.ownerPersona, buyerBroker.personality) : 0
 
-    const baseMin = p.marketValue * (personaMod + agentFloorMod - stalenessDiscount + personaBrokerSynergy)
+    const baseMin = p.marketValue * (personaMod + agentFloorMod - stalenessDiscount)
     const minMargin = baseMin * (1 - (strength / 100) * 0.10)
     const sellerMin = Math.max(p.marketValue * 0.65, Math.round(minMargin))
 
@@ -1763,7 +1758,7 @@ export class Engine {
     const maxRounds = seller.channel === 'agent' ? (seller.agentPersonality === 'pushy' ? 3 : 4)
                       : persona === 'rushed' ? 3
                       : persona === 'stubborn' ? 5
-                      : (buyerBroker ? 5 : 4)
+                      : 4
 
     const intro: SellerNegotiationState['messages'] = []
     if (seller.channel === 'private') {
@@ -1773,7 +1768,6 @@ export class Engine {
       intro.push({ from: 'system', text: `Vermittelt von ${seller.agentName!} — ${escapeFlavor(seller.agentBlurb!)}. Eigentuemer: ${seller.ownerName} (${escapeFlavor(seller.flavor)}). Grund: ${escapeFlavor(seller.reason)}.` })
       intro.push({ from: 'seller', text: `${seller.agentName}: "${listingAgentOpening(seller.agentPersonality!, p.price, p.marketValue)}"` })
     }
-    if (buyerBroker) intro.push({ from: 'broker', text: `${buyerBroker.name}: ${buyerBroker.catchphrase || '"Lass uns das anpacken."'}` })
 
     return {
       propertyId,
@@ -1782,7 +1776,7 @@ export class Engine {
       currentSellerOffer: p.price,
       rounds: 0,
       maxRounds,
-      brokerHired: this.state.player.brokerId,
+      brokerHired: null,
       done: false,
       outcome: 'pending',
       messages: intro,
@@ -1796,11 +1790,10 @@ export class Engine {
     if (!p || !p.seller) { neg.done = true; neg.outcome = 'rejected'; neg.messages.push({ from: 'system', text: 'Inserat nicht mehr verfuegbar.' }); return neg }
     const seller = p.seller
     const persona = seller.ownerPersona
-    const buyerBroker = this.currentBroker()
     const speaker = seller.channel === 'agent' ? seller.agentName! : seller.ownerName
 
     neg.rounds++
-    neg.messages.push({ from: 'player', text: `Du${buyerBroker ? ' (via ' + buyerBroker.name + ')' : ''} bietest ${formatEuro(offerPrice)}.` })
+    neg.messages.push({ from: 'player', text: `Du bietest ${formatEuro(offerPrice)}.` })
 
     // Persona-tuned thresholds (modified slightly when via agent — agents more by-the-book)
     const acceptShift = seller.channel === 'agent' ? 0.005 : 0
@@ -1809,7 +1802,7 @@ export class Engine {
     const insultBase = (persona === 'sentimental' ? 0.95 : persona === 'stubborn' ? 0.92 : persona === 'desperate' ? 0.7 : 0.82)
     const insultThreshold = seller.channel === 'agent' ? insultBase * 0.85 : insultBase
 
-    const walkRiskMult = buyerBroker?.personality === 'pushy' && seller.channel === 'private' ? 1.15 : 1.0
+    const walkRiskMult = 1.0
 
     if (offerPrice >= neg.currentSellerOffer * acceptThreshold) {
       neg.done = true; neg.outcome = 'accepted'
@@ -1824,7 +1817,7 @@ export class Engine {
       neg.done = true; neg.outcome = 'rejected'
       const line = seller.channel === 'agent'
         ? listingAgentInsult(seller.agentPersonality!)
-        : insultLine(persona, buyerBroker?.personality)
+        : insultLine(persona, undefined)
       neg.messages.push({ from: 'seller', text: `${speaker}: "${line}"` })
       return neg
     }
@@ -1860,22 +1853,21 @@ export class Engine {
   acceptSellerOffer(neg: SellerNegotiationState, withLoanFromBank?: string, ltv?: number, bankTermsOverride?: BankOfferTerms): { ok: boolean; reason?: string } {
     const p = this.state.listings.find(pp => pp.id === neg.propertyId)
     if (!p) return { ok: false, reason: 'Inserat nicht mehr verfuegbar' }
-    // Mutate the listing's price to the negotiated value, then buy
+    // Mutate the listing's price to the negotiated value, then buy.
+    // M4: no buyer-side broker commission any more.
     const negotiatedPrice = neg.currentSellerOffer
-    const broker = this.currentBroker()
-    const commission = broker ? Math.round(negotiatedPrice * broker.commissionPct) : 0
 
     const oldPrice = p.price
     p.price = negotiatedPrice
-    const res = this.buy(p.id, withLoanFromBank, ltv, { extraCashCost: commission, bankTermsOverride })
+    const res = this.buy(p.id, withLoanFromBank, ltv, { bankTermsOverride })
     if (!res.ok) {
       p.price = oldPrice  // rollback
       return res
     }
 
-    // Successful negotiation grows skill + bank/broker relations
+    // Successful negotiation grows skill
     this.state.player.negotiationSkill = Math.min(100, this.state.player.negotiationSkill + 1)
-    this.emit('toast', { kind: 'success', text: `Verhandelt: ${formatEuro(oldPrice - negotiatedPrice)} gespart!${broker ? ` (Provision ${formatEuro(commission)})` : ''}` })
+    this.emit('toast', { kind: 'success', text: `Verhandelt: ${formatEuro(oldPrice - negotiatedPrice)} gespart!` })
     return { ok: true }
   }
 
@@ -1983,17 +1975,6 @@ function personaFloorMod(p: SellerPersona): number {
     case 'stubborn': return 0.95
     case 'greedy': return 0.97
   }
-}
-
-function sellerBrokerSynergy(s: SellerPersona, b: BrokerPersonality): number {
-  // negative = lowers floor (good for player)
-  if (b === 'charming' && (s === 'sentimental' || s === 'pragmatic')) return -0.04
-  if (b === 'enthusiastic' && (s === 'desperate' || s === 'rushed')) return -0.03
-  if (b === 'analytical' && (s === 'pragmatic' || s === 'greedy')) return -0.03
-  if (b === 'discreet' && (s === 'sentimental' || s === 'greedy')) return -0.03
-  if (b === 'pushy' && (s === 'sentimental')) return +0.05  // pushy clashes with sentimental
-  if (b === 'pushy' && (s === 'desperate' || s === 'rushed')) return -0.05  // pushy works on the weak
-  return 0
 }
 
 function openingLine(p: SellerPersona, asking: number): string {

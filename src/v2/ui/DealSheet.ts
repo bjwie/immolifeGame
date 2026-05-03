@@ -33,6 +33,9 @@ export class DealSheet {
   private ltvSlider: HTMLInputElement | null = null
   private negotiated: { price: number } | null = null  // result of seller negotiation
   private bankOverride: BankOfferTerms | null = null   // result of bank negotiation
+  /** Per-transaction sell-broker pick (M4). Null = explicitly DIY, undefined = take
+   *  the player's saved default (Player.brokerId). */
+  private selectedSellBrokerId: string | null | undefined = undefined
   private negotiationModal: NegotiationModal | null = null
   private modal: ManagedModal
 
@@ -58,8 +61,14 @@ export class DealSheet {
     this.selectedBankId = isOwned ? null : this.engine.state.banks[0].id
     this.negotiated = null
     this.bankOverride = null
+    this.selectedSellBrokerId = undefined  // fall back to player default
     this.render()
     ModalManager.get().push(this.modal)
+  }
+
+  private effectiveSellBrokerId(): string | null {
+    if (this.selectedSellBrokerId !== undefined) return this.selectedSellBrokerId
+    return this.engine.state.player.brokerId
   }
 
   close() {
@@ -137,14 +146,16 @@ export class DealSheet {
     })
 
     const effectivePrice = this.negotiated ? this.negotiated.price : p.price
-    const broker = this.engine.currentBroker()
-    const brokerHtml = broker
-      ? `<div class="dealsheet-broker"><b>Makler: ${escape(broker.name)}</b> · ${(broker.commissionPct * 100).toFixed(1)}% Provision · +${broker.negotiationBonus} Bonus <button class="ghost small" data-pick-broker>wechseln</button></div>`
-      : `<div class="dealsheet-broker"><b>Kein Makler</b> — du verhandelst selbst <button class="ghost small" data-pick-broker>Makler waehlen</button></div>`
+    // M4: no buyer broker. Show the listing channel info instead.
+    const channelHtml = p.seller && p.seller.channel === 'agent'
+      ? `<div class="dealsheet-broker"><b>Inserat ueber Makler:</b> ${escape(p.seller.agentName ?? '')}<div class="micro">Eigentuemer: ${escape(p.seller.ownerName)} · Verkaeuferprovision: ${((p.seller.agentCommissionPct ?? 0) * 100).toFixed(1)}%</div></div>`
+      : p.seller
+        ? `<div class="dealsheet-broker"><b>Privatverkauf von:</b> ${escape(p.seller.ownerName)}<div class="micro">Direkt mit dem Eigentuemer verhandeln</div></div>`
+        : ''
 
     const negotiatedSavingsHtml = this.negotiated
       ? `<div class="negotiated-tag">✓ Verhandelt: ${formatEuro(p.price - this.negotiated.price)} gespart (Endpreis ${formatEuro(this.negotiated.price)})</div>`
-      : `<button class="negotiate-btn" data-negotiate-seller>💬 Mit Verkaeufer verhandeln</button>`
+      : `<button class="negotiate-btn" data-negotiate-seller>💬 Mit ${p.seller?.channel === 'agent' ? 'Makler' : 'Verkaeufer'} verhandeln</button>`
 
     const bankNegHtml = this.selectedBankId && !this.bankOverride
       ? `<button class="ghost small" data-negotiate-bank>💬 Mit Bank verhandeln</button>`
@@ -153,7 +164,7 @@ export class DealSheet {
         : ''
 
     this.root.querySelector('#ds-actions')!.innerHTML = `
-      ${brokerHtml}
+      ${channelHtml}
       ${negotiatedSavingsHtml}
 
       <div class="financing-box ${this.selectedBankId === null ? 'hidden' : ''}">
@@ -169,7 +180,6 @@ export class DealSheet {
     this.root.querySelector('#ds-buy')?.addEventListener('click', () => this.tryBuy())
     this.root.querySelector('[data-negotiate-seller]')?.addEventListener('click', () => this.negotiateSeller())
     this.root.querySelector('[data-negotiate-bank]')?.addEventListener('click', () => this.negotiateBank())
-    this.root.querySelector('[data-pick-broker]')?.addEventListener('click', () => this.openBrokerPicker())
   }
 
   private negotiateSeller() {
@@ -188,15 +198,6 @@ export class DealSheet {
     })
   }
 
-  private openBrokerPicker() {
-    // reuse the negotiation modal's broker picker via opening a seller negotiation
-    if (!this.current || !this.negotiationModal) return
-    this.negotiationModal.openSeller(this.current, {
-      onAccepted: (price) => { this.negotiated = { price }; this.render() },
-      onCancelled: () => { this.render() },
-    })
-  }
-
   private refreshFinancing() {
     if (!this.current || this.selectedBankId === null) return
     const bank = this.engine.state.banks.find(b => b.id === this.selectedBankId)!
@@ -212,11 +213,9 @@ export class DealSheet {
     // Mirror engine math (hypothetical with negotiated terms / price)
     const baseRatePct = this.bankOverride ? this.bankOverride.annualRate : (bank.annualRate + this.engine.state.market.baseRate * 0.1)
     const origination = this.bankOverride ? this.bankOverride.origination : bank.origination
-    const broker = this.engine.currentBroker()
-    const commission = broker && this.negotiated ? Math.round(propPriceForCalc * broker.commissionPct) : 0
     const principal = Math.round(propPriceForCalc * effectiveLtv)
     const fees = Math.round(principal * origination)
-    const downPayment = propPriceForCalc - principal + fees + commission
+    const downPayment = propPriceForCalc - principal + fees
     const r = baseRatePct / 100 / 12
     const months = 240
     const monthlyPayment = Math.round(principal * (r * Math.pow(1 + r, months)) / (Math.pow(1 + r, months) - 1))
@@ -229,7 +228,6 @@ export class DealSheet {
     const netClass = netMonthly >= 0 ? 'good' : 'bad'
     sum.innerHTML = `
       <div class="fin-row"><span>Eigenkapital</span><b>${formatEuro(downPayment)}</b></div>
-      ${commission ? `<div class="fin-row"><span>davon Makler-Provision</span><b>${formatEuro(commission)}</b></div>` : ''}
       <div class="fin-row"><span>Monatsrate (${baseRatePct.toFixed(2)}%)</span><b>${formatEuro(monthlyPayment)}</b></div>
       <div class="fin-row"><span>Netto/Monat</span><b class="${netClass}">${formatEuro(netMonthly)}</b></div>
       <div class="fin-row"><span>Cash-on-Cash</span><b class="${cocClass}">${cashOnCash.toFixed(1)}%</b></div>
@@ -240,20 +238,16 @@ export class DealSheet {
     if (!this.current) return
     const bankId = this.selectedBankId ?? undefined
     const ltv = bankId && this.ltvSlider ? Number(this.ltvSlider.value) / 100 : undefined
-    const broker = this.engine.currentBroker()
 
     let res: { ok: boolean; reason?: string }
     if (this.negotiated) {
-      // route through engine's negotiation finalizer (handles broker commission)
-      // We need a tiny shim — engine.acceptSellerOffer requires a SellerNegotiationState.
-      // Instead, mutate the listing price + buy directly with extra cash for commission + bank override.
+      // Mutate the listing price to the negotiated value, then buy at that price.
       const p = this.engine.state.listings.find(pp => pp.id === this.current!.id)
       if (!p) { res = { ok: false, reason: 'Inserat verschwunden' } }
       else {
         const oldPrice = p.price
         p.price = this.negotiated.price
-        const commission = broker ? Math.round(p.price * broker.commissionPct) : 0
-        res = this.engine.buy(p.id, bankId, ltv, { extraCashCost: commission, bankTermsOverride: this.bankOverride ?? undefined })
+        res = this.engine.buy(p.id, bankId, ltv, { bankTermsOverride: this.bankOverride ?? undefined })
         if (!res.ok) p.price = oldPrice
       }
     } else {
@@ -311,7 +305,32 @@ export class DealSheet {
     const sellPrice = Math.round(p.marketValue * 0.96)
     const loan = this.engine.state.loans.find(l => l.propertyId === p.id)
     const payoff = loan ? Math.round(loan.principal * 1.01) : 0
-    const sellNet = sellPrice - payoff
+    const effectiveBrokerId = this.effectiveSellBrokerId()
+    const sellBroker = effectiveBrokerId ? this.engine.state.brokers.find(b => b.id === effectiveBrokerId) : null
+    const sellCommission = sellBroker && sellBroker.id !== 'do_it_yourself' ? Math.round(sellPrice * sellBroker.commissionPct) : 0
+    const sellNet = sellPrice - payoff - sellCommission
+
+    const brokerPickerHtml = `
+      <div class="sell-broker-picker">
+        <div class="card-title">VERKAUFS-MAKLER</div>
+        ${this.engine.state.brokers.map(b => {
+          const isDIY = b.id === 'do_it_yourself'
+          const isSel = (effectiveBrokerId === null && isDIY) || effectiveBrokerId === b.id
+          const comm = isDIY ? 0 : Math.round(sellPrice * b.commissionPct)
+          const net = sellPrice - payoff - comm
+          return `<div class="sell-broker-row ${isSel ? 'sel' : ''}" data-sell-broker="${b.id}">
+            <div>
+              <b>${escape(b.name)}</b> <span class="micro">· ${escape(b.title)}</span>
+              <div class="micro">${escape(b.blurb)}</div>
+            </div>
+            <div class="sell-broker-num">
+              <div>${(b.commissionPct * 100).toFixed(1)}%</div>
+              <div class="micro">Netto ${formatEuro(net)}</div>
+            </div>
+          </div>`
+        }).join('')}
+      </div>
+    `
 
     const loanHtml = loan ? `
       <div class="loan-card">
@@ -388,8 +407,10 @@ export class DealSheet {
       <div class="sell-box">
         <div class="fin-row"><span>Verkaufspreis (- 4% Gebuehren)</span><b>${formatEuro(sellPrice)}</b></div>
         ${loan ? `<div class="fin-row"><span>Hypothek tilgen (+1% Penalty)</span><b>-${formatEuro(payoff)}</b></div>` : ''}
+        ${sellCommission > 0 ? `<div class="fin-row"><span>Makler-Provision ${sellBroker ? '(' + escape(sellBroker.name) + ')' : ''}</span><b>-${formatEuro(sellCommission)}</b></div>` : ''}
         <div class="fin-row total"><span>Netto</span><b class="${sellNet >= 0 ? 'good' : 'bad'}">${formatEuro(sellNet)}</b></div>
-        <button class="danger" data-sell>Verkaufen</button>
+        ${brokerPickerHtml}
+        <button class="danger" data-sell>Verkaufen ${sellBroker && sellBroker.id !== 'do_it_yourself' ? 'mit ' + escape(sellBroker.name) : 'in Eigenregie'}</button>
       </div>
     `
 
@@ -424,9 +445,21 @@ export class DealSheet {
       if (!r.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: r.reason ?? 'Umlage fehlgeschlagen' })
       this.refresh()
     })
+    this.root.querySelectorAll<HTMLElement>('[data-sell-broker]').forEach(el => {
+      el.addEventListener('click', () => {
+        const id = el.dataset.sellBroker!
+        // 'do_it_yourself' resolves to null in the engine; we keep the literal id here so
+        // the picker shows it as the selected option.
+        this.selectedSellBrokerId = id
+        // Persist as default for next time (player's own preference).
+        this.engine.state.player.brokerId = id === 'do_it_yourself' ? null : id
+        this.refresh()
+      })
+    })
     this.root.querySelector('[data-sell]')?.addEventListener('click', () => {
+      const brokerArg = this.effectiveSellBrokerId()
       const before = this.engine.netWorth()
-      const res = this.engine.sell(p.id)
+      const res = this.engine.sell(p.id, brokerArg)
       if (res.ok && typeof res.net === 'number') {
         const profit = res.net - p.basePrice
         this.engine.markFlipIfBig(profit)

@@ -75,7 +75,6 @@ export class NegotiationModal {
     if (!this.sellerNeg || !this.property) return
     const neg = this.sellerNeg
     const p = this.property
-    const broker = this.engine.currentBroker()
     const strength = this.engine.negotiationStrength(p)
 
     // Decide offer slider min/max
@@ -124,27 +123,10 @@ export class NegotiationModal {
                 <div class="persona-reason"><b>Verkaufsgrund:</b> ${escape(seller.reason)}</div>
               </div>
             </div>
-            <div class="neg-broker-card">
-              <div class="card-title">DEIN MAKLER</div>
-              ${broker ? `
-                <div class="bk-row">
-                  <div>
-                    <b>${escape(broker.name)}</b>
-                    <div class="micro">${escape(broker.title)} · <span class="persona-tag persona-${broker.personality}">${brokerPersonalityLabel(broker.personality)}</span></div>
-                    <div class="micro" style="font-style:italic">${escape(broker.catchphrase)}</div>
-                  </div>
-                  <div style="text-align:right">
-                    <div>Provision <b>${(broker.commissionPct * 100).toFixed(1)}%</b></div>
-                    <div class="micro">+${broker.negotiationBonus} Verhandlungs-Bonus</div>
-                  </div>
-                </div>
-              ` : `<div class="micro">Du verhandelst selbst — keine Provision, kein Bonus.</div>`}
-              <button class="ghost small" data-change-broker>Makler waehlen / wechseln</button>
-            </div>
             <div class="neg-strength">
               <label>Verhandlungs-Staerke</label>
               <div class="strength-bar"><span style="width:${strength}%"></span></div>
-              <div class="micro">${strength.toFixed(0)} / 100 — beeinflusst was der Verkaeufer akzeptiert</div>
+              <div class="micro">${strength.toFixed(0)} / 100 — Skill ${this.engine.state.player.negotiationSkill.toFixed(0)} + Reputation. Beim Kauf gibt es keine Makler — entweder Privatperson oder Listing-Agent gegenueber.</div>
             </div>
           </div>
 
@@ -185,7 +167,6 @@ export class NegotiationModal {
     slider?.addEventListener('input', () => { if (display) display.textContent = formatEuro(Number(slider.value)) })
 
     this.root.querySelector('[data-cancel]')?.addEventListener('click', () => this.cancel())
-    this.root.querySelector('[data-change-broker]')?.addEventListener('click', () => this.renderBrokerPicker())
     this.root.querySelector('[data-make-offer]')?.addEventListener('click', () => {
       const offer = Number(slider?.value ?? suggested)
       this.engine.submitSellerOffer(neg, offer)
@@ -200,58 +181,6 @@ export class NegotiationModal {
       if (this.sellerCb) this.sellerCb.onAccepted(neg.currentSellerOffer)
       this.close()
     })
-  }
-
-  private renderBrokerPicker() {
-    if (!this.property) return
-    const brokers = this.engine.state.brokers
-    const current = this.engine.state.player.brokerId
-    const rows = brokers.map(b => `
-      <div class="broker-row ${current === b.id || (current === null && b.id === 'do_it_yourself') ? 'sel' : ''}" data-broker-id="${b.id}">
-        <div class="broker-avatar" style="background:#${b.color.toString(16).padStart(6, '0')}">${brokerAvatar(b.personality)}</div>
-        <div class="broker-info">
-          <div class="bk-row">
-            <b>${escape(b.name)}</b>
-            <span class="persona-tag persona-${b.personality}">${brokerPersonalityLabel(b.personality)}</span>
-          </div>
-          <div class="micro">${escape(b.title)} · Spezialist: ${escape(b.specialty)}</div>
-          <div class="micro">${escape(b.blurb)}</div>
-          ${b.catchphrase ? `<div class="catchphrase">${escape(b.catchphrase)}</div>` : ''}
-        </div>
-        <div class="broker-numbers">
-          <div>${(b.commissionPct * 100).toFixed(1)}% Provision</div>
-          <div class="micro">+${b.negotiationBonus} Bonus</div>
-        </div>
-      </div>
-    `).join('')
-
-    this.root.innerHTML = `
-      <div class="neg-modal">
-        <div class="neg-head">
-          <div class="neg-title">Makler waehlen</div>
-          <div class="neg-sub">Wirkt auf alle weiteren Verhandlungen — Synergie mit Verkaeufer-Persoenlichkeit beachten</div>
-          <button class="ds-close" data-cancel>×</button>
-        </div>
-        <div class="neg-body single">
-          <div class="broker-list">${rows}</div>
-          <button class="primary" data-back>← Zurueck zur Verhandlung</button>
-        </div>
-      </div>
-    `
-    this.root.querySelectorAll<HTMLElement>('[data-broker-id]').forEach(el => {
-      el.addEventListener('click', () => {
-        this.engine.hireBroker(el.dataset.brokerId!)
-        this.renderBrokerPicker()
-      })
-    })
-    this.root.querySelector('[data-back]')?.addEventListener('click', () => {
-      // restart seller negotiation so the new broker bonus applies
-      if (this.property && this.sellerCb) {
-        this.sellerNeg = this.engine.startSellerNegotiation(this.property.id)
-      }
-      this.renderSeller()
-    })
-    this.root.querySelector('[data-cancel]')?.addEventListener('click', () => this.cancel())
   }
 
   // ============ BANK ============
@@ -392,12 +321,6 @@ function sellerAvatar(p: SellerPersona): { emoji: string; color: string } {
     rushed:      { emoji: '⏰', color: 'linear-gradient(135deg,#5a4030,#e67e22)' },
     sentimental: { emoji: '🥺', color: 'linear-gradient(135deg,#5a3050,#9b59b6)' },
   } as Record<SellerPersona, { emoji: string; color: string }>)[p]
-}
-
-function brokerAvatar(p: BrokerPersonality): string {
-  return ({
-    charming: '😊', pushy: '😤', analytical: '🤓', discreet: '🎩', enthusiastic: '✨',
-  } as Record<BrokerPersonality, string>)[p]
 }
 
 function bankAvatarFor(p: BankPersonality, _color: number): { emoji: string; color: string } {
