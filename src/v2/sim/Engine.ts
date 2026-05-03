@@ -1,4 +1,4 @@
-import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, CapexEvent, CapexKind, ContractorOffer, ContractorTier, GameState, GameTime, GewerkKind, GewerkStep, Lawsuit, Loan, MarketEvent, Player, Property, PropertyType, RenovationContract, RenovationScope, SellerNegotiationState, Speed, Tenant } from './types'
+import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, CapexEvent, CapexKind, ContractorOffer, ContractorTier, GameState, GameTime, GewerkKind, GewerkStep, Lawsuit, Loan, MarketEvent, Player, Property, PropertyType, RenovationContract, RenovationScope, SellerNegotiationState, Speed, Tenant, Unit, WEGProposal } from './types'
 import type { CityLayout, DistrictDef, DistrictId } from '../render/CityRenderer'
 import { generateApplicants, pickPropertyName, pickSeller } from './names'
 
@@ -73,6 +73,7 @@ export class Engine {
       pfuschPending: [],
       kfwPending: [],
       contractorPool: this.generateContractorPool(),
+      wegAssemblies: [],
       rngSeed: Math.floor(Math.random() * 1_000_000),
     }
   }
@@ -178,6 +179,53 @@ export class Engine {
     // Mietspiegel: deterministic per (district, type) — see mietspiegelFor.
     const mietspiegelKalt = this.mietspiegelFor(d, type)
 
+    // M5: ~30% of apartment/tower listings are MFH (whole building, multiple units).
+    // Everything else is single-unit. House/villa/shop/office stay 1-unit.
+    const canBeMfh = type === 'apartment' || type === 'tower'
+    const isMfh = canBeMfh && rng() < 0.30
+    const buildingForm: 'single' | 'mfh' | 'wg' = isMfh ? 'mfh' : 'single'
+    const unitCount = isMfh ? (3 + Math.floor(rng() * 8)) : 1  // 3-10 units for MFH
+    const totalKalt = isMfh ? Math.round(baseRent * (0.85 + (unitCount - 4) * 0.08)) * unitCount / 4 : baseRent
+    // For an MFH listing the asking price scales with total Kaltmiete (yield-based)
+    const mfhPrice = isMfh ? Math.round(totalKalt * 12 * (16 + rng() * 6)) : price
+    const finalPrice = isMfh ? mfhPrice : price
+    const finalBaseRent = isMfh ? Math.round(totalKalt) : baseRent
+
+    const units: Unit[] = []
+    if (isMfh) {
+      // Distribute total Kaltmiete across the units with some variance — top floor a bit
+      // pricier, ground floor a bit less, etc.
+      let remaining = Math.round(totalKalt)
+      for (let i = 0; i < unitCount; i++) {
+        const isLast = i === unitCount - 1
+        const sqm = 38 + Math.floor(rng() * 60)
+        const share = isLast ? remaining : Math.round(remaining / (unitCount - i) * (0.85 + rng() * 0.3))
+        const uKalt = Math.max(280, share)
+        const uNk = Math.round(uKalt * (0.20 + rng() * 0.10))
+        const floor = Math.floor(i / 2)
+        const side = i % 2 === 0 ? 'links' : 'rechts'
+        const label = floor === 0 ? `EG ${side}` : `${floor}. OG ${side}`
+        units.push({
+          id: 'u_' + Math.random().toString(36).slice(2, 6),
+          label,
+          sqm,
+          baseKalt: uKalt,
+          nebenkosten: uNk,
+          vacantMonths: 0,
+        })
+        remaining -= uKalt
+      }
+    } else {
+      units.push({
+        id: 'u_' + Math.random().toString(36).slice(2, 6),
+        label: 'Einheit',
+        sqm: 50 + Math.floor(rng() * 70),
+        baseKalt: baseRent,
+        nebenkosten,
+        vacantMonths: 0,
+      })
+    }
+
     return {
       id: 'p_' + Math.random().toString(36).slice(2, 10),
       type,
@@ -185,10 +233,10 @@ export class Engine {
       tileX: spot.tileX,
       tileY: spot.tileY,
       styleSeed: Math.floor(rng() * 1e6),
-      price,
-      marketValue: price,
-      basePrice: price,
-      baseRent,
+      price: finalPrice,
+      marketValue: finalPrice,
+      basePrice: finalPrice,
+      baseRent: finalBaseRent,
       nebenkosten,
       mietspiegelKalt,
       condition,
@@ -198,6 +246,8 @@ export class Engine {
       state: 'forSale',
       vacantMonths: 0,
       seller: pickSeller(rng),
+      units,
+      buildingForm,
     }
   }
 
@@ -289,83 +339,28 @@ export class Engine {
       this.degradeProperty(p)
       this.appreciate(p)
 
-      if (p.tenant) {
-        const t = p.tenant
-        // migration safety — old saves only had agreedRent; treat that as Kalt and
-        // synthesize Nebenkosten at ~25% (matches genListing default).
-        const legacy = t as Tenant & { agreedRent?: number }
-        if (typeof t.agreedKaltMiete !== 'number') {
-          t.agreedKaltMiete = typeof legacy.agreedRent === 'number'
-            ? legacy.agreedRent
-            : Math.round(this.effectiveRent(p))
-        }
-        if (typeof t.agreedNebenkosten !== 'number') {
-          t.agreedNebenkosten = Math.round(t.agreedKaltMiete * 0.25)
-        }
-        if (typeof t.deposit !== 'number') t.deposit = t.agreedKaltMiete * 2
-        if (typeof p.nebenkosten !== 'number') p.nebenkosten = t.agreedNebenkosten
-        // partyer slowly damages condition
-        if (t.personality === 'partyer') p.condition = Math.max(0, p.condition - 0.6)
-        // tidy slightly improves
-        if (t.personality === 'tidy') p.condition = Math.min(100, p.condition + 0.2)
-
-        // reliability is the chance to pay on time. satisfaction already affects
-        // whether tenants leave (auto-eviction below at <25) and reputation drift —
-        // multiplying it back into willPay double-penalizes and makes the HUD
-        // cashflow forecast (which uses reliability only) over-promise.
-        // Mietnomaden never pay; their cover blows after 3 missed months (UI reveals).
-        const isNomad = t.personality === 'nomad'
-        const willPay = !isNomad && rng() < (t.reliability / 100)
-        if (willPay) {
-          // Only Kaltmiete enters the player's books. Nebenkosten are paid by the
-          // tenant on top and pass straight to suppliers (heating/water/Hausgeld).
-          // Mietminderung during active renovation reduces what gets booked.
-          const reductionFactor = p.activeRenovation ? (1 - p.activeRenovation.rentReductionPct) : 1
-          income += Math.round(t.agreedKaltMiete * reductionFactor)
-          t.monthsBehind = Math.max(0, t.monthsBehind - 1)
-        } else {
-          t.monthsBehind++
-          // Disguise blows after 3 missed months — reveal real persona to the player
-          if (isNomad && t.disguisePersonality && t.monthsBehind >= 3) {
-            t.disguisePersonality = undefined
-            this.emit('toast', { kind: 'error', text: `${t.name} ist ein Mietnomade! Nur per Raeumungsklage entfernbar.` })
-          }
-        }
-        // satisfaction shifts with condition; demanding tenants are pickier
-        const condTarget = t.personality === 'demanding' ? p.condition - 10 : p.condition + 10
-        const targetSat = Math.min(100, condTarget)
-        t.satisfaction += (targetSat - t.satisfaction) * 0.4
-        t.satisfaction = Math.max(0, Math.min(100, t.satisfaction))
-        t.monthsRemaining--
-        // Cooperative tenants leave if very dissatisfied / lease ended / 3+ months behind.
-        // Mietnomaden ignore all of this — they only leave via Raeumungsklage (startEviction).
-        const cooperativeLeave = !isNomad && (t.satisfaction < 25 || t.monthsRemaining <= 0 || t.monthsBehind >= 3)
-        if (cooperativeLeave) {
-          // refund deposit (minus damage if partyer trashed the place)
-          const refund = t.personality === 'partyer' && p.condition < 50 ? t.deposit * 0.4 : t.deposit
-          this.state.player.cash -= refund
-          this.emit('toast', { kind: t.monthsBehind >= 3 ? 'warning' : 'info', text: `${t.name} zog aus (${this.nameFor(p)}). Kaution -${Math.round(refund)} EUR.` })
-          p.tenant = undefined
-          p.vacantMonths = 0
-        }
-      } else {
-        // vacant — applicants must be reviewed by player.
-        // monthly: notify if there are good applicants waiting
-        p.vacantMonths++
-        if (p.vacantMonths === 1 || p.vacantMonths % 3 === 0) {
-          this.emit('toast', { kind: 'info', text: `${this.nameFor(p)} ist leer (${p.vacantMonths} Mon.) — Bewerber pruefen.` })
-        }
+      // M5: iterate over each unit. Single-unit properties have units.length === 1.
+      for (const u of p.units) {
+        const collected = this.processUnitTenancy(p, u, rng)
+        income += collected
       }
+      this.syncHeadlineFromUnits(p)
 
-      // maintenance always due
+      // maintenance always due — scales with unit count for MFH
       const m = this.maintenanceCost(p)
       expenses += m
+
+      // Hausgeld for WEG members (when player only owns part of the building)
+      if (p.wegMembership) expenses += p.wegMembership.hausgeldMonthly
 
       // capex roll — major repairs based on age + condition
       this.tickCapex(p, rng)
 
       // active renovation — advance current step, complete steps, roll risks
       this.tickRenovation(p, rng)
+
+      // WEG assemblies for properties where the player is just one of many owners
+      this.maybeScheduleWegAssembly(p, rng)
     }
 
     // Pfusch maturing → convert to capex
@@ -422,18 +417,23 @@ export class Engine {
           if (won) {
             this.emit('toast', { kind: 'success', text: `Klage gewonnen — Mieterhoehung haelt. Kosten ${formatEuro(ls.totalSpent)}.` })
           } else {
-            if (p?.tenant && typeof ls.revertToKalt === 'number') p.tenant.agreedKaltMiete = ls.revertToKalt
+            if (p && typeof ls.revertToKalt === 'number') {
+              const targetUnit = p.units.find(u => u.tenant?.id === ls.tenantId) ?? p.units.find(u => u.tenant)
+              if (targetUnit?.tenant) targetUnit.tenant.agreedKaltMiete = ls.revertToKalt
+              this.syncHeadlineFromUnits(p)
+            }
             this.state.player.reputation = Math.max(0, this.state.player.reputation - 10)
             this.emit('toast', { kind: 'error', text: `Klage verloren — Miete zurueckgesetzt, Reputation -10. Kosten ${formatEuro(ls.totalSpent)}.` })
           }
         } else if (ls.reason === 'eviction') {
-          // The tenant may have left or been swapped during the case; check by tenantId.
-          const stillSameTenant = !!p?.tenant && p.tenant.id === ls.tenantId
+          // Locate the tenant by id across this property's units.
+          const targetUnit = p?.units.find(u => u.tenant?.id === ls.tenantId)
           if (won) {
-            if (stillSameTenant && p) {
-              const tenantName = p.tenant!.name
-              p.tenant = undefined
-              p.vacantMonths = 0
+            if (targetUnit?.tenant && p) {
+              const tenantName = targetUnit.tenant.name
+              targetUnit.tenant = undefined
+              targetUnit.vacantMonths = 0
+              this.syncHeadlineFromUnits(p)
               this.state.player.reputation = Math.max(0, this.state.player.reputation - 5)
               this.emit('toast', { kind: 'success', text: `Raeumung erfolgreich — ${tenantName} ist raus. Gesamtkosten ${formatEuro(ls.totalSpent)}.` })
             } else {
@@ -456,13 +456,14 @@ export class Engine {
     this.state.player.cash += income - expenses
 
     // credit score gentle recovery if not behind
-    const anyBehind = this.state.owned.some(o => o.tenant && o.tenant.monthsBehind > 0) || this.state.loans.some(l => l.paymentsMissed > 0)
+    const allTenants = this.state.owned.flatMap(o => o.units.map(u => u.tenant).filter(Boolean) as Tenant[])
+    const anyBehind = allTenants.some(t => t.monthsBehind > 0) || this.state.loans.some(l => l.paymentsMissed > 0)
     if (!anyBehind && this.state.player.creditScore < 850) this.state.player.creditScore = Math.min(850, this.state.player.creditScore + 2)
 
     // reputation: depends on average condition and tenant satisfaction
     if (this.state.owned.length > 0) {
       const avgCond = this.state.owned.reduce((s, p) => s + p.condition, 0) / this.state.owned.length
-      const avgSat = this.state.owned.filter(o => o.tenant).reduce((s, p) => s + (p.tenant?.satisfaction ?? 0), 0) / Math.max(1, this.state.owned.filter(o => o.tenant).length)
+      const avgSat = allTenants.length > 0 ? allTenants.reduce((s, t) => s + t.satisfaction, 0) / allTenants.length : 50
       const target = (avgCond * 0.4 + avgSat * 0.6)
       this.state.player.reputation += (target - this.state.player.reputation) * 0.15
       this.state.player.reputation = Math.max(0, Math.min(100, this.state.player.reputation))
@@ -481,6 +482,95 @@ export class Engine {
     this.emit('financial', { income, expenses, net: income - expenses })
     this.checkAchievements()
     this.autoSave()
+  }
+
+  /**
+   * Run a single unit through one month: legacy migration on the tenant, partyer/tidy
+   * condition deltas (capped per building), willPay roll, monthsBehind tracking,
+   * disguise reveal, satisfaction drift, lease end / cooperative auto-eviction.
+   * Returns rent collected (for the player's books).
+   */
+  private processUnitTenancy(p: Property, u: Unit, rng: () => number): number {
+    if (!u.tenant) {
+      u.vacantMonths++
+      if (u.vacantMonths === 1 || u.vacantMonths % 3 === 0) {
+        const where = p.units.length > 1 ? `${this.nameFor(p)} (${u.label})` : this.nameFor(p)
+        this.emit('toast', { kind: 'info', text: `${where} ist leer (${u.vacantMonths} Mon.) — Bewerber pruefen.` })
+      }
+      return 0
+    }
+    const t = u.tenant
+    // Migration safety on legacy tenants without Kalt/NK split
+    const legacy = t as Tenant & { agreedRent?: number }
+    if (typeof t.agreedKaltMiete !== 'number') {
+      t.agreedKaltMiete = typeof legacy.agreedRent === 'number' ? legacy.agreedRent : u.baseKalt
+    }
+    if (typeof t.agreedNebenkosten !== 'number') {
+      t.agreedNebenkosten = u.nebenkosten
+    }
+    if (typeof t.deposit !== 'number') t.deposit = t.agreedKaltMiete * 2
+
+    if (t.personality === 'partyer') p.condition = Math.max(0, p.condition - 0.6 / Math.max(1, p.units.length))
+    if (t.personality === 'tidy') p.condition = Math.min(100, p.condition + 0.2 / Math.max(1, p.units.length))
+
+    const isNomad = t.personality === 'nomad'
+    const willPay = !isNomad && rng() < (t.reliability / 100)
+    let income = 0
+    if (willPay) {
+      const reductionFactor = p.activeRenovation ? (1 - p.activeRenovation.rentReductionPct) : 1
+      income = Math.round(t.agreedKaltMiete * reductionFactor)
+      t.monthsBehind = Math.max(0, t.monthsBehind - 1)
+    } else {
+      t.monthsBehind++
+      if (isNomad && t.disguisePersonality && t.monthsBehind >= 3) {
+        t.disguisePersonality = undefined
+        const where = p.units.length > 1 ? `${this.nameFor(p)} (${u.label})` : this.nameFor(p)
+        this.emit('toast', { kind: 'error', text: `${t.name} in ${where} ist ein Mietnomade! Nur per Raeumungsklage entfernbar.` })
+      }
+    }
+
+    const condTarget = t.personality === 'demanding' ? p.condition - 10 : p.condition + 10
+    const targetSat = Math.min(100, condTarget)
+    t.satisfaction += (targetSat - t.satisfaction) * 0.4
+    t.satisfaction = Math.max(0, Math.min(100, t.satisfaction))
+    t.monthsRemaining--
+
+    const cooperativeLeave = !isNomad && (t.satisfaction < 25 || t.monthsRemaining <= 0 || t.monthsBehind >= 3)
+    if (cooperativeLeave) {
+      const refund = t.personality === 'partyer' && p.condition < 50 ? t.deposit * 0.4 : t.deposit
+      this.state.player.cash -= refund
+      const where = p.units.length > 1 ? `${this.nameFor(p)} (${u.label})` : this.nameFor(p)
+      this.emit('toast', { kind: t.monthsBehind >= 3 ? 'warning' : 'info', text: `${t.name} zog aus (${where}). Kaution -${Math.round(refund)} EUR.` })
+      u.tenant = undefined
+      u.vacantMonths = 0
+    }
+    return income
+  }
+
+  /** Keep the headline `tenant`/`baseRent`/`nebenkosten`/`vacantMonths` in sync with
+   *  units[0] for single-unit properties so existing UI keeps working. For MFH the
+   *  headline becomes a building-level summary. */
+  private syncHeadlineFromUnits(p: Property) {
+    if (p.units.length === 0) return
+    if (p.units.length === 1) {
+      const u = p.units[0]
+      p.tenant = u.tenant
+      p.baseRent = u.baseKalt
+      p.nebenkosten = u.nebenkosten
+      p.vacantMonths = u.vacantMonths
+      p.applicantSearches = u.applicantSearches
+    } else {
+      // Aggregate for MFH/WG: total Kaltmiete + sum NK; pretend the first occupied
+      // unit is the "headline" tenant for any UI still reading p.tenant.
+      const totalKalt = p.units.reduce((s, x) => s + x.baseKalt, 0)
+      const totalNk = p.units.reduce((s, x) => s + x.nebenkosten, 0)
+      p.baseRent = totalKalt
+      p.nebenkosten = totalNk
+      const firstWithTenant = p.units.find(x => x.tenant)
+      p.tenant = firstWithTenant?.tenant
+      const allVacant = p.units.every(x => !x.tenant)
+      p.vacantMonths = allVacant ? Math.max(...p.units.map(x => x.vacantMonths)) : 0
+    }
   }
 
   private maybeRollEvent(rng: () => number) {
@@ -643,13 +733,16 @@ export class Engine {
   }
 
   /** Sign a lease: applicant becomes tenant. `kaltMiete` is the negotiated Kaltmiete;
-   *  Nebenkosten are taken from the property and added on top (the tenant pays warm,
-   *  but only Kaltmiete enters the player's books). */
-  signLease(propertyId: string, applicant: Applicant, kaltMiete: number, leaseMonths: number): { ok: boolean; reason?: string } {
+   *  Nebenkosten are taken from the unit and added on top (the tenant pays warm,
+   *  but only Kaltmiete enters the player's books).
+   *  For multi-unit properties pass the `unitId`; otherwise the first vacant unit is used. */
+  signLease(propertyId: string, applicant: Applicant, kaltMiete: number, leaseMonths: number, unitId?: string): { ok: boolean; reason?: string } {
     const p = this.state.owned.find(pp => pp.id === propertyId)
     if (!p) return { ok: false, reason: 'Nicht im Besitz' }
-    if (p.tenant) return { ok: false, reason: 'Wohnung bereits vermietet' }
-    const nk = typeof p.nebenkosten === 'number' ? p.nebenkosten : Math.round(p.baseRent * 0.25)
+    const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => !x.tenant)
+    if (!u) return { ok: false, reason: 'Keine freie Wohneinheit' }
+    if (u.tenant) return { ok: false, reason: 'Wohnung bereits vermietet' }
+    const nk = u.nebenkosten
     const warm = kaltMiete + nk
     if (warm > applicant.maxRentBudget * 1.05) return { ok: false, reason: 'Bewerber kann sich diese Warmmiete nicht leisten' }
 
@@ -658,7 +751,7 @@ export class Engine {
     // and zero-out reliability so they will never pay.
     const truePersonality = applicant.secretPersonality ?? applicant.personality
     const trueReliability = truePersonality === 'nomad' ? 0 : applicant.reliability
-    p.tenant = {
+    u.tenant = {
       id: applicant.id,
       name: applicant.name,
       occupation: applicant.occupation,
@@ -674,10 +767,11 @@ export class Engine {
       agreedNebenkosten: nk,
       deposit,
     }
-    p.vacantMonths = 0
+    u.vacantMonths = 0
+    this.syncHeadlineFromUnits(p)
     // deposit goes into player's cash (held for tenant — simplified)
     this.state.player.cash += deposit
-    this.emit('leaseSigned', { property: p, tenant: p.tenant })
+    this.emit('leaseSigned', { property: p, tenant: u.tenant, unit: u })
     this.emit('toast', { kind: 'success', text: `Vertrag mit ${applicant.name} (Kalt ${kaltMiete} + NK ${nk} EUR/M, ${leaseMonths} M, Kaution ${deposit} EUR)` })
     this.autoSave()
     return { ok: true }
@@ -995,8 +1089,8 @@ export class Engine {
     const kfwEligible = gewerkSet.has('heizung_install') && gewerkSet.has('fenster_install') && gewerkSet.has('fassade_putz')
     const kfwSubsidyPct = kfwEligible ? 0.30 : 0
 
-    // Modernisierung eligibility
-    const modernizationEligible = (scope === 'modern' || scope === 'luxury') && !!p.tenant
+    // Modernisierung eligibility — at least one occupied unit must benefit
+    const modernizationEligible = (scope === 'modern' || scope === 'luxury') && p.units.some(u => u.tenant)
 
     // Effects on completion (sum of gewerk contributions)
     const conditionGain = plan.reduce((s, r) => s + Engine.GEWERK_SPEC[r.gewerk].conditionGain + (r.material === 'premium' ? 2 : 0), 0)
@@ -1064,13 +1158,214 @@ export class Engine {
     const p = this.state.owned.find(pp => pp.id === propertyId)
     if (!p) return { ok: false, reason: 'Nicht im Besitz' }
     if (!p.modernizationUmlageAvailable) return { ok: false, reason: 'Keine Umlage verfuegbar — erst nach Modernisierung mit Mieter' }
-    if (!p.tenant) return { ok: false, reason: 'Kein Mieter' }
-    const newKalt = Math.round(p.tenant.agreedKaltMiete * 1.11)
-    p.tenant.agreedKaltMiete = newKalt
+    const occupied = p.units.filter(u => u.tenant)
+    if (occupied.length === 0) return { ok: false, reason: 'Kein Mieter' }
+    let totalNewKalt = 0
+    for (const u of occupied) {
+      const newKalt = Math.round(u.tenant!.agreedKaltMiete * 1.11)
+      u.tenant!.agreedKaltMiete = newKalt
+      totalNewKalt += newKalt
+    }
     p.modernizationUmlageAvailable = false
-    this.emit('toast', { kind: 'success', text: `Modernisierungsumlage angewandt — Kaltmiete +11% auf ${formatEuro(newKalt)}, ohne Klagerisiko.` })
+    this.syncHeadlineFromUnits(p)
+    this.emit('toast', { kind: 'success', text: `Modernisierungsumlage angewandt — alle Mieten +11% (Summe ${formatEuro(totalNewKalt)} kalt), ohne Klagerisiko.` })
     this.autoSave()
-    return { ok: true, newKalt }
+    return { ok: true, newKalt: totalNewKalt }
+  }
+
+  // ============ WG / MFH / WEG (M5) ============
+
+  /** Convert a single-family property to a WG (Wohngemeinschaft) — splits the unit
+   *  into 3-5 small rooms with shared kitchen, ~30% higher total Kalt potential. */
+  convertToWG(propertyId: string): { ok: boolean; reason?: string; cost?: number } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    if (p.buildingForm !== 'single') return { ok: false, reason: 'Nur Einzelwohnungen koennen zur WG umgebaut werden' }
+    if (p.units.some(u => u.tenant)) return { ok: false, reason: 'Wohnung muss leer sein' }
+    if (p.condition < 60) return { ok: false, reason: 'Zustand muss mindestens 60% sein (sonst Umbau riskant)' }
+    const oldUnit = p.units[0]
+    const totalSqm = oldUnit.sqm
+    const totalKalt = oldUnit.baseKalt
+    const cost = Math.round(30000 * (totalSqm / 60))
+    if (this.state.player.cash < cost) return { ok: false, reason: `Brauchst ${formatEuro(cost)}` }
+
+    const roomCount = Math.max(3, Math.min(5, Math.floor(totalSqm / 18)))
+    const newKaltTotal = Math.round(totalKalt * 1.30)
+    const perRoomKalt = Math.round(newKaltTotal / roomCount)
+    const perRoomNk = Math.round(perRoomKalt * 0.30)  // shared utilities a touch higher per head
+    const perRoomSqm = Math.round(totalSqm / roomCount)
+
+    p.units = []
+    for (let i = 0; i < roomCount; i++) {
+      p.units.push({
+        id: 'u_' + Math.random().toString(36).slice(2, 6),
+        label: `Zimmer ${i + 1}`,
+        sqm: perRoomSqm,
+        baseKalt: perRoomKalt,
+        nebenkosten: perRoomNk,
+        vacantMonths: 0,
+      })
+    }
+    p.buildingForm = 'wg'
+    p.condition = Math.min(100, p.condition + 8)  // small condition bump from rebuild
+    this.state.player.cash -= cost
+    this.syncHeadlineFromUnits(p)
+    this.emit('renovated', { property: p, level: 'wg-conversion', cost })
+    this.emit('toast', { kind: 'success', text: `${this.nameFor(p)} zur WG umgebaut — ${roomCount} Zimmer (-${formatEuro(cost)}, +30% Mietpotenzial).` })
+    this.autoSave()
+    return { ok: true, cost }
+  }
+
+  // ----- WEG: Eigentuemerversammlung -----
+
+  private static WEG_PROPOSALS: Array<Omit<WEGProposal, 'id'>> = [
+    {
+      topic: 'fassade-sanierung',
+      title: 'Fassaden-Sanierung beschliessen',
+      body: 'Die Fassade broeckelt. Verwaltung schlaegt energetische Sanierung vor.',
+      totalCost: 80000,
+      conditionImpactIfYes: +12,
+      conditionImpactIfNo: -8,
+      consequenceIfYes: 'Sonderumlage anteilig, Zustand +12, langfristig weniger Capex',
+      consequenceIfNo: 'Zustand -8 in 12 Monaten, Capex-Risiko steigt',
+    },
+    {
+      topic: 'dach-sanierung',
+      title: 'Dach erneuern',
+      body: 'Bei Starkregen tropft es ins Treppenhaus. Komplette Eindeckung empfohlen.',
+      totalCost: 120000,
+      conditionImpactIfYes: +15,
+      conditionImpactIfNo: -10,
+      consequenceIfYes: 'Sonderumlage, Zustand +15, kein Dach-Capex 20 Jahre',
+      consequenceIfNo: 'Risiko Dach-Capex in 12 Monaten',
+    },
+    {
+      topic: 'heizung-tausch',
+      title: 'Heizungstausch (Gas → Waermepumpe)',
+      body: 'Die alte Heizung muss raus. Waermepumpe ist KfW-foerderbar.',
+      totalCost: 95000,
+      conditionImpactIfYes: +10,
+      conditionImpactIfNo: -6,
+      consequenceIfYes: 'Sonderumlage, Zustand +10, langfristig billiger',
+      consequenceIfNo: 'Heizungs-Capex bleibt latent',
+    },
+    {
+      topic: 'aufzug-modernisierung',
+      title: 'Aufzug modernisieren',
+      body: 'Steckenbleiben haeuft sich. Neuer Antrieb + Steuerung.',
+      totalCost: 60000,
+      conditionImpactIfYes: +6,
+      conditionImpactIfNo: -3,
+      consequenceIfYes: 'Sonderumlage, kleine Wertsteigerung',
+      consequenceIfNo: 'Komfort sinkt — Mieter beschweren sich',
+    },
+    {
+      topic: 'fahrradraum',
+      title: 'Fahrradraum + Lastenrad-Stellplaetze',
+      body: 'Nachfrage gross, Investition niedrig.',
+      totalCost: 12000,
+      conditionImpactIfYes: +2,
+      conditionImpactIfNo: 0,
+      consequenceIfYes: 'Kleine Sonderumlage, Mieter zufriedener',
+      consequenceIfNo: 'Status quo',
+    },
+    {
+      topic: 'hausordnung',
+      title: 'Hausordnung verschaerfen (Ruhezeiten)',
+      body: 'Beschwerden ueber Laerm. Strengere Regeln vorgeschlagen.',
+      totalCost: 0,
+      conditionImpactIfYes: +1,
+      conditionImpactIfNo: 0,
+      consequenceIfYes: 'Ruhigere Mieter ziehen ein, partyer ziehen weg',
+      consequenceIfNo: 'Status quo',
+    },
+    {
+      topic: 'hausverwaltung-wechsel',
+      title: 'Hausverwaltung wechseln',
+      body: 'Aktuelle Verwaltung schlampt mit Abrechnungen.',
+      totalCost: 0,
+      conditionImpactIfYes: +1,
+      conditionImpactIfNo: -1,
+      consequenceIfYes: 'Mehr Transparenz, kein Cash-Effekt',
+      consequenceIfNo: 'Status quo, weiter Frustration',
+    },
+  ]
+
+  /** Each month, check if any WEG-property of the player is due for an assembly.
+   *  Frequency: every 12 game-months from `wegMembership.nextAssemblyMonth`. */
+  private maybeScheduleWegAssembly(p: Property, rng: () => number) {
+    if (!p.wegMembership) return
+    if (this.gameMonth() < p.wegMembership.nextAssemblyMonth) return
+    if (this.state.wegAssemblies.some(a => a.propertyId === p.id && !a.decided)) return  // one at a time
+
+    const proposalCount = 2 + Math.floor(rng() * 3)
+    const pool = Engine.WEG_PROPOSALS.slice()
+    const proposals: WEGProposal[] = []
+    for (let i = 0; i < proposalCount && pool.length > 0; i++) {
+      const idx = Math.floor(rng() * pool.length)
+      const tpl = pool.splice(idx, 1)[0]
+      proposals.push({ ...tpl, id: 'pr_' + Math.random().toString(36).slice(2, 6) })
+    }
+    const playerShare = p.wegMembership.unitsOwned / p.wegMembership.totalUnits
+    this.state.wegAssemblies.push({
+      id: 'a_' + Math.random().toString(36).slice(2, 9),
+      propertyId: p.id,
+      scheduledMonth: this.gameMonth(),
+      proposals,
+      playerShare,
+      playerVotes: {},
+      decided: false,
+      outcomes: {},
+    })
+    p.wegMembership.nextAssemblyMonth = this.gameMonth() + 12
+    this.emit('wegAssembly', { propertyId: p.id })
+    this.emit('toast', { kind: 'info', text: `📋 Eigentuemerversammlung in ${this.nameFor(p)} — ${proposals.length} Tagesordnungspunkte. Stimmenanteil ${(playerShare * 100).toFixed(0)}%.` })
+  }
+
+  castWegVote(assemblyId: string, proposalId: string, vote: 'yes' | 'no' | 'abstain') {
+    const a = this.state.wegAssemblies.find(x => x.id === assemblyId)
+    if (!a || a.decided) return
+    a.playerVotes[proposalId] = vote
+  }
+
+  /** Apply the outcome of a finalized WEG assembly to the player's property. */
+  finalizeWegAssembly(assemblyId: string): { ok: boolean; reason?: string } {
+    const a = this.state.wegAssemblies.find(x => x.id === assemblyId)
+    if (!a) return { ok: false, reason: 'Versammlung nicht gefunden' }
+    if (a.decided) return { ok: false, reason: 'Bereits entschieden' }
+    const p = this.state.owned.find(pp => pp.id === a.propertyId)
+    if (!p) return { ok: false, reason: 'Property nicht mehr im Besitz' }
+
+    for (const prop of a.proposals) {
+      const playerVote = a.playerVotes[prop.id] ?? 'abstain'
+      // Other owners vote based on the proposal's economic appeal — energetic/required
+      // upgrades pass at 60-70% support, optional comfort items at 40-50%.
+      const baselineSupport = (prop.topic === 'dach-sanierung' || prop.topic === 'fassade-sanierung' || prop.topic === 'heizung-tausch') ? 0.65
+        : (prop.topic === 'aufzug-modernisierung' || prop.topic === 'fahrradraum') ? 0.45
+        : 0.50
+      const otherShare = 1 - a.playerShare
+      const yesFromOthers = baselineSupport * otherShare
+      const yesFromPlayer = playerVote === 'yes' ? a.playerShare : (playerVote === 'no' ? 0 : a.playerShare * 0.5)
+      const totalYes = yesFromOthers + yesFromPlayer
+      const passed = totalYes >= 0.5
+      a.outcomes[prop.id] = passed ? 'passed' : 'rejected'
+
+      if (passed) {
+        const playerCost = Math.round(prop.totalCost * a.playerShare)
+        if (playerCost > 0) this.state.player.cash -= playerCost
+        p.condition = Math.max(0, Math.min(100, p.condition + prop.conditionImpactIfYes))
+        if (playerCost > 0) {
+          this.emit('toast', { kind: 'info', text: `WEG: "${prop.title}" beschlossen — Sonderumlage ${formatEuro(playerCost)}.` })
+        } else {
+          this.emit('toast', { kind: 'info', text: `WEG: "${prop.title}" beschlossen.` })
+        }
+      } else {
+        p.condition = Math.max(0, Math.min(100, p.condition + prop.conditionImpactIfNo))
+      }
+    }
+    a.decided = true
+    this.autoSave()
+    return { ok: true }
   }
 
   /** Tick the active renovation: advance current step, complete steps, roll risks. */
@@ -1277,34 +1572,32 @@ export class Engine {
    * If a suit is filed, raise still applies immediately, but a Lawsuit
    * runs for 4-6 months. Won → keep new rent; lost → revert + Reputation -10.
    */
-  raiseRent(propertyId: string, newKalt: number): { ok: boolean; reason?: string; lawsuitFiled?: boolean; lawsuitChance?: number } {
+  raiseRent(propertyId: string, newKalt: number, unitId?: string): { ok: boolean; reason?: string; lawsuitFiled?: boolean; lawsuitChance?: number } {
     const p = this.state.owned.find(pp => pp.id === propertyId)
     if (!p) return { ok: false, reason: 'Nicht im Besitz' }
-    if (!p.tenant) return { ok: false, reason: 'Kein Mieter — Miete im naechsten Vertrag setzen' }
-    const t = p.tenant
+    const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => x.tenant)
+    if (!u || !u.tenant) return { ok: false, reason: 'Kein Mieter — Miete im naechsten Vertrag setzen' }
+    const t = u.tenant
     if (newKalt <= t.agreedKaltMiete) return { ok: false, reason: 'Neue Miete muss hoeher sein' }
-    // 15% rent-hike cap per 12 months feels harsh but legally close (Kappungsgrenze 20% in 3y).
-    // We allow any value but cap satisfaction hit smoothly.
 
     const ratio = newKalt / Math.max(1, p.mietspiegelKalt)
     const lawsuitChance = ratio <= 1.10 ? 0
       : ratio >= 1.30 ? 0.95
-      : (ratio - 1.10) * 5  // 1.10 → 0, 1.20 → 0.5, 1.30 → 1.0 (clamped above)
+      : (ratio - 1.10) * 5
 
-    // tenant satisfaction hit proportional to the hike
     const hikePct = (newKalt - t.agreedKaltMiete) / Math.max(1, t.agreedKaltMiete)
     t.satisfaction = Math.max(0, t.satisfaction - hikePct * 60)
 
     const oldKalt = t.agreedKaltMiete
     t.agreedKaltMiete = newKalt
-    p.baseRent = Math.max(p.baseRent, newKalt)  // baseRent floats up too — Mietspiegel for next tenant
+    u.baseKalt = Math.max(u.baseKalt, newKalt)
+    this.syncHeadlineFromUnits(p)
 
     let lawsuitFiled = false
     if (lawsuitChance > 0 && Math.random() < lawsuitChance) {
       lawsuitFiled = true
       const months = 4 + Math.floor(Math.random() * 3)
       const monthlyCost = 800 + Math.floor(Math.random() * 700)
-      // success-chance for the player: higher when ratio is closer to 1.10
       const successChance = Math.max(0.05, 1 - lawsuitChance)
       this.state.lawsuits.push({
         id: 'ls_' + Math.random().toString(36).slice(2, 9),
@@ -1316,6 +1609,7 @@ export class Engine {
         totalSpent: 0,
         successChance,
         revertToKalt: oldKalt,
+        tenantId: t.id,
         outcome: 'pending',
       })
       this.emit('toast', { kind: 'warning', text: `${t.name} reicht Klage gegen Mieterhoehung ein. Anwaltskosten ${formatEuro(monthlyCost)}/M, ${months} Monate.` })
@@ -1340,10 +1634,12 @@ export class Engine {
    * (i.e. not Mietnomaden, not deeply in arrears). Costs -5 Reputation.
    * Suggest startEviction() for problem tenants.
    */
-  evictTenant(propertyId: string): { ok: boolean; reason?: string } {
+  evictTenant(propertyId: string, unitId?: string): { ok: boolean; reason?: string } {
     const p = this.state.owned.find(pp => pp.id === propertyId)
-    if (!p?.tenant) return { ok: false, reason: 'Kein Mieter' }
-    const t = p.tenant
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => x.tenant)
+    if (!u || !u.tenant) return { ok: false, reason: 'Kein Mieter' }
+    const t = u.tenant
     if (t.personality === 'nomad') {
       this.emit('toast', { kind: 'error', text: `${t.name} ignoriert die Kuendigung — nur Raeumungsklage hilft.` })
       return { ok: false, reason: 'Mieter ignoriert Kuendigung — Raeumungsklage einleiten' }
@@ -1353,8 +1649,9 @@ export class Engine {
       return { ok: false, reason: 'Mieter im Rueckstand zieht nicht freiwillig aus' }
     }
     const tenantName = t.name
-    p.tenant = undefined
-    p.vacantMonths = 0
+    u.tenant = undefined
+    u.vacantMonths = 0
+    this.syncHeadlineFromUnits(p)
     this.state.player.reputation = Math.max(0, this.state.player.reputation - 5)
     this.emit('toast', { kind: 'warning', text: `${tenantName} gekuendigt — Reputation -5` })
     this.autoSave()
@@ -1362,14 +1659,15 @@ export class Engine {
   }
 
   /** UI helper: how good is the eviction case before the player commits? */
-  evictionEstimate(propertyId: string): { months: number; monthlyCost: number; totalCost: number; successChance: number } | null {
+  evictionEstimate(propertyId: string, unitId?: string): { months: number; monthlyCost: number; totalCost: number; successChance: number } | null {
     const p = this.state.owned.find(pp => pp.id === propertyId)
-    if (!p?.tenant) return null
-    const t = p.tenant
-    const months = 4 + Math.floor(Math.random() * 3) // 4-6 (random preview, real value rolled on start)
-    const monthlyCost = 1000 + Math.floor(Math.random() * 500) // 1000-1500
-    // Strong cases: nomad (cover blown), 3+ months behind, or below-25 satisfaction with valid grounds
-    const isNomad = t.personality === 'nomad' && !t.disguisePersonality  // only if cover blew
+    if (!p) return null
+    const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => x.tenant)
+    if (!u?.tenant) return null
+    const t = u.tenant
+    const months = 4 + Math.floor(Math.random() * 3)
+    const monthlyCost = 1000 + Math.floor(Math.random() * 500)
+    const isNomad = t.personality === 'nomad' && !t.disguisePersonality
     const grounds =
       (isNomad ? 0.5 : 0) +
       Math.min(0.4, t.monthsBehind * 0.1) +
@@ -1379,13 +1677,16 @@ export class Engine {
   }
 
   /** Start a Raeumungsklage. Tenant remains in the property until the suit ends. */
-  startEviction(propertyId: string): { ok: boolean; reason?: string; lawsuit?: Lawsuit } {
+  startEviction(propertyId: string, unitId?: string): { ok: boolean; reason?: string; lawsuit?: Lawsuit } {
     const p = this.state.owned.find(pp => pp.id === propertyId)
-    if (!p?.tenant) return { ok: false, reason: 'Kein Mieter' }
-    if (this.state.lawsuits.some(l => l.propertyId === propertyId && l.reason === 'eviction' && l.outcome === 'pending')) {
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => x.tenant)
+    if (!u?.tenant) return { ok: false, reason: 'Kein Mieter' }
+    const tenantId = u.tenant.id
+    if (this.state.lawsuits.some(l => l.propertyId === propertyId && l.reason === 'eviction' && l.tenantId === tenantId && l.outcome === 'pending')) {
       return { ok: false, reason: 'Klage laeuft bereits' }
     }
-    const est = this.evictionEstimate(propertyId)!
+    const est = this.evictionEstimate(propertyId, u.id)!
     const months = 4 + Math.floor(Math.random() * 3)
     const monthlyCost = 1000 + Math.floor(Math.random() * 500)
     const lawsuit: Lawsuit = {
@@ -1397,11 +1698,11 @@ export class Engine {
       monthlyCost,
       totalSpent: 0,
       successChance: est.successChance,
-      tenantId: p.tenant.id,
+      tenantId,
       outcome: 'pending',
     }
     this.state.lawsuits.push(lawsuit)
-    this.emit('toast', { kind: 'warning', text: `Raeumungsklage gegen ${p.tenant.name} eingereicht — ${months} M, ${formatEuro(monthlyCost)}/M, Erfolg ${(est.successChance * 100).toFixed(0)}%.` })
+    this.emit('toast', { kind: 'warning', text: `Raeumungsklage gegen ${u.tenant.name} eingereicht — ${months} M, ${formatEuro(monthlyCost)}/M, Erfolg ${(est.successChance * 100).toFixed(0)}%.` })
     this.autoSave()
     return { ok: true, lawsuit }
   }
@@ -1420,7 +1721,7 @@ export class Engine {
         const cap = p.pendingCapex
         cap.state = 'expired'
         p.condition = Math.max(0, p.condition - cap.conditionImpactIfIgnored)
-        if (p.tenant) p.tenant.satisfaction = Math.max(0, p.tenant.satisfaction - 20)
+        for (const u of p.units) if (u.tenant) u.tenant.satisfaction = Math.max(0, u.tenant.satisfaction - 20)
         this.state.capexHistory.push(cap)
         p.pendingCapex = undefined
         this.emit('toast', { kind: 'error', text: `${cap.title} bei ${this.nameFor(p)} ignoriert — Zustand -${cap.conditionImpactIfIgnored}, Mieter sauer.` })
@@ -1550,11 +1851,12 @@ export class Engine {
   monthlyCashflow(): { rent: number; maintenance: number; loanPayments: number; overhead: number; net: number } {
     let rent = 0, maintenance = 0, loanPayments = 0
     for (const p of this.state.owned) {
-      if (p.tenant) {
-        const reductionFactor = p.activeRenovation ? (1 - p.activeRenovation.rentReductionPct) : 1
-        rent += this.effectiveRent(p) * (p.tenant.reliability / 100) * reductionFactor
+      const reductionFactor = p.activeRenovation ? (1 - p.activeRenovation.rentReductionPct) : 1
+      for (const u of p.units) {
+        if (u.tenant) rent += u.tenant.agreedKaltMiete * (u.tenant.reliability / 100) * reductionFactor
       }
       maintenance += this.maintenanceCost(p)
+      if (p.wegMembership) maintenance += p.wegMembership.hausgeldMonthly
     }
     for (const l of this.state.loans) loanPayments += l.monthlyPayment
     const overhead = 1500 + Math.round(this.state.owned.length * 80)
@@ -1696,6 +1998,26 @@ export class Engine {
       if (!Array.isArray(this.state.contractorPool) || this.state.contractorPool.length === 0) {
         this.state.contractorPool = this.generateContractorPool()
       }
+      // M5: multi-unit support — every Property must have `units` and `buildingForm`.
+      // Old saves get a single synthetic unit synthesised from the legacy headline fields.
+      const ensureUnits = (p: Property) => {
+        if (!Array.isArray(p.units) || p.units.length === 0) {
+          p.units = [{
+            id: 'u_' + Math.random().toString(36).slice(2, 6),
+            label: 'Einheit',
+            sqm: 60,
+            baseKalt: p.baseRent,
+            nebenkosten: typeof p.nebenkosten === 'number' ? p.nebenkosten : Math.round(p.baseRent * 0.25),
+            tenant: p.tenant,
+            vacantMonths: p.vacantMonths,
+            applicantSearches: p.applicantSearches,
+          }]
+        }
+        if (!p.buildingForm) p.buildingForm = 'single'
+      }
+      this.state.listings.forEach(ensureUnits)
+      this.state.owned.forEach(ensureUnits)
+      if (!Array.isArray(this.state.wegAssemblies)) this.state.wegAssemblies = []
       return true
     } catch { return false }
   }

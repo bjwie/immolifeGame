@@ -4,6 +4,7 @@ import type { BankOfferTerms, GewerkKind, Property } from '../sim/types'
 import type { NegotiationModal } from './NegotiationModal'
 import type { RentalModal } from './RentalModal'
 import type { RenovationModal } from './RenovationModal'
+import type { WEGModal } from './WEGModal'
 import { ModalManager, type ManagedModal } from './ModalManager'
 
 const Engine_GEWERK_LABEL: Record<GewerkKind, string> = {
@@ -52,8 +53,10 @@ export class DealSheet {
   setNegotiationModal(nm: NegotiationModal) { this.negotiationModal = nm }
   setRentalModal(rm: RentalModal) { this.rentalModal = rm }
   setRenovationModal(rm: RenovationModal) { this.renovationModal = rm }
+  setWegModal(wm: WEGModal) { this.wegModal = wm }
   private rentalModal: RentalModal | null = null
   private renovationModal: RenovationModal | null = null
+  private wegModal: WEGModal | null = null
 
   open(p: Property, isOwned: boolean) {
     this.current = p
@@ -92,7 +95,7 @@ export class DealSheet {
 
     const head = this.root.querySelector('#ds-head')!
     head.innerHTML = `
-      <div class="ds-name">${escape(e.nameFor(p))}</div>
+      <div class="ds-name">${escape(e.nameFor(p))}${p.buildingForm === 'mfh' ? ` · ${p.units.length} Einheiten MFH` : p.buildingForm === 'wg' ? ' · WG' : ''}</div>
       <div class="ds-sub">${typeName} · ${districtName} · Baujahr ${p.yearBuilt}</div>
     `
 
@@ -260,6 +263,7 @@ export class DealSheet {
 
   private renderOwnedActions(p: Property) {
     this.root.querySelector('#ds-banks')!.innerHTML = ''
+    const isMulti = p.units.length > 1
     const t = p.tenant
     const personaLabels: Record<string, string> = { tidy: 'Ordentlich', partyer: 'Partyfreudig', quiet: 'Ruhig', demanding: 'Anspruchsvoll', family: 'Familie', student: 'Student:in', nomad: 'Mietnomade' }
     // Display the disguise persona while it's still in effect (cover not yet blown).
@@ -270,7 +274,45 @@ export class DealSheet {
     const canCooperativeQuit = t && t.personality !== 'nomad' && t.monthsBehind < 2
     const evictionEst = t && !activeEviction ? this.engine.evictionEstimate(p.id) : null
     const nomadRevealed = t && t.personality === 'nomad' && !t.disguisePersonality
-    const tenantHtml = t ? `
+    const formLabel = p.buildingForm === 'mfh' ? 'Mehrfamilienhaus' : p.buildingForm === 'wg' ? 'Wohngemeinschaft' : ''
+    const unitsHtml = isMulti ? `
+      <div class="units-card">
+        <div class="card-title">${formLabel} · ${p.units.length} Einheiten</div>
+        ${p.units.map(u => {
+          const ut = u.tenant
+          const upersona = ut?.disguisePersonality ?? ut?.personality
+          const utag = upersona ? `<span class="persona-tag persona-${upersona}">${personaLabels[upersona] ?? upersona}</span>` : ''
+          const uNomadAlert = ut && ut.personality === 'nomad' && !ut.disguisePersonality
+          const uActiveEv = this.engine.state.lawsuits.find(l => l.propertyId === p.id && l.reason === 'eviction' && l.tenantId === ut?.id && l.outcome === 'pending')
+          return `
+            <div class="unit-row ${uNomadAlert ? 'nomad-alert' : ''}">
+              <div class="unit-row-head">
+                <b>${escape(u.label)}</b>
+                <span class="micro">${u.sqm}m² · Kalt ${formatEuro(u.baseKalt)} + NK ${formatEuro(u.nebenkosten)}</span>
+              </div>
+              ${ut ? `
+                <div class="unit-tenant-row">
+                  <span><b>${escape(ut.name)}</b> ${utag}${uNomadAlert ? ' <span class="bad" style="font-weight:800">⚠ NOMADE</span>' : ''}</span>
+                  <span class="micro">${Math.round(ut.satisfaction)}% Zufr · ${ut.monthsBehind} M Rueckstand · ${ut.monthsRemaining} M Vertrag</span>
+                </div>
+                ${uActiveEv ? `<div class="micro bad">⚖ Klage laeuft: noch ${uActiveEv.monthsRemaining} M, ${formatEuro(uActiveEv.totalSpent)} bisher</div>` : ''}
+                <div class="unit-actions">
+                  <button class="ghost small" data-unit-rent-hike="${u.id}">📈 Miete</button>
+                  ${ut.personality !== 'nomad' && ut.monthsBehind < 2 ? `<button class="ghost small" data-unit-evict="${u.id}">Kuendigen</button>` : ''}
+                  ${!uActiveEv && (ut.personality === 'nomad' || ut.monthsBehind >= 2) ? `<button class="danger small" data-unit-start-eviction="${u.id}">🧑‍⚖️ Raeumung</button>` : ''}
+                </div>
+              ` : `
+                <div class="unit-tenant-row vacant"><span class="micro">Leer (${u.vacantMonths} M)</span>
+                  <button class="primary small" data-unit-show-applicants="${u.id}">👥 Bewerber</button>
+                </div>
+              `}
+            </div>
+          `
+        }).join('')}
+      </div>
+    ` : ''
+
+    const tenantHtml = !isMulti && t ? `
       <div class="tenant-card ${nomadRevealed ? 'nomad-alert' : ''}">
         <div class="t-head"><b>${escape(t.name)}</b> ${personaTag} ${nomadRevealed ? '<span class="bad" style="font-weight:800">⚠ MIETNOMADE</span>' : ''} <span class="t-job">${escape(t.occupation)}</span></div>
         <div class="t-stats">
@@ -295,12 +337,12 @@ export class DealSheet {
             <button class="danger small" data-start-eviction>🧑‍⚖️ Raeumungsklage einleiten (~${evictionEst.months} M, ${formatEuro(evictionEst.totalCost)}, ${Math.round(evictionEst.successChance * 100)}% Erfolg)</button>
           ` : ''}
         </div>
-      </div>` : `
+      </div>` : (!isMulti ? `
       <div class="tenant-card vacant">
         <div><b>Wohnung leer (${p.vacantMonths} Monate)</b></div>
         <div class="micro">Veroeffentliche eine Anzeige und waehle aus den Bewerbern.</div>
         <button class="primary" data-show-applicants>👥 Bewerber ansehen</button>
-      </div>`
+      </div>` : '')
 
     const sellPrice = Math.round(p.marketValue * 0.96)
     const loan = this.engine.state.loans.find(l => l.propertyId === p.id)
@@ -389,6 +431,27 @@ export class DealSheet {
       </div>
     ` : ''
 
+    // WG-Umbau button — single property only, must be empty + condition >= 60
+    const canConvertWg = p.buildingForm === 'single' && p.condition >= 60 && !p.units.some(u => u.tenant) && !reno
+    const wgConvertCost = canConvertWg ? Math.round(30000 * (p.units[0]?.sqm ?? 60) / 60) : 0
+    const wgHtml = canConvertWg ? `
+      <div class="reno-box">
+        <div class="card-title">UMBAU ZU WG</div>
+        <div class="micro">Splittet die Wohnung in 3-5 Zimmer, +30% Mietpotenzial. Erfordert leere Wohnung & Zustand >=60.</div>
+        <button class="primary" data-convert-wg>🛠 Zur WG umbauen (${formatEuro(wgConvertCost)})</button>
+      </div>
+    ` : ''
+
+    // WEG assembly button if there's a pending one
+    const wegPending = this.engine.state.wegAssemblies.find(a => a.propertyId === p.id && !a.decided)
+    const wegHtml = wegPending ? `
+      <div class="weg-card">
+        <div class="card-title">📋 EIGENTUEMERVERSAMMLUNG OFFEN</div>
+        <div class="micro">${wegPending.proposals.length} Tagesordnungspunkte · Stimmenanteil ${(wegPending.playerShare * 100).toFixed(0)}%</div>
+        <button class="primary" data-open-weg="${wegPending.id}">Versammlung oeffnen</button>
+      </div>
+    ` : ''
+
     const umlageHtml = p.modernizationUmlageAvailable && p.tenant ? `
       <div class="umlage-card">
         <div class="card-title">§559 BGB MODERNISIERUNGSUMLAGE</div>
@@ -398,11 +461,14 @@ export class DealSheet {
     ` : ''
 
     this.root.querySelector('#ds-actions')!.innerHTML = `
+      ${wegHtml}
       ${capexHtml}
       ${renoHtml}
+      ${unitsHtml}
       ${tenantHtml}
       ${loanHtml}
       ${renoBoxHtml}
+      ${wgHtml}
       ${umlageHtml}
       <div class="sell-box">
         <div class="fin-row"><span>Verkaufspreis (- 4% Gebuehren)</span><b>${formatEuro(sellPrice)}</b></div>
@@ -445,6 +511,39 @@ export class DealSheet {
       if (!r.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: r.reason ?? 'Umlage fehlgeschlagen' })
       this.refresh()
     })
+    this.root.querySelector('[data-convert-wg]')?.addEventListener('click', () => {
+      const r = this.engine.convertToWG(p.id)
+      if (!r.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: r.reason ?? 'Umbau fehlgeschlagen' })
+      this.refresh()
+    })
+    this.root.querySelector('[data-open-weg]')?.addEventListener('click', (e) => {
+      const id = (e.currentTarget as HTMLElement).dataset.openWeg!
+      if (this.wegModal) this.wegModal.open(id)
+    })
+    // Per-unit actions for MFH/WG
+    this.root.querySelectorAll<HTMLElement>('[data-unit-evict]').forEach(b => {
+      b.addEventListener('click', () => {
+        this.engine.evictTenant(p.id, b.dataset.unitEvict!)
+        this.refresh()
+      })
+    })
+    this.root.querySelectorAll<HTMLElement>('[data-unit-start-eviction]').forEach(b => {
+      b.addEventListener('click', () => {
+        const r = this.engine.startEviction(p.id, b.dataset.unitStartEviction!)
+        if (!r.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: r.reason ?? 'Klage nicht moeglich' })
+        this.refresh()
+      })
+    })
+    this.root.querySelectorAll<HTMLElement>('[data-unit-rent-hike]').forEach(b => {
+      b.addEventListener('click', () => {
+        this.openRentHike(p, b.dataset.unitRentHike!)
+      })
+    })
+    this.root.querySelectorAll<HTMLElement>('[data-unit-show-applicants]').forEach(b => {
+      b.addEventListener('click', () => {
+        if (this.rentalModal) this.rentalModal.open(p, () => this.refresh(), b.dataset.unitShowApplicants)
+      })
+    })
     this.root.querySelectorAll<HTMLElement>('[data-sell-broker]').forEach(el => {
       el.addEventListener('click', () => {
         const id = el.dataset.sellBroker!
@@ -470,9 +569,10 @@ export class DealSheet {
     this.root.querySelector('[data-rent-hike]')?.addEventListener('click', () => this.openRentHike(p))
   }
 
-  private openRentHike(p: Property) {
-    if (!p.tenant) return
-    const t = p.tenant
+  private openRentHike(p: Property, unitId?: string) {
+    const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => x.tenant)
+    const t = u?.tenant
+    if (!t) return
     const minNew = t.agreedKaltMiete + 10
     const maxNew = Math.round(p.mietspiegelKalt * 1.5)
     let value = Math.round((t.agreedKaltMiete + p.mietspiegelKalt * 1.10) / 2)
@@ -516,7 +616,7 @@ export class DealSheet {
     updateRisk()
 
     overlay.querySelector('[data-confirm-hike]')!.addEventListener('click', () => {
-      this.engine.raiseRent(p.id, Number(slider.value))
+      this.engine.raiseRent(p.id, Number(slider.value), unitId)
       overlay.remove()
       this.refresh()
     })

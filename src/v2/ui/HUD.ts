@@ -36,6 +36,7 @@ export class HUD {
     engine.on('capexPaid', () => this.refresh())
     engine.on('renovationStart', () => this.refresh())
     engine.on('renovationDone', () => this.refresh())
+    engine.on('wegAssembly', () => this.refresh())
   }
 
   private bindControls() {
@@ -111,7 +112,18 @@ export class HUD {
       chip.title = `${s.player.schwarzJobsThisYear} Schwarzarbeit-Jobs in diesem Jahr — Audit-Risiko steigt mit jedem. Reset im Januar.\nGesamt: ${s.player.totalSchwarzJobs} · Audits erlebt: ${s.player.taxAuditsExperienced}`
       events.appendChild(chip)
     }
-    if (s.market.events.length === 0 && s.lawsuits.length === 0 && pendingCapex.length === 0 && activeRenos.length === 0) {
+    const pendingWeg = s.wegAssemblies.filter(a => !a.decided)
+    if (pendingWeg.length > 0) {
+      const chip = document.createElement('div')
+      chip.className = 'event-chip weg'
+      chip.textContent = `📋 ${pendingWeg.length} WEG-Versammlung${pendingWeg.length === 1 ? '' : 'en'}`
+      chip.title = pendingWeg.map(a => {
+        const p = s.owned.find(pp => pp.id === a.propertyId)
+        return `${p ? this.engine.nameFor(p) : 'Property'}: ${a.proposals.length} TOPs, ${(a.playerShare * 100).toFixed(0)}% Stimmenanteil`
+      }).join('\n')
+      events.appendChild(chip)
+    }
+    if (s.market.events.length === 0 && s.lawsuits.length === 0 && pendingCapex.length === 0 && activeRenos.length === 0 && pendingWeg.length === 0) {
       const chip = document.createElement('div')
       chip.className = 'event-chip muted'
       chip.textContent = 'Markt ruhig'

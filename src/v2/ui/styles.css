@@ -102,6 +102,7 @@ body {
 .event-chip.capex { border-color: #f8c14e; background: rgba(248, 193, 78, 0.12); }
 .event-chip.reno { border-color: var(--accent); background: rgba(78, 180, 224, 0.12); }
 .event-chip.schwarz { border-color: #6e6e6e; background: rgba(110, 110, 110, 0.18); color: #cccccc; }
+.event-chip.weg { border-color: var(--accent-2); background: rgba(132, 92, 242, 0.12); }
 
 /* =========== Toasts =========== */
 
@@ -304,6 +305,89 @@ button.danger.small { padding: 4px 8px; font-size: 11px; }
   border-radius: 8px; padding: 10px 12px; margin-bottom: 14px;
 }
 .umlage-card button { margin-top: 6px; width: auto; }
+
+/* Multi-unit list (MFH/WG) */
+.units-card {
+  background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 12px; margin-bottom: 14px;
+}
+.unit-row {
+  border-bottom: 1px solid var(--line); padding: 8px 0;
+}
+.unit-row:last-child { border-bottom: 0; }
+.unit-row.nomad-alert { background: rgba(255, 118, 118, 0.05); border-radius: 4px; padding-left: 6px; padding-right: 6px; }
+.unit-row-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 4px;
+}
+.unit-tenant-row {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 13px; padding: 4px 0;
+}
+.unit-tenant-row.vacant { color: var(--muted); }
+.unit-actions {
+  display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px;
+}
+.unit-actions button { font-size: 11px; padding: 4px 8px; }
+
+/* WEG card on DealSheet */
+.weg-card {
+  background: rgba(132, 92, 242, 0.10); border: 1px solid rgba(132, 92, 242, 0.45);
+  border-radius: 10px; padding: 12px; margin-bottom: 14px;
+}
+.weg-card .card-title { color: var(--accent-2); }
+.weg-card button { margin-top: 8px; }
+
+/* WEG modal */
+#weg-modal {
+  position: fixed; inset: 0;
+  display: none; align-items: center; justify-content: center; z-index: 7400;
+  background: rgba(8, 14, 20, 0.84);
+}
+#weg-modal.show { display: flex; }
+#weg-modal * { pointer-events: auto; }
+.weg-modal {
+  background: var(--bg-1); border: 1px solid var(--line);
+  border-radius: 12px; width: min(800px, 90vw); max-height: 90vh;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.weg-body {
+  padding: 14px 18px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.weg-proposal {
+  background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px 12px;
+}
+.weg-prop-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 6px;
+}
+.weg-prop-body {
+  font-size: 12px; color: var(--text); margin-bottom: 6px;
+}
+.weg-consequences {
+  margin: 4px 0 8px; padding: 6px 8px;
+  background: rgba(0,0,0,0.2); border-radius: 4px;
+}
+.weg-vote-row {
+  display: flex; gap: 6px;
+}
+.weg-vote {
+  flex: 1; background: var(--bg-3); color: var(--text);
+  border: 1px solid var(--line); border-radius: 4px; padding: 6px;
+  cursor: pointer; font-size: 12px;
+}
+.weg-vote.sel { background: var(--gold); color: #2a2200; border-color: var(--gold); font-weight: 700; }
+.weg-vote:disabled { opacity: 0.6; cursor: not-allowed; }
+.weg-out {
+  font-size: 11px; padding: 2px 6px; border-radius: 3px; font-weight: 700;
+}
+.weg-out.passed { background: rgba(95, 220, 120, 0.18); color: var(--good); }
+.weg-out.rejected { background: rgba(255, 118, 118, 0.18); color: var(--bad); }
+.weg-actions {
+  display: flex; justify-content: center; padding: 10px 0;
+}
 
 /* Renovation modal */
 #renovation-modal {

@@ -50,6 +50,36 @@ export interface Applicant {
 
 export type ListingState = 'forSale' | 'owned' | 'renting'
 
+/**
+ * A single rentable unit inside a Property. Single-family properties have exactly
+ * one unit (kept in sync with the Property's headline `tenant`/`baseRent`/`nebenkosten`).
+ * MFH have several; WG-converted properties have many small ones.
+ */
+export interface Unit {
+  id: string
+  label: string                 // "EG", "1.OG links", "Zimmer 1"
+  sqm: number
+  baseKalt: number              // Kaltmiete at perfect condition
+  nebenkosten: number
+  tenant?: Tenant
+  vacantMonths: number
+  /** Per-unit applicant search budget. Reset on month change in the engine. */
+  applicantSearches?: { month: number; remaining: number }
+}
+
+export type BuildingForm = 'single' | 'mfh' | 'wg'
+
+export interface WEGMembership {
+  /** how many units in the building the player owns */
+  unitsOwned: number
+  /** total units in the building (the rest belong to other simulated owners) */
+  totalUnits: number
+  /** monthly Hausgeld the player owes for shared upkeep */
+  hausgeldMonthly: number
+  /** game-month of the next assembly (next Eigentuemerversammlung) */
+  nextAssemblyMonth: number
+}
+
 export interface Property {
   id: string
   type: PropertyType
@@ -80,7 +110,8 @@ export interface Property {
   ownedSince?: number       // gameMonth when bought
   lastRenovationMonth?: number
   seller?: SellerInfo      // who's selling (private or agent-listed)
-  /** Per-month applicant search budget. Initialised lazily; reset on month change. */
+  /** Per-month applicant search budget. Initialised lazily; reset on month change.
+   *  For MFH this acts as a fallback if a unit has none of its own — primary state lives on `Unit`. */
   applicantSearches?: { month: number; remaining: number }
   /** Pending major repair (Steigstrang/Heizung/Dach etc.). Max 1 at a time per property. */
   pendingCapex?: CapexEvent
@@ -88,6 +119,13 @@ export interface Property {
   activeRenovation?: RenovationContract
   /** True after a modern/luxury renovation completes; lets player invoke Modernisierungsumlage once. */
   modernizationUmlageAvailable?: boolean
+  /** Multi-unit support (M5). For single-family properties this is a 1-element array
+   *  whose values mirror the Property's headline `tenant`/`baseRent`/`nebenkosten`. */
+  units: Unit[]
+  buildingForm: BuildingForm
+  /** When this property is just one unit inside a larger building (= player only owns part),
+   *  this membership info enables Hausgeld + Eigentuemerversammlung. */
+  wegMembership?: WEGMembership
 }
 
 export interface Loan {
@@ -353,6 +391,41 @@ export interface KfwRefundPending {
   amount: number
 }
 
+// =========== WEG (M5) ===========
+
+export type WEGAgendaTopic =
+  | 'fassade-sanierung' | 'dach-sanierung' | 'heizung-tausch'
+  | 'hausordnung' | 'hausverwaltung-wechsel' | 'aufzug-modernisierung' | 'fahrradraum'
+
+export interface WEGProposal {
+  id: string
+  topic: WEGAgendaTopic
+  title: string
+  body: string
+  /** Sonderumlage for the entire WEG (player pays a share proportional to ownership) */
+  totalCost: number
+  /** What happens after the vote, applied to the player's property */
+  conditionImpactIfYes: number
+  conditionImpactIfNo: number
+  /** UI hints */
+  consequenceIfYes: string
+  consequenceIfNo: string
+}
+
+export interface WEGAssembly {
+  id: string
+  propertyId: string
+  scheduledMonth: number
+  proposals: WEGProposal[]
+  /** Player's ownership share at the time of the vote (0..1) */
+  playerShare: number
+  /** Player vote per proposal id */
+  playerVotes: Record<string, 'yes' | 'no' | 'abstain'>
+  decided: boolean
+  /** Per-proposal final result after the rest of the WEG votes */
+  outcomes: Record<string, 'passed' | 'rejected'>
+}
+
 export type CapexKind2 = CapexKind  // re-export marker for clarity
 
 export interface CapexEvent {
@@ -404,6 +477,8 @@ export interface GameState {
   kfwPending: KfwRefundPending[]
   /** Persistent pool of contractors so loyalty across jobs/properties works. */
   contractorPool: ContractorPoolEntry[]
+  /** Pending Eigentuemerversammlungen (M5) — surfaced via HUD when scheduledMonth hits. */
+  wegAssemblies: WEGAssembly[]
   rngSeed: number
 }
 

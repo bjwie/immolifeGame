@@ -9,6 +9,7 @@ import { MenuModal } from '../ui/MenuModal'
 import { NegotiationModal } from '../ui/NegotiationModal'
 import { RentalModal } from '../ui/RentalModal'
 import { RenovationModal } from '../ui/RenovationModal'
+import { WEGModal } from '../ui/WEGModal'
 import { ModalManager } from '../ui/ModalManager'
 
 const TILE = 48
@@ -25,6 +26,7 @@ export class CityScene extends Phaser.Scene {
   private negModal!: NegotiationModal
   private rentalModal!: RentalModal
   private renovationModal!: RenovationModal
+  private wegModal!: WEGModal
   private hoverDiv!: HTMLDivElement
   private hoveredPropertyId: string | null = null
 
@@ -73,9 +75,11 @@ export class CityScene extends Phaser.Scene {
     this.negModal = new NegotiationModal(this.engine, overlay)
     this.rentalModal = new RentalModal(this.engine, overlay)
     this.renovationModal = new RenovationModal(this.engine, overlay)
+    this.wegModal = new WEGModal(this.engine, overlay)
     this.deal.setNegotiationModal(this.negModal)
     this.deal.setRentalModal(this.rentalModal)
     this.deal.setRenovationModal(this.renovationModal)
+    this.deal.setWegModal(this.wegModal)
     this.menu = new MenuModal(this.engine, overlay, () => this.refreshProperties())
     this.hoverDiv = document.createElement('div')
     this.hoverDiv.className = 'prop-tooltip'

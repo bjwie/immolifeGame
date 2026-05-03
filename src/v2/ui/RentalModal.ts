@@ -29,6 +29,7 @@ export class RentalModal {
   private engine: Engine
   private root: HTMLDivElement
   private property: Property | null = null
+  private unitId: string | undefined = undefined
   private askingRent: number = 0
   private leaseMonths: number = 24
   private applicants: Applicant[] = []
@@ -43,10 +44,13 @@ export class RentalModal {
     this.modal = { id: 'rental', el: this.root, onCancel: () => this.close() }
   }
 
-  open(p: Property, onClosed?: () => void) {
+  open(p: Property, onClosed?: () => void, unitId?: string) {
     this.property = p
+    this.unitId = unitId
     this.onClosed = onClosed ?? null
-    this.askingRent = Math.max(p.baseRent, Math.round(p.baseRent * (0.55 + (p.condition / 100) * 0.45)))
+    const u = unitId ? p.units.find(x => x.id === unitId) : (p.units.find(x => !x.tenant) ?? p.units[0])
+    const refKalt = u?.baseKalt ?? p.baseRent
+    this.askingRent = Math.max(refKalt, Math.round(refKalt * (0.55 + (p.condition / 100) * 0.45)))
     this.leaseMonths = 24
     this.refreshApplicants()
     this.render()
@@ -183,7 +187,7 @@ export class RentalModal {
         const id = b.dataset.signId!
         const app = this.applicants.find(a => a.id === id)
         if (!app) return
-        const res = this.engine.signLease(p.id, app, this.askingRent, this.leaseMonths)
+        const res = this.engine.signLease(p.id, app, this.askingRent, this.leaseMonths, this.unitId)
         if (!res.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: res.reason ?? 'Vertrag fehlgeschlagen' })
         this.close()
       })
