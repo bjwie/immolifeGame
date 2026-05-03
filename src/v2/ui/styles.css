@@ -105,6 +105,71 @@ body {
 .event-chip.weg { border-color: var(--accent-2); background: rgba(132, 92, 242, 0.12); }
 .event-chip.mgmt { border-color: var(--good); background: rgba(95, 220, 120, 0.12); }
 
+/* ============ DealSheet UX Pass 1: tabs + status banner + KPI grid ============ */
+
+.status-banner {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-bottom: 12px; padding: 8px 10px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px;
+  font-size: 12px;
+}
+.status-banner.ok { color: var(--good); padding: 6px 10px; }
+
+.status-badge {
+  padding: 3px 8px; border-radius: 12px;
+  font-size: 11px; font-weight: 700;
+  border: 1px solid var(--line); background: var(--bg-3);
+}
+.status-badge.bad { color: var(--bad); border-color: rgba(255, 118, 118, 0.5); background: rgba(255, 118, 118, 0.10); }
+.status-badge.warn { color: #f8c14e; border-color: rgba(248, 193, 78, 0.5); background: rgba(248, 193, 78, 0.10); }
+.status-badge.info { color: var(--accent); border-color: rgba(78, 180, 224, 0.5); background: rgba(78, 180, 224, 0.10); }
+.status-badge.purple { color: var(--accent-2); border-color: rgba(132, 92, 242, 0.5); background: rgba(132, 92, 242, 0.10); }
+.status-badge.gold { color: var(--gold); border-color: rgba(241, 196, 15, 0.5); background: rgba(241, 196, 15, 0.10); }
+.status-badge.ok { color: var(--good); border-color: rgba(95, 220, 120, 0.5); background: rgba(95, 220, 120, 0.10); }
+
+.ds-tabs {
+  display: flex; gap: 4px; margin-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.ds-tab {
+  flex: 1; background: transparent; color: var(--muted);
+  border: 0; border-bottom: 2px solid transparent;
+  padding: 10px 8px; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: color 0.1s, border-color 0.1s;
+}
+.ds-tab:hover { color: var(--text); }
+.ds-tab.sel { color: var(--gold); border-bottom-color: var(--gold); }
+
+.ds-tab-content {
+  display: flex; flex-direction: column;
+}
+
+.kpi-grid {
+  display: grid; grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px; margin-bottom: 14px;
+}
+.kpi {
+  background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 6px; padding: 8px 10px;
+}
+.kpi-label { font-size: 10px; color: var(--muted); letter-spacing: 0.5px; }
+.kpi-value { font-size: 16px; font-weight: 800; margin-top: 2px; }
+.kpi-value.good { color: var(--good); }
+.kpi-value.mid { color: var(--mid); }
+.kpi-value.bad { color: var(--bad); }
+.kpi-value.gold { color: var(--gold); }
+
+.quick-actions {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line);
+}
+.quick-actions button { flex: 1 1 140px; }
+
+.empty-tab {
+  text-align: center; color: var(--muted);
+  padding: 30px 10px; font-size: 13px;
+}
+
 .mgmt-card {
   background: var(--bg-2); border: 1px solid var(--line);
   border-radius: 10px; padding: 12px; margin-bottom: 14px;

@@ -38,6 +38,8 @@ export class DealSheet {
    *  the player's saved default (Player.brokerId). */
   private selectedSellBrokerId: string | null | undefined = undefined
   private negotiationModal: NegotiationModal | null = null
+  /** Active tab in the owned-property view. Reset on open. */
+  private activeTab: 'overview' | 'tenant' | 'reno' | 'finance' = 'overview'
   private modal: ManagedModal
 
   constructor(engine: Engine, mountIn: HTMLElement) {
@@ -65,6 +67,7 @@ export class DealSheet {
     this.negotiated = null
     this.bankOverride = null
     this.selectedSellBrokerId = undefined  // fall back to player default
+    this.activeTab = 'overview'
     this.render()
     ModalManager.get().push(this.modal)
   }
@@ -495,17 +498,7 @@ export class DealSheet {
       </div>
     `
 
-    this.root.querySelector('#ds-actions')!.innerHTML = `
-      ${wegHtml}
-      ${capexHtml}
-      ${renoHtml}
-      ${unitsHtml}
-      ${tenantHtml}
-      ${loanHtml}
-      ${renoBoxHtml}
-      ${wgHtml}
-      ${umlageHtml}
-      ${mgmtHtml}
+    const sellHtml = `
       <div class="sell-box">
         <div class="fin-row"><span>Verkaufspreis (- 4% Gebuehren)</span><b>${formatEuro(sellPrice)}</b></div>
         ${loan ? `<div class="fin-row"><span>Hypothek tilgen (+1% Penalty)</span><b>-${formatEuro(payoff)}</b></div>` : ''}
@@ -515,6 +508,115 @@ export class DealSheet {
         <button class="danger" data-sell>Verkaufen ${sellBroker && sellBroker.id !== 'do_it_yourself' ? 'mit ' + escape(sellBroker.name) : 'in Eigenregie'}</button>
       </div>
     `
+
+    // ===== UX Pass 1: status banner + tabbed layout =====
+    const occupiedUnits = p.units.filter(u => u.tenant).length
+    const vacantUnits = p.units.length - occupiedUnits
+    const flow = this.engine.monthlyCashflow()
+    void flow  // global cashflow, not per-property — but useful as a reference
+    // Per-property monthly approximation: rent (only paid portion) - maintenance - hausgeld - loan rate
+    const propRent = p.units.reduce((s, u) => s + (u.tenant ? u.tenant.agreedKaltMiete * (u.tenant.reliability / 100) : 0), 0)
+    const propMaint = this['_maint'](p)
+    const propLoan = loan ? loan.monthlyPayment : 0
+    const propMgmt = p.management ? this.engine.managementFeeFor(p) : 0
+    const propHausgeld = p.wegMembership ? p.wegMembership.hausgeldMonthly : 0
+    const propNet = Math.round(propRent - propMaint - propLoan - propMgmt - propHausgeld)
+    const propNetClass = propNet >= 0 ? 'good' : 'bad'
+
+    const issues: string[] = []
+    if (nomadRevealed) issues.push(`<span class="status-badge bad">🚨 Mietnomade</span>`)
+    if (activeEviction) issues.push(`<span class="status-badge bad">⚖ Raeumungsklage</span>`)
+    const rentHikeLawsuit = this.engine.state.lawsuits.find(l => l.propertyId === p.id && l.reason === 'rent-hike' && l.outcome === 'pending')
+    if (rentHikeLawsuit) issues.push(`<span class="status-badge bad">⚖ Mieterhoehungs-Klage</span>`)
+    if (cap) issues.push(`<span class="status-badge warn">⚠ Capex ${formatEuro(cap.cost)}</span>`)
+    if (reno) issues.push(`<span class="status-badge info">🔨 Renovierung ${reno.currentStepIndex + 1}/${reno.steps.length}</span>`)
+    if (wegPending) issues.push(`<span class="status-badge purple">📋 WEG offen</span>`)
+    if (p.modernizationUmlageAvailable) issues.push(`<span class="status-badge gold">✓ Modernisierungs-Umlage</span>`)
+    if (vacantUnits > 0 && !p.management) issues.push(`<span class="status-badge info">👥 ${vacantUnits} ${vacantUnits === 1 ? 'Wohnung' : 'Wohnungen'} leer</span>`)
+    if (p.management) issues.push(`<span class="status-badge ok">🏢 Verwaltung aktiv</span>`)
+    const tenantsBehind = p.units.filter(u => u.tenant && u.tenant.monthsBehind > 0).length
+    if (tenantsBehind > 0) issues.push(`<span class="status-badge warn">⚠ ${tenantsBehind} Mieter im Rueckstand</span>`)
+
+    const statusBannerHtml = issues.length > 0
+      ? `<div class="status-banner">${issues.join('')}</div>`
+      : `<div class="status-banner ok">✓ Alles ruhig — keine offenen Punkte</div>`
+
+    const tabsHtml = `
+      <div class="ds-tabs">
+        <button class="ds-tab ${this.activeTab === 'overview' ? 'sel' : ''}" data-tab="overview">Uebersicht</button>
+        <button class="ds-tab ${this.activeTab === 'tenant' ? 'sel' : ''}" data-tab="tenant">Mieter${vacantUnits > 0 ? ` (${vacantUnits} leer)` : ''}</button>
+        <button class="ds-tab ${this.activeTab === 'reno' ? 'sel' : ''}" data-tab="reno">Renovierung${cap || reno ? ' ●' : ''}</button>
+        <button class="ds-tab ${this.activeTab === 'finance' ? 'sel' : ''}" data-tab="finance">Finanzen${loan ? ' ●' : ''}</button>
+      </div>
+    `
+
+    // Per-tab content
+    let tabContentHtml = ''
+    if (this.activeTab === 'overview') {
+      const condClassA = p.condition >= 70 ? 'good' : p.condition >= 40 ? 'mid' : 'bad'
+      const capRate = this.engine.capRate(p)
+      const capClass = capRate >= 5 ? 'good' : capRate >= 3 ? 'mid' : 'bad'
+      tabContentHtml = `
+        <div class="kpi-grid">
+          <div class="kpi"><div class="kpi-label">Netto-Cashflow</div><div class="kpi-value ${propNetClass}">${formatEuro(propNet)}/M</div></div>
+          <div class="kpi"><div class="kpi-label">Cap Rate</div><div class="kpi-value ${capClass}">${capRate.toFixed(1)}%</div></div>
+          <div class="kpi"><div class="kpi-label">Zustand</div><div class="kpi-value ${condClassA}">${Math.round(p.condition)}%</div></div>
+          <div class="kpi"><div class="kpi-label">${isMulti ? 'Belegt' : 'Status'}</div><div class="kpi-value">${isMulti ? `${occupiedUnits}/${p.units.length}` : (p.units[0]?.tenant ? 'vermietet' : 'leer')}</div></div>
+          <div class="kpi"><div class="kpi-label">Marktwert</div><div class="kpi-value gold">${formatEuro(p.marketValue)}</div></div>
+          <div class="kpi"><div class="kpi-label">Eigenkapital</div><div class="kpi-value">${formatEuro(p.marketValue - (loan?.principal ?? 0))}</div></div>
+        </div>
+        ${wegHtml}
+        ${capexHtml}
+        ${renoHtml}
+        ${umlageHtml}
+        <div class="quick-actions">
+          ${vacantUnits > 0 ? `<button class="ghost" data-tab-jump="tenant">👥 Mieter suchen</button>` : ''}
+          ${!reno ? `<button class="ghost" data-tab-jump="reno">🔨 Renovieren</button>` : ''}
+          <button class="ghost" data-tab-jump="finance">💰 Finanzen / Verkaufen</button>
+        </div>
+      `
+    } else if (this.activeTab === 'tenant') {
+      tabContentHtml = `
+        ${unitsHtml}
+        ${tenantHtml}
+      `
+    } else if (this.activeTab === 'reno') {
+      tabContentHtml = `
+        ${capexHtml || ''}
+        ${renoHtml || ''}
+        ${!reno ? renoBoxHtml : ''}
+        ${wgHtml || ''}
+        ${umlageHtml || ''}
+      ` || `<div class="empty-tab">Keine Renovierungs-Optionen.</div>`
+    } else if (this.activeTab === 'finance') {
+      tabContentHtml = `
+        ${loanHtml || ''}
+        ${mgmtHtml}
+        ${sellHtml}
+      `
+    }
+
+    this.root.querySelector('#ds-actions')!.innerHTML = `
+      ${statusBannerHtml}
+      ${tabsHtml}
+      <div class="ds-tab-content">
+        ${tabContentHtml}
+      </div>
+    `
+
+    // Tab-switching
+    this.root.querySelectorAll<HTMLElement>('[data-tab]').forEach(b => {
+      b.addEventListener('click', () => {
+        this.activeTab = (b.dataset.tab as 'overview' | 'tenant' | 'reno' | 'finance')
+        this.refresh()
+      })
+    })
+    this.root.querySelectorAll<HTMLElement>('[data-tab-jump]').forEach(b => {
+      b.addEventListener('click', () => {
+        this.activeTab = (b.dataset.tabJump as 'overview' | 'tenant' | 'reno' | 'finance')
+        this.refresh()
+      })
+    })
 
     this.root.querySelector('[data-evict]')?.addEventListener('click', () => {
       this.engine.evictTenant(p.id); this.refresh()
