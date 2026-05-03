@@ -1,8 +1,13 @@
-import { Player, Property, Bank, GameState, PropertyType, Location, Tenant, Loan, GameTime, TimeSettings, TimeSpeed, MarketTrend, Renovation, RenovationType } from '../types/GameTypes'
+import { 
+  Player, Property as PropertyInterface, Bank, GameState, PropertyType, Location, Tenant, Loan, GameTime, TimeSettings, TimeSpeed, MarketTrend, Renovation, RenovationType
+} from '../types/GameTypes'
+import { Property } from '../objects/Property'
+import { BankManager } from './BankManager'
 
 export class GameManager {
   private static instance: GameManager
   private gameState!: GameState
+  private bankManager!: BankManager
   private eventCallbacks: Map<string, Function[]> = new Map()
   private timeInterval: NodeJS.Timeout | null = null
 
@@ -12,6 +17,15 @@ export class GameManager {
       // Falls kein Autosave vorhanden, neues Spiel starten
       this.gameState = this.initializeGameState()
     }
+    
+    // BankManager initialisieren
+    this.bankManager = new BankManager(this.gameState.gameTime.totalDays)
+    
+    // Bank Manager Events weiterleiten
+    this.bankManager.on('loanApplicationProcessed', (data: any) => {
+      this.emit('loanApplicationProcessed', data)
+    })
+    
     this.startTimeSystem()
     
     // Automatisches Speichern alle 5 Minuten
@@ -84,12 +98,114 @@ export class GameManager {
 
   private generateInitialProperties(): Property[] {
     const locations: Location[] = [
-      { district: 'Mitte', desirability: 90, priceMultiplier: 1.5 },
-      { district: 'Prenzlauer Berg', desirability: 85, priceMultiplier: 1.3 },
-      { district: 'Kreuzberg', desirability: 80, priceMultiplier: 1.2 },
-      { district: 'Charlottenburg', desirability: 75, priceMultiplier: 1.1 },
-      { district: 'Wedding', desirability: 60, priceMultiplier: 0.8 },
-      { district: 'Neukölln', desirability: 65, priceMultiplier: 0.9 }
+      { 
+        district: 'Mitte', 
+        desirability: 90, 
+        priceMultiplier: 1.5,
+        crimeRate: 15,
+        safetyRating: 85,
+        educationLevel: 95,
+        healthCareQuality: 90,
+        publicTransport: 95,
+        greenSpace: 60,
+        culturalAttractions: 95,
+        jobMarket: 90,
+        incomeDistribution: 85,
+        populationDensity: 80,
+        propertyTaxRate: 3.5,
+        propertyTaxes: 0,
+        propertyTaxesPaid: 0
+      },
+      { 
+        district: 'Prenzlauer Berg', 
+        desirability: 85, 
+        priceMultiplier: 1.3,
+        crimeRate: 20,
+        safetyRating: 80,
+        educationLevel: 90,
+        healthCareQuality: 85,
+        publicTransport: 90,
+        greenSpace: 70,
+        culturalAttractions: 85,
+        jobMarket: 85,
+        incomeDistribution: 80,
+        populationDensity: 75,
+        propertyTaxRate: 3.2,
+        propertyTaxes: 0,
+        propertyTaxesPaid: 0
+      },
+      { 
+        district: 'Kreuzberg', 
+        desirability: 80, 
+        priceMultiplier: 1.2,
+        crimeRate: 25,
+        safetyRating: 75,
+        educationLevel: 85,
+        healthCareQuality: 80,
+        publicTransport: 85,
+        greenSpace: 65,
+        culturalAttractions: 80,
+        jobMarket: 80,
+        incomeDistribution: 75,
+        populationDensity: 70,
+        propertyTaxRate: 3.0,
+        propertyTaxes: 0,
+        propertyTaxesPaid: 0
+      },
+      { 
+        district: 'Charlottenburg', 
+        desirability: 75, 
+        priceMultiplier: 1.1,
+        crimeRate: 18,
+        safetyRating: 82,
+        educationLevel: 88,
+        healthCareQuality: 85,
+        publicTransport: 80,
+        greenSpace: 75,
+        culturalAttractions: 70,
+        jobMarket: 75,
+        incomeDistribution: 85,
+        populationDensity: 65,
+        propertyTaxRate: 2.8,
+        propertyTaxes: 0,
+        propertyTaxesPaid: 0
+      },
+      { 
+        district: 'Wedding', 
+        desirability: 60, 
+        priceMultiplier: 0.8,
+        crimeRate: 35,
+        safetyRating: 65,
+        educationLevel: 70,
+        healthCareQuality: 70,
+        publicTransport: 75,
+        greenSpace: 55,
+        culturalAttractions: 50,
+        jobMarket: 65,
+        incomeDistribution: 60,
+        populationDensity: 85,
+        propertyTaxRate: 2.5,
+        propertyTaxes: 0,
+        propertyTaxesPaid: 0
+      },
+      { 
+        district: 'Neukölln', 
+        desirability: 65, 
+        priceMultiplier: 0.9,
+        crimeRate: 30,
+        safetyRating: 70,
+        educationLevel: 75,
+        healthCareQuality: 75,
+        publicTransport: 80,
+        greenSpace: 60,
+        culturalAttractions: 65,
+        jobMarket: 70,
+        incomeDistribution: 65,
+        populationDensity: 80,
+        propertyTaxRate: 2.7,
+        propertyTaxes: 0,
+        propertyTaxesPaid: 0
+      }
     ]
 
     const properties: Property[] = []
@@ -129,7 +245,8 @@ export class GameManager {
       const buildYear = currentYear - Math.floor(Math.random() * 50) // 0-50 Jahre alt
       const condition = Math.max(20, 100 - (currentYear - buildYear) * 1.5 + Math.random() * 20)
 
-      properties.push({
+      // Create property data interface
+      const propertyData: PropertyInterface = {
         id: `prop_${i}`,
         name: propertyNames[Math.floor(Math.random() * propertyNames.length)],
         type,
@@ -151,8 +268,13 @@ export class GameManager {
         marketTrend: this.getRandomMarketTrend(),
         // Markt-Dynamik
         marketEntryMonth: 0, // Startet bei Monat 0
-        marketLifetime: 1 + Math.floor(Math.random() * 6) // 1-6 Monate auf dem Markt
-      })
+        marketLifetime: 1 + Math.floor(Math.random() * 6), // 1-6 Monate
+        components: [] // Will be initialized by Property constructor
+      }
+
+      // Create Property instance using the class constructor
+      const property = new Property(propertyData)
+      properties.push(property)
     }
 
     return properties
@@ -209,12 +331,114 @@ export class GameManager {
   // Dynamisches Markt-System
   private generateNewProperty(currentMonth: number): Property {
     const locations: Location[] = [
-      { district: 'Mitte', desirability: 90, priceMultiplier: 1.5 },
-      { district: 'Prenzlauer Berg', desirability: 85, priceMultiplier: 1.3 },
-      { district: 'Kreuzberg', desirability: 80, priceMultiplier: 1.2 },
-      { district: 'Charlottenburg', desirability: 75, priceMultiplier: 1.1 },
-      { district: 'Wedding', desirability: 60, priceMultiplier: 0.8 },
-      { district: 'Neukölln', desirability: 65, priceMultiplier: 0.9 }
+      { 
+        district: 'Mitte', 
+        desirability: 90, 
+        priceMultiplier: 1.5,
+        crimeRate: 15,
+        safetyRating: 85,
+        educationLevel: 95,
+        healthCareQuality: 90,
+        publicTransport: 95,
+        greenSpace: 60,
+        culturalAttractions: 95,
+        jobMarket: 90,
+        incomeDistribution: 85,
+        populationDensity: 80,
+        propertyTaxRate: 3.5,
+        propertyTaxes: 0,
+        propertyTaxesPaid: 0
+      },
+      { 
+        district: 'Prenzlauer Berg', 
+        desirability: 85, 
+        priceMultiplier: 1.3,
+        crimeRate: 20,
+        safetyRating: 80,
+        educationLevel: 90,
+        healthCareQuality: 85,
+        publicTransport: 90,
+        greenSpace: 70,
+        culturalAttractions: 85,
+        jobMarket: 85,
+        incomeDistribution: 80,
+        populationDensity: 75,
+        propertyTaxRate: 3.2,
+        propertyTaxes: 0,
+        propertyTaxesPaid: 0
+      },
+      { 
+        district: 'Kreuzberg', 
+        desirability: 80, 
+        priceMultiplier: 1.2,
+        crimeRate: 25,
+        safetyRating: 75,
+        educationLevel: 85,
+        healthCareQuality: 80,
+        publicTransport: 85,
+        greenSpace: 65,
+        culturalAttractions: 80,
+        jobMarket: 80,
+        incomeDistribution: 75,
+        populationDensity: 70,
+        propertyTaxRate: 3.0,
+        propertyTaxes: 0,
+        propertyTaxesPaid: 0
+      },
+      { 
+        district: 'Charlottenburg', 
+        desirability: 75, 
+        priceMultiplier: 1.1,
+        crimeRate: 18,
+        safetyRating: 82,
+        educationLevel: 88,
+        healthCareQuality: 85,
+        publicTransport: 80,
+        greenSpace: 75,
+        culturalAttractions: 70,
+        jobMarket: 75,
+        incomeDistribution: 85,
+        populationDensity: 65,
+        propertyTaxRate: 2.8,
+        propertyTaxes: 0,
+        propertyTaxesPaid: 0
+      },
+      { 
+        district: 'Wedding', 
+        desirability: 60, 
+        priceMultiplier: 0.8,
+        crimeRate: 35,
+        safetyRating: 65,
+        educationLevel: 70,
+        healthCareQuality: 70,
+        publicTransport: 75,
+        greenSpace: 55,
+        culturalAttractions: 50,
+        jobMarket: 65,
+        incomeDistribution: 60,
+        populationDensity: 85,
+        propertyTaxRate: 2.5,
+        propertyTaxes: 0,
+        propertyTaxesPaid: 0
+      },
+      { 
+        district: 'Neukölln', 
+        desirability: 65, 
+        priceMultiplier: 0.9,
+        crimeRate: 30,
+        safetyRating: 70,
+        educationLevel: 75,
+        healthCareQuality: 75,
+        publicTransport: 80,
+        greenSpace: 60,
+        culturalAttractions: 65,
+        jobMarket: 70,
+        incomeDistribution: 65,
+        populationDensity: 80,
+        propertyTaxRate: 2.7,
+        propertyTaxes: 0,
+        propertyTaxesPaid: 0
+      }
     ]
 
     const propertyNames = [
@@ -263,7 +487,8 @@ export class GameManager {
     const buildYear = currentYear - Math.floor(Math.random() * 60) // 0-60 Jahre alt
     const condition = Math.max(15, 100 - (currentYear - buildYear) * 1.2 + Math.random() * 25)
 
-    return {
+    // Create property data interface
+    const propertyData: PropertyInterface = {
       id: `prop_new_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       name: propertyNames[Math.floor(Math.random() * propertyNames.length)],
       type,
@@ -283,8 +508,12 @@ export class GameManager {
       appreciationRate: this.getBaseAppreciationRate(location, type),
       marketTrend: this.getRandomMarketTrend(),
       marketEntryMonth: currentMonth,
-      marketLifetime: 1 + Math.floor(Math.random() * 6) // 1-6 Monate
+      marketLifetime: 1 + Math.floor(Math.random() * 6), // 1-6 Monate
+      components: [] // Will be initialized by Property constructor
     }
+
+    // Create Property instance using the class constructor
+    return new Property(propertyData)
   }
 
   private updatePropertyMarket(): void {
@@ -684,45 +913,42 @@ export class GameManager {
 
   // Renovierungs-System
   public getRenovationOptions(propertyId: string): Renovation[] {
-    const property = this.gameState.player.properties.find(p => p.id === propertyId)
-    if (!property) return []
-
     const renovations: Renovation[] = [
       {
-        id: 'basic_maintenance',
-        name: 'Grundwartung',
-        cost: Math.round(property.originalPrice * 0.025), // 2.5% des ursprünglichen Preises
-        conditionImprovement: 15,
+        id: RenovationType.BASIC_MAINTENANCE,
+        name: 'Grundinstandhaltung',
+        cost: 5000,
+        conditionImprovement: 10,
         rentIncrease: 5,
         duration: 7,
-        description: 'Kleine Reparaturen und Auffrischung'
+        description: 'Kleine Reparaturen und Malerarbeiten'
       },
       {
-        id: 'modernization',
+        id: RenovationType.MODERNIZATION,
         name: 'Modernisierung',
-        cost: Math.round(property.originalPrice * 0.075), // 7.5%
-        conditionImprovement: 30,
+        cost: 15000,
+        conditionImprovement: 25,
         rentIncrease: 15,
         duration: 21,
-        description: 'Neue Küche, Bad-Renovierung, moderne Ausstattung'
+        description: 'Neue Küche, Bad-Renovierung, Böden'
       },
       {
-        id: 'luxury_upgrade',
-        name: 'Luxus-Ausbau',
-        cost: Math.round(property.originalPrice * 0.175), // 17.5%
-        conditionImprovement: 50,
-        rentIncrease: 35,
+        id: RenovationType.LUXURY_UPGRADE,
+        name: 'Luxus-Sanierung',
+        cost: 35000,
+        conditionImprovement: 40,
+        rentIncrease: 30,
         duration: 45,
         description: 'Hochwertige Materialien, Designer-Ausstattung'
       },
       {
-        id: 'energy_efficiency',
+        id: RenovationType.ENERGY_EFFICIENCY,
         name: 'Energetische Sanierung',
-        cost: Math.round(property.originalPrice * 0.1), // 10%
-        conditionImprovement: 25,
-        rentIncrease: 12,
+        cost: 20000,
+        conditionImprovement: 20,
+        rentIncrease: 10,
         duration: 30,
-        description: 'Dämmung, neue Heizung, Solarpanels - reduziert Wartungskosten um 25%'
+        description: 'Dämmung, neue Heizung, Solaranlage. Reduziert Wartungskosten um 20%'
       }
     ]
 
@@ -746,8 +972,8 @@ export class GameManager {
     property.lastRenovationMonth = this.gameState.gameTime.month + (this.gameState.gameTime.year - 2024) * 12
 
     // Spezielle Effekte
-    if (renovationId === 'energy_efficiency') {
-      property.maintenanceCost = Math.round(property.maintenanceCost * 0.75) // 25% Reduktion
+    if (renovationId === RenovationType.ENERGY_EFFICIENCY) {
+      property.maintenanceCost = Math.round(property.maintenanceCost * 0.8) // 20% Reduktion
       property.conditionDecayRate *= 0.8 // Langsamerer Verfall
     }
 
@@ -984,4 +1210,104 @@ export class GameManager {
       this.startTimeSystem()
     }
   }
+
+  /**
+   * Berechnet die monatliche Kredit-Rate für eine spezifische Immobilie
+   */
+  public getLoanPaymentForProperty(propertyId: string): number {
+    const loans = this.gameState.player.loans.filter(loan => loan.propertyId === propertyId)
+    return loans.reduce((total, loan) => total + loan.monthlyPayment, 0)
+  }
+
+  /**
+   * Berechnet den gesamten Cash Flow für eine Immobilie
+   */
+  public calculatePropertyCashFlow(propertyId: string): {
+    monthlyRent: number,
+    maintenance: number,
+    loanPayments: number,
+    netCashFlow: number,
+    annualCashFlow: number
+  } {
+    const property = this.gameState.player.properties.find(p => p.id === propertyId)
+    if (!property) {
+      return { monthlyRent: 0, maintenance: 0, loanPayments: 0, netCashFlow: 0, annualCashFlow: 0 }
+    }
+
+    const monthlyRent = property.isRented ? property.monthlyRent : 0
+    const maintenance = property.maintenanceCost
+    const loanPayments = this.getLoanPaymentForProperty(propertyId)
+    const netCashFlow = monthlyRent - maintenance - loanPayments
+    const annualCashFlow = netCashFlow * 12
+
+    return {
+      monthlyRent,
+      maintenance,
+      loanPayments,
+      netCashFlow,
+      annualCashFlow
+    }
+  }
+
+  /**
+   * Berechnet die Gesamtrentabilität des Portfolios
+   */
+  public calculatePortfolioMetrics(): {
+    totalMonthlyIncome: number,
+    totalMonthlyExpenses: number,
+    totalNetCashFlow: number,
+    averageROI: number,
+    totalPortfolioValue: number,
+    totalDebt: number,
+    equityRatio: number
+  } {
+    const properties = this.gameState.player.properties
+    let totalMonthlyIncome = 0
+    let totalMonthlyExpenses = 0
+    let totalPortfolioValue = 0
+
+    properties.forEach(property => {
+      const cashFlow = this.calculatePropertyCashFlow(property.id)
+      totalMonthlyIncome += cashFlow.monthlyRent
+      totalMonthlyExpenses += cashFlow.maintenance + cashFlow.loanPayments
+      totalPortfolioValue += property.price
+    })
+
+    const totalNetCashFlow = totalMonthlyIncome - totalMonthlyExpenses
+    const totalDebt = this.gameState.player.loans.reduce((total, loan) => total + loan.amount, 0)
+    const equity = totalPortfolioValue - totalDebt
+    const equityRatio = totalPortfolioValue > 0 ? (equity / totalPortfolioValue) * 100 : 0
+    const averageROI = totalPortfolioValue > 0 ? (totalNetCashFlow * 12 / totalPortfolioValue) * 100 : 0
+
+    return {
+      totalMonthlyIncome,
+      totalMonthlyExpenses,
+      totalNetCashFlow,
+      averageROI,
+      totalPortfolioValue,
+      totalDebt,
+      equityRatio
+    }
+  }
+
+  
+  private calculateMonthlyExpenses(): number {
+    let expenses = 0
+    
+    // Wartungskosten aller Immobilien
+    this.gameState.player.properties.forEach(property => {
+      expenses += property.maintenanceCost
+    })
+    
+    // Kreditraten
+    this.gameState.player.loans.forEach(loan => {
+      expenses += loan.monthlyPayment
+    })
+    
+    // Lebenshaltungskosten (vereinfacht)
+    expenses += 1500
+    
+    return expenses
+  }
+
 } 

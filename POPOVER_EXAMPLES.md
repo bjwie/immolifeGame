@@ -208,6 +208,97 @@ destroy() {
 UILibraries.removePopover('property_123')
 ```
 
+## 🔧 **Popover Lifecycle Management** ⚠️
+
+### **Problem: Popovers bleiben zu lange sichtbar**
+
+**Ursachen:**
+- Race Conditions bei schnellen Hover-Events
+- Fehlende Cleanup-Logik
+- Keine automatischen Timeouts
+- Doppelte Registrierung von Popovers
+
+**Lösung:**
+```typescript
+// 1. Automatische Cleanup-Initialisierung
+UILibraries.startPopoverCleanup() // In GameScene.create()
+
+// 2. Verbesserte Hover-Logik
+container.on('pointerover', () => {
+  // Existing popover cleanup first
+  const existingPopoverId = `property_${property.id}`
+  UILibraries.removePopover(existingPopoverId)
+  
+  // Create new popover with delay check
+  if (!popoverInstance) {
+    popoverInstance = UILibraries.createPropertyPopover(canvas, property, isOwned)
+    UILibraries.registerPopover(existingPopoverId, popoverInstance)
+    
+    // Show with race condition protection
+    setTimeout(() => {
+      if (popoverInstance && !popoverInstance.state.isDestroyed) {
+        popoverInstance.show()
+      }
+    }, 50)
+  }
+})
+
+// 3. Sichere Cleanup-Logik
+container.on('pointerout', () => {
+  const popoverId = `property_${property.id}`
+  UILibraries.removePopover(popoverId)
+  
+  if (popoverInstance) {
+    if (!popoverInstance.state.isDestroyed) {
+      popoverInstance.hide()
+      popoverInstance.destroy()
+    }
+    popoverInstance = null
+  }
+})
+```
+
+### **Automatische Sicherheitsmaßnahmen:**
+
+1. **Auto-Hide Timeouts:**
+   - Property Popovers: 10 Sekunden
+   - Interactive Popovers: 15 Sekunden
+   - Tooltips: Standard Tippy.js Verhalten
+
+2. **Periodische Cleanup:**
+   - Alle 5 Sekunden Überprüfung auf "stale" Popovers
+   - Automatische Entfernung von Popovers > 30 Sekunden
+
+3. **Scene Lifecycle:**
+   - Alle Popovers werden beim Scene-Wechsel entfernt
+   - Cleanup-Interval wird gestoppt
+
+4. **Property Refresh:**
+   - Alle Popovers werden vor Property-Updates entfernt
+
+### **Best Practices für Entwickler:**
+
+```typescript
+// ✅ IMMER: Cleanup vor neuen Popovers
+UILibraries.removePopover(id)
+
+// ✅ IMMER: Registrierung für Management
+UILibraries.registerPopover(id, instance)
+
+// ✅ IMMER: Race Condition Protection
+setTimeout(() => {
+  if (instance && !instance.state.isDestroyed) {
+    instance.show()
+  }
+}, 50)
+
+// ✅ IMMER: Sichere Destruction
+if (!instance.state.isDestroyed) {
+  instance.hide()
+  instance.destroy()
+}
+```
+
 ## 🔄 **Dynamic Content Updates**
 
 ```typescript

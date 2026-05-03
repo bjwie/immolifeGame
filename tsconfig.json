@@ -19,6 +19,7 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*"],
+  "include": ["src/v2/**/*"],
+  "exclude": ["src/_legacy", "node_modules"],
   "references": [{ "path": "./tsconfig.node.json" }]
 } 

@@ -1,91 +1,155 @@
-# 🎨 Assets für ImmoLife
+# 🎨 2D World Assets Guide
 
-## 📁 Ordnerstruktur
+## 📁 Asset Structure
 
 ```
 assets/
-├── buildings/          # Gebäude-Sprites
-│   ├── apartment.png   # Wohnungen
-│   ├── house.png       # Häuser  
-│   ├── commercial.png  # Gewerbe
-│   └── office.png      # Büros
-├── effects/            # Effekt-Sprites
-│   ├── coin.png        # Münzen für Geld-Effekte
-│   ├── sparkle.png     # Funkeln für Kauf/Verkauf
-│   └── dust.png        # Staub für Renovierungen
-└── ui/                 # UI-Elemente
-    └── panel-bg.png    # Panel-Hintergründe
+├── world/
+│   ├── terrain/
+│   │   ├── grass.png          # Gras-Textur
+│   │   ├── concrete.png       # Beton/Gehweg
+│   │   ├── asphalt.png        # Straßenbelag
+│   │   ├── water.png          # Wasser-Textur
+│   │   └── park.png           # Park-Bereiche
+│   ├── roads/
+│   │   ├── road-horizontal.png    # Horizontale Straße
+│   │   ├── road-vertical.png      # Vertikale Straße
+│   │   ├── road-cross.png         # Kreuzung
+│   │   ├── road-corner-tl.png     # Ecke oben-links
+│   │   ├── road-corner-tr.png     # Ecke oben-rechts
+│   │   ├── road-corner-bl.png     # Ecke unten-links
+│   │   └── road-corner-br.png     # Ecke unten-rechts
+│   ├── infrastructure/
+│   │   ├── streetlight.png    # Straßenlaternen
+│   │   ├── traffic-light.png  # Ampeln
+│   │   ├── bus-stop.png       # Bushaltestellen
+│   │   ├── park-bench.png     # Parkbänke
+│   │   ├── tree-small.png     # Kleine Bäume
+│   │   ├── tree-large.png     # Große Bäume
+│   │   ├── fountain.png       # Brunnen
+│   │   └── statue.png         # Statuen
+│   └── districts/
+│       ├── residential-bg.png     # Wohngebiet-Hintergrund
+│       ├── commercial-bg.png      # Gewerbegebiet-Hintergrund
+│       ├── office-bg.png          # Bürogebiet-Hintergrund
+│       └── industrial-bg.png      # Industriegebiet-Hintergrund
+├── buildings/
+│   ├── residential/
+│   │   ├── house-small.png        # Einfamilienhaus
+│   │   ├── house-large.png        # Villa
+│   │   ├── apartment-small.png    # Kleines Mehrfamilienhaus
+│   │   ├── apartment-large.png    # Großes Apartment-Komplex
+│   │   └── townhouse.png          # Reihenhaus
+│   ├── commercial/
+│   │   ├── shop-small.png         # Kleiner Laden
+│   │   ├── shop-large.png         # Großes Geschäft
+│   │   ├── restaurant.png         # Restaurant
+│   │   ├── hotel.png              # Hotel
+│   │   └── mall.png               # Einkaufszentrum
+│   ├── office/
+│   │   ├── office-small.png       # Kleines Bürogebäude
+│   │   ├── office-medium.png      # Mittleres Bürogebäude
+│   │   ├── office-tower.png       # Büroturm
+│   │   └── coworking.png          # Coworking Space
+│   └── special/
+│       ├── construction.png       # Baustelle
+│       ├── demolished.png         # Abgerissenes Gebäude
+│       └── for-sale.png           # Verkaufsschild
+├── effects/
+│   ├── particles/
+│   │   ├── money.png              # Geld-Partikel
+│   │   ├── sparkle.png            # Glitzer-Effekt
+│   │   ├── dust.png               # Staub-Effekt
+│   │   └── smoke.png              # Rauch-Effekt
+│   ├── animations/
+│   │   ├── construction-anim.png  # Bau-Animation
+│   │   ├── money-flow.png         # Geld-Flow Animation
+│   │   └── renovation.png         # Renovierungs-Animation
+│   └── overlays/
+│       ├── rain.png               # Regen-Overlay
+│       ├── snow.png               # Schnee-Overlay
+│       └── fog.png                # Nebel-Overlay
+└── ui/
+    ├── panels/
+    │   ├── info-panel.png         # Info-Panel Hintergrund
+    │   ├── time-panel.png         # Zeit-Panel Hintergrund
+    │   └── bank-panel.png         # Bank-Panel Hintergrund
+    ├── buttons/
+    │   ├── button-normal.png      # Normaler Button
+    │   ├── button-hover.png       # Hover-Zustand
+    │   └── button-pressed.png     # Gedrückter Zustand
+    └── icons/
+        ├── money-icon.png         # Geld-Symbol
+        ├── property-icon.png      # Immobilien-Symbol
+        └── time-icon.png          # Zeit-Symbol
 ```
 
-## 🎯 Empfohlene Asset-Quellen
+## 🎨 Design Guidelines
 
-### 1. **Kenney.nl** (Beste Qualität, kostenlos)
-- **URL**: https://kenney.nl/assets
-- **Lizenz**: CC0 (Public Domain)
-- **Empfohlene Packs**:
-  - "Block Pack" - Gebäude-Sprites
-  - "Modular Buildings" - 3D-Style Gebäude
+### Farbpalette
+- **Wohngebiet**: Grüntöne (#27ae60, #2ecc71)  
+- **Gewerbegebiet**: Orangetöne (#f39c12, #e67e22)
+- **Bürogebiet**: Blautöne (#3498db, #2980b9)
+- **Straßen**: Grautöne (#34495e, #2c3e50)
+- **Parks**: Hellgrün (#58d68d, #82e0aa)
 
-### 2. **LimeZu - Serene Village** (RPG-Style)
-- **URL**: https://limezu.itch.io/serenevillagerevamped
-- **Lizenz**: CC-BY 4.0 (Namensnennung erforderlich)
-- **Perfekt für**: Top-Down RPG-Style Gebäude
+### Stilrichtung
+- **Isometrisch** oder **Top-Down** Perspektive
+- **Pixel Art** Stil (32x32, 64x64 oder 128x128)
+- **Konsistente Lichtrichtung** (oben-links)
+- **Einheitliche Auflösung** für alle Assets
 
-### 3. **CraftPix.net** (Große Auswahl)
-- **URL**: https://craftpix.net/freebies/
-- **Lizenz**: Meist kommerziell nutzbar
-- **Suche nach**: "Buildings Collection Top Down Pixel Art"
+### Gebäude-Design
+- Verschiedene **Höhen** für Variation
+- **Schatten** für Tiefe
+- **Details** wie Fenster, Türen, Balkone
+- **Zustandsanzeiger** (gut, mittel, schlecht)
 
-## 🚀 Assets hinzufügen
+## 📐 Technical Specifications
 
-### Schritt 1: Assets herunterladen
-1. Besuche eine der empfohlenen Quellen
-2. Lade die gewünschten Sprites herunter
-3. Benenne sie entsprechend um:
-   - `apartment.png` (64x64 Pixel)
-   - `house.png` (64x64 Pixel)
-   - `commercial.png` (64x64 Pixel)
-   - `office.png` (64x64 Pixel)
+### Bildgrößen
+- **Gebäude**: 64x64px bis 128x128px
+- **Straßen**: 64x64px (Tiles)
+- **Infrastruktur**: 32x32px bis 64x64px
+- **Effekte**: 16x16px bis 32x32px
 
-### Schritt 2: Assets platzieren
-1. Kopiere die Dateien in die entsprechenden Ordner
-2. Das Spiel lädt automatisch die echten Sprites statt der Fallback-Rechtecke
+### Dateiformate
+- **PNG** mit Transparenz
+- **32-bit** für beste Qualität
+- **Optimiert** für Web (unter 50KB pro Asset)
 
-### Schritt 3: Effekt-Sprites (optional)
-Für noch bessere Effekte:
-- `coin.png` - Kleine goldene Münze (16x16)
-- `sparkle.png` - Funkeln/Stern (16x16)
-- `dust.png` - Staub-Partikel (16x16)
+### Naming Convention
+```
+[category]-[type]-[size/variant].png
 
-## 🎨 Sprite-Anforderungen
+Beispiele:
+- building-house-small.png
+- road-horizontal-normal.png
+- effect-money-particle.png
+```
 
-### Gebäude-Sprites
-- **Größe**: 64x64 Pixel (empfohlen)
-- **Format**: PNG mit Transparenz
-- **Stil**: Top-Down Ansicht
-- **Farben**: Beliebig (werden automatisch eingefärbt)
+## 🗺️ World Layout System
 
-### Effekt-Sprites
-- **Größe**: 16x16 Pixel
-- **Format**: PNG mit Transparenz
-- **Stil**: Einfache Icons/Symbole
+### Grid-System
+- **Tile-basiert**: 64x64px Grid
+- **Koordinaten**: (x, y) System
+- **Layers**: Terrain → Roads → Buildings → Effects
 
-## 🔧 Fallback-System
+### Zoning System
+```javascript
+const zones = {
+  residential: { color: 0x27ae60, density: 'medium' },
+  commercial: { color: 0xf39c12, density: 'high' },
+  office: { color: 0x3498db, density: 'high' },
+  industrial: { color: 0x9b59b6, density: 'low' },
+  park: { color: 0x2ecc71, density: 'none' }
+}
+```
 
-Das Spiel funktioniert auch ohne echte Assets:
-- **Ohne Assets**: Farbige Rechtecke mit Emojis
-- **Mit Assets**: Echte Sprites mit Effekten
-- **Automatische Erkennung**: Das Spiel wählt automatisch die beste verfügbare Option
+## 🎮 Implementation Tips
 
-## 📝 Lizenz-Hinweise
-
-Beim Verwenden von Assets beachte die Lizenzen:
-- **CC0**: Keine Namensnennung nötig
-- **CC-BY**: Namensnennung erforderlich
-- **Kommerzielle Lizenz**: Prüfe die Bedingungen
-
-## 🎮 Sofort loslegen
-
-Das Spiel funktioniert bereits perfekt ohne zusätzliche Assets! Die Fallback-Grafiken sind funktional und das Gameplay ist vollständig implementiert.
-
-Assets verbessern nur die Optik - das Spiel ist bereits spielbereit! 🚀 
+1. **Layer Management**: Verwenden Sie `setDepth()` für korrekte Reihenfolge
+2. **Asset Loading**: Laden Sie Assets asynchron mit Progress-Anzeige
+3. **Memory Management**: Zerstören Sie nicht verwendete Sprites
+4. **Performance**: Verwenden Sie Sprite Atlases für bessere Performance
+5. **Responsive Design**: Skalieren Sie basierend auf Bildschirmgröße 
