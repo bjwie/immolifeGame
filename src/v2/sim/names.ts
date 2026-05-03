@@ -11,13 +11,31 @@ export const PROPERTY_NAMES: Record<string, string[]> = {
   tower: ['Hochhaus-Etagen', 'Tower-Office', 'Highrise-Gewerbe', 'Sky-Loft Block'],
 }
 
+// Names used when the property is a whole MFH (Mehrfamilienhaus, multi-unit
+// building). The single-flat names above would be misleading here.
+const MFH_NAMES = [
+  'Mehrfamilienhaus Altbau', 'Gruenderzeit-MFH', 'Wohnhaus-Komplex',
+  'Mietshaus Bestand', 'Stadthaus-Block', 'Wohnanlage', 'Familien-Wohnhaus',
+  'MFH mit Hinterhof', 'Drei-Haeuser-Ensemble', 'Geschossbau-MFH',
+]
+const TOWER_MFH_NAMES = [
+  'Hochhaus-Wohnblock', 'Tower-Wohnungen', 'Wohnturm', 'Highrise-MFH',
+]
+
 export function pickName(rng: () => number): string {
   return `${FIRST[Math.floor(rng() * FIRST.length)]} ${LAST[Math.floor(rng() * LAST.length)]}`
 }
 export function pickJob(rng: () => number): string {
   return JOBS[Math.floor(rng() * JOBS.length)]
 }
-export function pickPropertyName(kind: string, rng: () => number): string {
+export function pickPropertyName(kind: string, rng: () => number, buildingForm?: 'single' | 'mfh' | 'wg'): string {
+  if (buildingForm === 'mfh') {
+    const pool = kind === 'tower' ? TOWER_MFH_NAMES : MFH_NAMES
+    return pool[Math.floor(rng() * pool.length)]
+  }
+  if (buildingForm === 'wg') {
+    return ['WG-Etage', 'Studi-WG', 'Vier-Zi-WG', 'WG am Park'][Math.floor(rng() * 4)]
+  }
   const arr = PROPERTY_NAMES[kind] ?? ['Immobilie']
   return arr[Math.floor(rng() * arr.length)]
 }

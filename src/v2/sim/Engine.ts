@@ -294,7 +294,7 @@ export class Engine {
   /** generate a custom name on demand (cheap, not stored) */
   nameFor(p: Property): string {
     const r = mulb(p.styleSeed)
-    return pickPropertyName(p.type, r)
+    return pickPropertyName(p.type, r, p.buildingForm)
   }
 
   // ============ TIME ============

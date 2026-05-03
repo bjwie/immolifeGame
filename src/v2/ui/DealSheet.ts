@@ -156,6 +156,23 @@ export class DealSheet {
         ? `<div class="dealsheet-broker"><b>Privatverkauf von:</b> ${escape(p.seller.ownerName)}<div class="micro">Direkt mit dem Eigentuemer verhandeln</div></div>`
         : ''
 
+    // Buy-side preview of units inside MFH/WG so the player sees what's in the building
+    const buyUnitPreviewHtml = p.units.length > 1 ? `
+      <div class="units-card">
+        <div class="card-title">${p.buildingForm === 'wg' ? 'ZIMMER' : 'EINHEITEN'} (${p.units.length})</div>
+        ${p.units.map(u => `
+          <div class="unit-row">
+            <div class="unit-row-head">
+              <b>${escape(u.label)}</b>
+              <span class="micro">${u.sqm}m² · Kalt ${formatEuro(u.baseKalt)} + NK ${formatEuro(u.nebenkosten)}</span>
+            </div>
+            <div class="unit-tenant-row vacant"><span class="micro">Beim Kauf leer — du musst Mieter finden</span></div>
+          </div>
+        `).join('')}
+        <div class="micro" style="margin-top:6px">Gesamt-Kaltmiete-Potenzial: <b>${formatEuro(p.units.reduce((s, u) => s + u.baseKalt, 0))}/M</b></div>
+      </div>
+    ` : ''
+
     const negotiatedSavingsHtml = this.negotiated
       ? `<div class="negotiated-tag">✓ Verhandelt: ${formatEuro(p.price - this.negotiated.price)} gespart (Endpreis ${formatEuro(this.negotiated.price)})</div>`
       : `<button class="negotiate-btn" data-negotiate-seller>💬 Mit ${p.seller?.channel === 'agent' ? 'Makler' : 'Verkaeufer'} verhandeln</button>`
@@ -168,6 +185,7 @@ export class DealSheet {
 
     this.root.querySelector('#ds-actions')!.innerHTML = `
       ${channelHtml}
+      ${buyUnitPreviewHtml}
       ${negotiatedSavingsHtml}
 
       <div class="financing-box ${this.selectedBankId === null ? 'hidden' : ''}">
