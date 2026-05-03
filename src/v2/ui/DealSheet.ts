@@ -80,7 +80,7 @@ export class DealSheet {
     stats.innerHTML = `
       <div class="ds-stat"><label>${this.isOwned ? 'Aktueller Marktwert' : 'Angebotspreis'}</label><b>${formatEuro(this.isOwned ? p.marketValue : p.price)}</b></div>
       <div class="ds-stat"><label>Marktwert</label><b>${formatEuro(p.marketValue)}</b></div>
-      <div class="ds-stat"><label>Mietpotential</label><b>${formatEuro(p.baseRent)}/M</b></div>
+      <div class="ds-stat"><label>Kaltmiete-Potential</label><b>${formatEuro(p.baseRent)}/M</b><div class="micro">+ NK ${formatEuro(p.nebenkosten ?? 0)} = warm ${formatEuro(p.baseRent + (p.nebenkosten ?? 0))}</div></div>
       <div class="ds-stat"><label>Cap Rate</label><b class="${cap >= 5 ? 'good' : cap >= 3 ? 'mid' : 'bad'}">${cap.toFixed(2)}%</b></div>
       <div class="ds-stat"><label>Zustand</label><div class="cond-bar"><span class="${condClass}" style="width:${p.condition}%"></span></div><b class="${condClass}">${Math.round(p.condition)}% · ${conditionLabel}</b></div>
       <div class="ds-stat"><label>Wartung</label><b>${formatEuro(this['_maint'](p))}/M</b></div>
@@ -262,14 +262,18 @@ export class DealSheet {
       <div class="tenant-card">
         <div class="t-head"><b>${escape(t.name)}</b> ${personaTag} <span class="t-job">${escape(t.occupation)}</span></div>
         <div class="t-stats">
-          <div><label>Vereinbarte Miete</label><b>${formatEuro(t.agreedRent ?? p.baseRent)}/M</b></div>
+          <div><label>Kaltmiete</label><b>${formatEuro(t.agreedKaltMiete ?? p.baseRent)}/M</b></div>
+          <div><label>Nebenkosten</label><b>${formatEuro(t.agreedNebenkosten ?? p.nebenkosten ?? 0)}/M</b></div>
           <div><label>Kaution</label><b>${formatEuro(t.deposit ?? 0)}</b></div>
           <div><label>Zuverlaessigkeit</label><b>${Math.round(t.reliability)}%</b></div>
           <div><label>Zufriedenheit</label><b class="${t.satisfaction >= 70 ? 'good' : t.satisfaction >= 40 ? 'mid' : 'bad'}">${Math.round(t.satisfaction)}%</b></div>
           <div><label>Vertrag</label><b>${t.monthsRemaining} Monate</b></div>
           <div><label>Rueckstand</label><b class="${t.monthsBehind > 0 ? 'bad' : ''}">${t.monthsBehind} Monate</b></div>
         </div>
-        <button class="ghost small" data-evict>Mietverhaeltnis kuendigen (-5 Reputation)</button>
+        <div class="rent-hike-row">
+          <button class="ghost small" data-rent-hike>📈 Miete erhoehen (Mietspiegel ${DISTRICT_LABEL[p.district]}/${TYPE_LABEL[p.type]}: ${formatEuro(p.mietspiegelKalt ?? p.baseRent)})</button>
+          <button class="ghost small" data-evict>Mietverhaeltnis kuendigen (-5 Reputation)</button>
+        </div>
       </div>` : `
       <div class="tenant-card vacant">
         <div><b>Wohnung leer (${p.vacantMonths} Monate)</b></div>
@@ -344,6 +348,60 @@ export class DealSheet {
       this.close()
       void before
     })
+    this.root.querySelector('[data-rent-hike]')?.addEventListener('click', () => this.openRentHike(p))
+  }
+
+  private openRentHike(p: Property) {
+    if (!p.tenant) return
+    const t = p.tenant
+    const minNew = t.agreedKaltMiete + 10
+    const maxNew = Math.round(p.mietspiegelKalt * 1.5)
+    let value = Math.round((t.agreedKaltMiete + p.mietspiegelKalt * 1.10) / 2)
+    if (value < minNew) value = minNew
+    if (value > maxNew) value = maxNew
+
+    const overlay = document.createElement('div')
+    overlay.className = 'rent-hike-overlay'
+    overlay.innerHTML = `
+      <div class="rent-hike-card">
+        <div class="card-title">MIETE ERHOEHEN</div>
+        <div class="micro" style="margin-bottom:8px">${escape(t.name)} zahlt aktuell <b>${formatEuro(t.agreedKaltMiete)}</b> kalt. Mietspiegel: <b>${formatEuro(p.mietspiegelKalt)}</b>.</div>
+        <input type="range" id="hike-slider" min="${minNew}" max="${maxNew}" step="10" value="${value}">
+        <div class="hike-summary">
+          <b id="hike-value">${formatEuro(value)}</b>
+          <span class="micro" id="hike-vs-spiegel"></span>
+          <div id="hike-risk"></div>
+        </div>
+        <div class="rent-hike-buttons">
+          <button class="primary" data-confirm-hike>Erhoehen</button>
+          <button class="ghost" data-cancel-hike>Abbrechen</button>
+        </div>
+      </div>
+    `
+    this.root.appendChild(overlay)
+    const slider = overlay.querySelector<HTMLInputElement>('#hike-slider')!
+    const valueEl = overlay.querySelector<HTMLElement>('#hike-value')!
+    const vsEl = overlay.querySelector<HTMLElement>('#hike-vs-spiegel')!
+    const riskEl = overlay.querySelector<HTMLElement>('#hike-risk')!
+
+    const updateRisk = () => {
+      const v = Number(slider.value)
+      const r = this.engine.rentHikeRisk(p.id, v)
+      valueEl.textContent = formatEuro(v)
+      vsEl.textContent = ` (${(r.ratio * 100 - 100).toFixed(0)}% ueber Mietspiegel)`
+      const pct = Math.round(r.lawsuitChance * 100)
+      const cls = r.lawsuitChance < 0.10 ? 'good' : r.lawsuitChance < 0.30 ? 'mid' : 'bad'
+      riskEl.innerHTML = `<span class="${cls}">Klagerisiko: ${pct}%</span>`
+    }
+    slider.addEventListener('input', updateRisk)
+    updateRisk()
+
+    overlay.querySelector('[data-confirm-hike]')!.addEventListener('click', () => {
+      this.engine.raiseRent(p.id, Number(slider.value))
+      overlay.remove()
+      this.refresh()
+    })
+    overlay.querySelector('[data-cancel-hike]')!.addEventListener('click', () => overlay.remove())
   }
 }
 

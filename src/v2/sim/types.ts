@@ -16,13 +16,14 @@ export interface Tenant {
   name: string
   occupation: string
   personality: TenantPersonality
-  reliability: number      // 0-100 — chance to pay rent on time
-  income: number           // monthly euros
-  satisfaction: number     // 0-100 — drops if condition bad
-  monthsRemaining: number  // months left on lease
-  monthsBehind: number     // unpaid months
-  agreedRent: number       // monthly rent agreed in lease (may differ from baseRent)
-  deposit: number          // security deposit held
+  reliability: number       // 0-100 — chance to pay rent on time
+  income: number            // monthly euros
+  satisfaction: number      // 0-100 — drops if condition bad
+  monthsRemaining: number   // months left on lease
+  monthsBehind: number      // unpaid months
+  agreedKaltMiete: number   // Kaltmiete — the part the player books as income
+  agreedNebenkosten: number // Heizung/Wasser/Hausgeld; tenant pays on top, doesn't enter player's books
+  deposit: number           // security deposit held
 }
 
 export interface Applicant {
@@ -52,7 +53,9 @@ export interface Property {
   marketValue: number       // current market value (drifts with district trend)
   basePrice: number         // original generation baseline
 
-  baseRent: number          // monthly rent at perfect condition
+  baseRent: number          // Kaltmiete at perfect condition (monthly)
+  nebenkosten: number       // typical Nebenkosten for this unit (info only — paid by tenant on top)
+  mietspiegelKalt: number   // local-comparable Kaltmiete (Mietpreisbremse reference)
   condition: number         // 0-100
 
   yearBuilt: number
@@ -67,6 +70,8 @@ export interface Property {
   ownedSince?: number       // gameMonth when bought
   lastRenovationMonth?: number
   seller?: SellerInfo      // who's selling (private or agent-listed)
+  /** Per-month applicant search budget. Initialised lazily; reset on month change. */
+  applicantSearches?: { month: number; remaining: number }
 }
 
 export interface Loan {
@@ -197,6 +202,20 @@ export interface Achievement {
   test: (state: GameState) => boolean
 }
 
+export interface Lawsuit {
+  id: string
+  propertyId: string
+  reason: 'rent-hike'        // future: 'eviction', 'damage'
+  monthsRemaining: number
+  totalMonths: number
+  monthlyCost: number        // Anwaltskosten — drains every month while active
+  totalSpent: number
+  successChance: number      // 0..1 — player's chance to win
+  /** if won, the new rent stays; if lost, rent reverts to this Kaltmiete */
+  revertToKalt: number
+  outcome: 'pending' | 'won' | 'lost'
+}
+
 export interface GameState {
   player: Player
   time: GameTime
@@ -206,6 +225,7 @@ export interface GameState {
   listings: Property[]
   owned: Property[]
   loans: Loan[]
+  lawsuits: Lawsuit[]
   rngSeed: number
 }
 

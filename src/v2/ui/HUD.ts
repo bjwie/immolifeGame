@@ -71,7 +71,14 @@ export class HUD {
       chip.title = e.body
       events.appendChild(chip)
     }
-    if (s.market.events.length === 0) {
+    for (const ls of s.lawsuits) {
+      const chip = document.createElement('div')
+      chip.className = 'event-chip lawsuit'
+      chip.textContent = `⚖ Klage (${ls.monthsRemaining} M, ${formatEuro(ls.monthlyCost)}/M)`
+      chip.title = `Mieterhoehung-Klage. Gesamtkosten bisher ${formatEuro(ls.totalSpent)}. Erfolgschance ${(ls.successChance * 100).toFixed(0)}%.`
+      events.appendChild(chip)
+    }
+    if (s.market.events.length === 0 && s.lawsuits.length === 0) {
       const chip = document.createElement('div')
       chip.className = 'event-chip muted'
       chip.textContent = 'Markt ruhig'

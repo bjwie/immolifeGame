@@ -1,4 +1,4 @@
-import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, GameState, GameTime, Loan, MarketEvent, Player, Property, PropertyType, SellerNegotiationState, Speed } from './types'
+import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, GameState, GameTime, Loan, MarketEvent, Player, Property, PropertyType, SellerNegotiationState, Speed, Tenant } from './types'
 import type { CityLayout, DistrictDef, DistrictId } from '../render/CityRenderer'
 import { generateApplicants, pickPropertyName, pickSeller } from './names'
 
@@ -64,6 +64,7 @@ export class Engine {
       listings: [],
       owned: [],
       loans: [],
+      lawsuits: [],
       rngSeed: Math.floor(Math.random() * 1_000_000),
     }
   }
@@ -82,6 +83,24 @@ export class Engine {
 
   private districtById(id: DistrictId): DistrictDef {
     return this.layout.districts.find(d => d.id === id)!
+  }
+
+  /**
+   * Local Mietspiegel ("Berliner Mietspiegel"-style) — comparable Kaltmiete for a
+   * given district + property type, deterministic so two apartments in Mitte have
+   * the same reference. Per-property variance lives in the actual `baseRent`, which
+   * already factors in condition + price; mietspiegelKalt is the LEGAL reference
+   * for Mietpreisbremse (raiseRent uses it to compute lawsuit risk).
+   */
+  mietspiegelFor(district: DistrictId, type: PropertyType): number {
+    const d = this.districtById(district)
+    // Typical mid-market Kaltmiete per property type. Exact values are tuned so
+    // newly-listed baseRent sits ~5-15% above mietspiegel (room to negotiate up)
+    // and well-maintained properties can push 10-20% above before suing.
+    const typical: Record<PropertyType, number> = {
+      house: 1100, villa: 2400, apartment: 750, shop: 1400, office: 1800, tower: 1900,
+    }
+    return Math.round(typical[type] * d.rentMultiplier)
   }
 
   private propertyTypeForDistrict(rng: () => number, district: DistrictId): PropertyType {
@@ -147,6 +166,9 @@ export class Engine {
     const variance = 0.75 + rng() * 0.5
     const price = Math.round(base * districtDef.priceMultiplier * variance * (0.6 + condition / 200))
     const baseRent = Math.round(price * 0.0048 * districtDef.rentMultiplier)
+    const nebenkosten = Math.round(baseRent * (0.22 + rng() * 0.10))
+    // Mietspiegel: deterministic per (district, type) — see mietspiegelFor.
+    const mietspiegelKalt = this.mietspiegelFor(d, type)
 
     return {
       id: 'p_' + Math.random().toString(36).slice(2, 10),
@@ -159,6 +181,8 @@ export class Engine {
       marketValue: price,
       basePrice: price,
       baseRent,
+      nebenkosten,
+      mietspiegelKalt,
       condition,
       yearBuilt,
       monthsOnMarket: 0,
@@ -259,17 +283,33 @@ export class Engine {
 
       if (p.tenant) {
         const t = p.tenant
-        // migration safety
-        if (typeof t.agreedRent !== 'number') t.agreedRent = Math.round(this.effectiveRent(p))
-        if (typeof t.deposit !== 'number') t.deposit = t.agreedRent * 2
+        // migration safety — old saves only had agreedRent; treat that as Kalt and
+        // synthesize Nebenkosten at ~25% (matches genListing default).
+        const legacy = t as Tenant & { agreedRent?: number }
+        if (typeof t.agreedKaltMiete !== 'number') {
+          t.agreedKaltMiete = typeof legacy.agreedRent === 'number'
+            ? legacy.agreedRent
+            : Math.round(this.effectiveRent(p))
+        }
+        if (typeof t.agreedNebenkosten !== 'number') {
+          t.agreedNebenkosten = Math.round(t.agreedKaltMiete * 0.25)
+        }
+        if (typeof t.deposit !== 'number') t.deposit = t.agreedKaltMiete * 2
+        if (typeof p.nebenkosten !== 'number') p.nebenkosten = t.agreedNebenkosten
         // partyer slowly damages condition
         if (t.personality === 'partyer') p.condition = Math.max(0, p.condition - 0.6)
         // tidy slightly improves
         if (t.personality === 'tidy') p.condition = Math.min(100, p.condition + 0.2)
 
-        const willPay = rng() < (t.reliability / 100) * (0.6 + t.satisfaction / 250)
+        // reliability is the chance to pay on time. satisfaction already affects
+        // whether tenants leave (auto-eviction below at <25) and reputation drift —
+        // multiplying it back into willPay double-penalizes and makes the HUD
+        // cashflow forecast (which uses reliability only) over-promise.
+        const willPay = rng() < (t.reliability / 100)
         if (willPay) {
-          income += t.agreedRent
+          // Only Kaltmiete enters the player's books. Nebenkosten are paid by the
+          // tenant on top and pass straight to suppliers (heating/water/Hausgeld).
+          income += t.agreedKaltMiete
           t.monthsBehind = Math.max(0, t.monthsBehind - 1)
         } else {
           t.monthsBehind++
@@ -335,6 +375,28 @@ export class Engine {
         this.emit('toast', { kind: 'success', text: `Kredit getilgt!` })
       }
     }
+
+    // lawsuits — Anwaltskosten laufen monatlich, Outcome am Ende
+    for (const ls of this.state.lawsuits) {
+      if (ls.outcome !== 'pending') continue
+      expenses += ls.monthlyCost
+      ls.totalSpent += ls.monthlyCost
+      ls.monthsRemaining--
+      if (ls.monthsRemaining <= 0) {
+        const won = rng() < ls.successChance
+        ls.outcome = won ? 'won' : 'lost'
+        const p = this.state.owned.find(pp => pp.id === ls.propertyId)
+        if (won) {
+          this.emit('toast', { kind: 'success', text: `Klage gewonnen — Mieterhoehung haelt. Kosten ${formatEuro(ls.totalSpent)}.` })
+        } else {
+          // revert tenant rent + reputation hit + small Bussgeld already in monthlyCost
+          if (p?.tenant) p.tenant.agreedKaltMiete = ls.revertToKalt
+          this.state.player.reputation = Math.max(0, this.state.player.reputation - 10)
+          this.emit('toast', { kind: 'error', text: `Klage verloren — Miete zurueckgesetzt, Reputation -10. Kosten ${formatEuro(ls.totalSpent)}.` })
+        }
+      }
+    }
+    this.state.lawsuits = this.state.lawsuits.filter(l => l.outcome === 'pending')
 
     // taxes & overhead
     const overhead = 1500 + Math.round(this.state.owned.length * 80)
@@ -487,25 +549,61 @@ export class Engine {
    * Generate a fresh pool of applicants for an owned, vacant property
    * given the asking rent the player wants to set.
    */
-  getApplicants(propertyId: string, askingRent: number, count: number = 5): Applicant[] {
+  /**
+   * Initial pool of applicants for a vacant property, deterministic per (rent, month).
+   * Use `tryRefreshApplicants` to roll a fresh pool (consumes the monthly search budget).
+   */
+  getApplicants(propertyId: string, askingRent: number, count: number = 5, salt: number = 0): Applicant[] {
     const p = this.state.owned.find(pp => pp.id === propertyId)
     if (!p) return []
     const districtPull = this.districtById(p.district).desirability / 100   // 0.5..0.95
     const reputationPull = 0.6 + this.state.player.reputation / 200          // 0.6..1.1
     const conditionPull = 0.5 + p.condition / 200                            // 0.5..1.0
     const baseCount = Math.max(1, Math.round(count * districtPull * reputationPull * conditionPull))
-    const rng = this.rng(askingRent + this.gameMonth() * 31)
-    return generateApplicants(rng, p.baseRent, p.condition, askingRent, baseCount * 2)  // generate 2x then filter happens by budget
+    const nk = typeof p.nebenkosten === 'number' ? p.nebenkosten : Math.round(p.baseRent * 0.25)
+    const rng = this.rng(askingRent + this.gameMonth() * 31 + salt * 1009)
+    return generateApplicants(rng, p.baseRent, p.condition, askingRent, nk, baseCount * 2, p.district)
   }
 
-  /** Sign a lease: applicant becomes tenant. */
-  signLease(propertyId: string, applicant: Applicant, monthlyRent: number, leaseMonths: number): { ok: boolean; reason?: string } {
+  /** UI helper: how many manual refreshes are still available this month? */
+  applicantRefreshesLeft(propertyId: string): number {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return 0
+    const m = this.gameMonth()
+    if (!p.applicantSearches || p.applicantSearches.month !== m) return 3
+    return p.applicantSearches.remaining
+  }
+
+  /** Consume one refresh and return a freshly-rolled applicant list with a unique salt. */
+  tryRefreshApplicants(propertyId: string, askingRent: number, count: number = 5): { ok: boolean; remaining: number; applicants: Applicant[] } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ok: false, remaining: 0, applicants: [] }
+    const m = this.gameMonth()
+    if (!p.applicantSearches || p.applicantSearches.month !== m) {
+      p.applicantSearches = { month: m, remaining: 3 }
+    }
+    if (p.applicantSearches.remaining <= 0) {
+      return { ok: false, remaining: 0, applicants: this.getApplicants(propertyId, askingRent, count) }
+    }
+    p.applicantSearches.remaining--
+    // salt = how many refreshes used so far (1..3), so each pool is distinct
+    const salt = 3 - p.applicantSearches.remaining
+    const apps = this.getApplicants(propertyId, askingRent, count, salt)
+    return { ok: true, remaining: p.applicantSearches.remaining, applicants: apps }
+  }
+
+  /** Sign a lease: applicant becomes tenant. `kaltMiete` is the negotiated Kaltmiete;
+   *  Nebenkosten are taken from the property and added on top (the tenant pays warm,
+   *  but only Kaltmiete enters the player's books). */
+  signLease(propertyId: string, applicant: Applicant, kaltMiete: number, leaseMonths: number): { ok: boolean; reason?: string } {
     const p = this.state.owned.find(pp => pp.id === propertyId)
     if (!p) return { ok: false, reason: 'Nicht im Besitz' }
     if (p.tenant) return { ok: false, reason: 'Wohnung bereits vermietet' }
-    if (monthlyRent > applicant.maxRentBudget * 1.05) return { ok: false, reason: 'Bewerber kann sich diese Miete nicht leisten' }
+    const nk = typeof p.nebenkosten === 'number' ? p.nebenkosten : Math.round(p.baseRent * 0.25)
+    const warm = kaltMiete + nk
+    if (warm > applicant.maxRentBudget * 1.05) return { ok: false, reason: 'Bewerber kann sich diese Warmmiete nicht leisten' }
 
-    const deposit = monthlyRent * 2
+    const deposit = kaltMiete * 2
     p.tenant = {
       id: applicant.id,
       name: applicant.name,
@@ -516,14 +614,15 @@ export class Engine {
       satisfaction: 75,
       monthsRemaining: leaseMonths,
       monthsBehind: 0,
-      agreedRent: monthlyRent,
+      agreedKaltMiete: kaltMiete,
+      agreedNebenkosten: nk,
       deposit,
     }
     p.vacantMonths = 0
     // deposit goes into player's cash (held for tenant — simplified)
     this.state.player.cash += deposit
     this.emit('leaseSigned', { property: p, tenant: p.tenant })
-    this.emit('toast', { kind: 'success', text: `Vertrag mit ${applicant.name} (${monthlyRent} EUR/M, ${leaseMonths} M, Kaution ${deposit} EUR)` })
+    this.emit('toast', { kind: 'success', text: `Vertrag mit ${applicant.name} (Kalt ${kaltMiete} + NK ${nk} EUR/M, ${leaseMonths} M, Kaution ${deposit} EUR)` })
     this.autoSave()
     return { ok: true }
   }
@@ -624,6 +723,72 @@ export class Engine {
     this.emit('toast', { kind: 'success', text: `Renovierung ${level} abgeschlossen (-${formatEuro(scaledCost)})` })
     this.autoSave()
     return { ok: true }
+  }
+
+  /**
+   * Raise the Kaltmiete on an existing tenant.
+   * Returns lawsuit risk so the UI can warn before committing.
+   * Above Mietspiegel × 1.10 ("Mietpreisbremse"), the tenant may sue:
+   *   1.10 → ~0% risk; 1.20 → ~50%; 1.30+ → ~95%.
+   * If a suit is filed, raise still applies immediately, but a Lawsuit
+   * runs for 4-6 months. Won → keep new rent; lost → revert + Reputation -10.
+   */
+  raiseRent(propertyId: string, newKalt: number): { ok: boolean; reason?: string; lawsuitFiled?: boolean; lawsuitChance?: number } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    if (!p.tenant) return { ok: false, reason: 'Kein Mieter — Miete im naechsten Vertrag setzen' }
+    const t = p.tenant
+    if (newKalt <= t.agreedKaltMiete) return { ok: false, reason: 'Neue Miete muss hoeher sein' }
+    // 15% rent-hike cap per 12 months feels harsh but legally close (Kappungsgrenze 20% in 3y).
+    // We allow any value but cap satisfaction hit smoothly.
+
+    const ratio = newKalt / Math.max(1, p.mietspiegelKalt)
+    const lawsuitChance = ratio <= 1.10 ? 0
+      : ratio >= 1.30 ? 0.95
+      : (ratio - 1.10) * 5  // 1.10 → 0, 1.20 → 0.5, 1.30 → 1.0 (clamped above)
+
+    // tenant satisfaction hit proportional to the hike
+    const hikePct = (newKalt - t.agreedKaltMiete) / Math.max(1, t.agreedKaltMiete)
+    t.satisfaction = Math.max(0, t.satisfaction - hikePct * 60)
+
+    const oldKalt = t.agreedKaltMiete
+    t.agreedKaltMiete = newKalt
+    p.baseRent = Math.max(p.baseRent, newKalt)  // baseRent floats up too — Mietspiegel for next tenant
+
+    let lawsuitFiled = false
+    if (lawsuitChance > 0 && Math.random() < lawsuitChance) {
+      lawsuitFiled = true
+      const months = 4 + Math.floor(Math.random() * 3)
+      const monthlyCost = 800 + Math.floor(Math.random() * 700)
+      // success-chance for the player: higher when ratio is closer to 1.10
+      const successChance = Math.max(0.05, 1 - lawsuitChance)
+      this.state.lawsuits.push({
+        id: 'ls_' + Math.random().toString(36).slice(2, 9),
+        propertyId: p.id,
+        reason: 'rent-hike',
+        monthsRemaining: months,
+        totalMonths: months,
+        monthlyCost,
+        totalSpent: 0,
+        successChance,
+        revertToKalt: oldKalt,
+        outcome: 'pending',
+      })
+      this.emit('toast', { kind: 'warning', text: `${t.name} reicht Klage gegen Mieterhoehung ein. Anwaltskosten ${formatEuro(monthlyCost)}/M, ${months} Monate.` })
+    } else {
+      this.emit('toast', { kind: 'success', text: `Miete bei ${this.nameFor(p)} auf ${formatEuro(newKalt)} kalt erhoeht.` })
+    }
+    this.autoSave()
+    return { ok: true, lawsuitFiled, lawsuitChance }
+  }
+
+  /** UI helper: show the player the lawsuit risk before they commit */
+  rentHikeRisk(propertyId: string, newKalt: number): { ratio: number; lawsuitChance: number } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ratio: 1, lawsuitChance: 0 }
+    const ratio = newKalt / Math.max(1, p.mietspiegelKalt)
+    const lawsuitChance = ratio <= 1.10 ? 0 : ratio >= 1.30 ? 0.95 : Math.min(1, (ratio - 1.10) * 5)
+    return { ratio, lawsuitChance }
   }
 
   evictTenant(propertyId: string) {
@@ -763,6 +928,26 @@ export class Engine {
         const fresh = this.freshState()
         this.state.brokers = fresh.brokers
       }
+      // M1: Kalt/Warm split — give every Property a nebenkosten + mietspiegel value,
+      // and split legacy Tenant.agreedRent into agreedKaltMiete / agreedNebenkosten.
+      const migrateProperty = (p: Property) => {
+        if (typeof p.nebenkosten !== 'number') p.nebenkosten = Math.round(p.baseRent * 0.25)
+        if (typeof p.mietspiegelKalt !== 'number') p.mietspiegelKalt = this.mietspiegelFor(p.district, p.type)
+        if (p.tenant) {
+          const t = p.tenant as Tenant & { agreedRent?: number }
+          if (typeof t.agreedKaltMiete !== 'number') {
+            t.agreedKaltMiete = typeof t.agreedRent === 'number' ? t.agreedRent : p.baseRent
+          }
+          if (typeof t.agreedNebenkosten !== 'number') {
+            t.agreedNebenkosten = p.nebenkosten
+          }
+          delete t.agreedRent
+        }
+      }
+      this.state.listings.forEach(migrateProperty)
+      this.state.owned.forEach(migrateProperty)
+      // M1: lawsuits array
+      if (!Array.isArray(this.state.lawsuits)) this.state.lawsuits = []
       return true
     } catch { return false }
   }

@@ -61,7 +61,15 @@ export class RentalModal {
 
   private refreshApplicants() {
     if (!this.property) return
+    // Initial / passive load — does not consume the monthly refresh budget.
     this.applicants = this.engine.getApplicants(this.property.id, this.askingRent, 5)
+  }
+
+  private refreshApplicantsManual(): boolean {
+    if (!this.property) return false
+    const res = this.engine.tryRefreshApplicants(this.property.id, this.askingRent, 5)
+    if (res.ok) this.applicants = res.applicants
+    return res.ok
   }
 
   private render() {
@@ -69,14 +77,18 @@ export class RentalModal {
     const p = this.property
     const minRent = Math.round(p.baseRent * 0.4)
     const maxRent = Math.round(p.baseRent * 1.6)
+    const nk = p.nebenkosten ?? 0
+    const warm = this.askingRent + nk
 
     const apps = this.applicants
     const hasNone = apps.length === 0
 
     const rows = apps.map(a => {
       const reliabilityClass = a.reliability >= 85 ? 'good' : a.reliability >= 65 ? 'mid' : 'bad'
-      const incomeRatio = a.income / Math.max(1, this.askingRent)
+      // applicants compare warm vs warm budget
+      const incomeRatio = a.income / Math.max(1, warm)
       const incomeOK = incomeRatio >= 3
+      const overBudget = warm > a.maxRentBudget * 1.05
       return `
         <div class="applicant-row" data-app-id="${a.id}">
           <div class="app-avatar" style="background:${PERSONA_BG[a.personality]}">${PERSONA_EMOJI[a.personality]}</div>
@@ -93,9 +105,9 @@ export class RentalModal {
             <div class="${reliabilityClass}"><b>${a.reliability}%</b></div>
             <div class="micro">Wunsch-Vertrag</div>
             <div><b>${a.preferredLeaseMonths} Mon.</b></div>
-            <div class="micro">Max. Miete</div>
+            <div class="micro">Max. warm</div>
             <div><b>${formatEuro(a.maxRentBudget)}</b></div>
-            <button class="primary small" data-sign-id="${a.id}" ${this.askingRent > a.maxRentBudget * 1.05 ? 'disabled' : ''}>Vertrag</button>
+            <button class="primary small" data-sign-id="${a.id}" ${overBudget ? 'disabled' : ''}>Vertrag</button>
           </div>
         </div>
       `
@@ -107,23 +119,26 @@ export class RentalModal {
       <div class="rental-modal">
         <div class="rental-head">
           <div class="neg-title">Vermietung — ${escape(this.engine.nameFor(p))}</div>
-          <div class="neg-sub">Zustand ${Math.round(p.condition)}% · Basismiete ${formatEuro(p.baseRent)}/M · Leerstand: ${p.vacantMonths} Monate</div>
+          <div class="neg-sub">Zustand ${Math.round(p.condition)}% · Basismiete ${formatEuro(p.baseRent)} kalt · NK ${formatEuro(nk)} · Leerstand ${p.vacantMonths} M</div>
           <button class="ds-close" data-close>×</button>
         </div>
         <div class="rental-body">
           <div class="rental-controls">
             <div class="rental-section">
-              <div class="card-title">DEINE MIETE</div>
+              <div class="card-title">DEINE KALTMIETE</div>
               <input type="range" id="rent-slider" min="${minRent}" max="${maxRent}" step="20" value="${this.askingRent}">
-              <div class="rent-display"><b id="rent-value">${formatEuro(this.askingRent)}</b>/Monat</div>
-              <div class="micro">Hoehere Miete = weniger Bewerber. Niedrigere Miete = mehr aber weniger Top-Mieter.</div>
+              <div class="rent-display">
+                <b id="rent-value">${formatEuro(this.askingRent)}</b> kalt
+                <span class="micro" style="margin-left:8px">+ <b id="nk-value">${formatEuro(nk)}</b> NK = <b id="warm-value">${formatEuro(warm)}</b> warm</span>
+              </div>
+              <div class="micro">Bewerber vergleichen ihr Budget mit der Warmmiete. Nebenkosten zahlt der Mieter zusaetzlich, sie laufen durch.</div>
             </div>
             <div class="rental-section">
               <div class="card-title">VERTRAGSDAUER</div>
               <div class="lease-opts">${monthsOptions}</div>
               <div class="micro">Lange Vertraege = stabile Mieter, kuendigen ungern.</div>
             </div>
-            <button class="ghost" data-refresh>↻ Neue Bewerber suchen</button>
+            <button class="ghost" data-refresh ${this.engine.applicantRefreshesLeft(p.id) <= 0 ? 'disabled' : ''}>↻ Neue Bewerber suchen (${this.engine.applicantRefreshesLeft(p.id)}/3 Monat)</button>
           </div>
           <div class="applicants-list">
             <div class="card-title">BEWERBER (${apps.length})</div>
@@ -135,9 +150,11 @@ export class RentalModal {
 
     const slider = this.root.querySelector<HTMLInputElement>('#rent-slider')
     const display = this.root.querySelector<HTMLElement>('#rent-value')
+    const warmDisplay = this.root.querySelector<HTMLElement>('#warm-value')
     slider?.addEventListener('input', () => {
       this.askingRent = Number(slider.value)
       if (display) display.textContent = formatEuro(this.askingRent)
+      if (warmDisplay) warmDisplay.textContent = formatEuro(this.askingRent + nk)
     })
     slider?.addEventListener('change', () => {
       this.refreshApplicants()
@@ -152,7 +169,10 @@ export class RentalModal {
     })
 
     this.root.querySelector('[data-refresh]')?.addEventListener('click', () => {
-      this.refreshApplicants()
+      const ok = this.refreshApplicantsManual()
+      if (!ok) {
+        ;(this.engine as any).emit?.('toast', { kind: 'info', text: 'Diesen Monat keine Suche mehr — naechsten Monat wieder 3 Versuche.' })
+      }
       this.render()
     })
 

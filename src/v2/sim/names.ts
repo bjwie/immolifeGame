@@ -78,22 +78,57 @@ const LEASE_PREF: Record<TenantPersonality, number[]> = {
   tidy: [24, 36], partyer: [12, 24], quiet: [24, 36], demanding: [12, 24], family: [36], student: [12, 24],
 }
 
-export function generateApplicants(rng: () => number, baseRent: number, condition: number, askingRent: number, count: number): Applicant[] {
+/**
+ * District "Milieu" — weighted likelihood of each tenant persona showing up in
+ * the applicant pool, reflecting the social character of each Berlin district.
+ * Weights don't have to sum to 1; pickWeighted normalises them.
+ */
+const DISTRICT_MILIEU: Record<string, Partial<Record<TenantPersonality, number>>> = {
+  mitte:          { demanding: 3, quiet: 2, tidy: 2, family: 1, partyer: 1, student: 0.5 },
+  charlottenburg: { demanding: 3, quiet: 3, tidy: 2, family: 2, partyer: 0.3, student: 0.3 },
+  prenzlauer:     { family: 4, tidy: 2, quiet: 2, demanding: 1.5, student: 1, partyer: 0.5 },
+  kreuzberg:      { partyer: 3, student: 2.5, tidy: 1, quiet: 1, family: 1, demanding: 0.5 },
+  neukoelln:      { student: 2.5, partyer: 2.5, tidy: 1, quiet: 1, family: 1.5, demanding: 0.3 },
+  wedding:        { student: 2.5, family: 2, quiet: 2, partyer: 1, tidy: 1, demanding: 0.2 },
+}
+
+function pickWeighted<T extends string>(rng: () => number, weights: Partial<Record<T, number>>, fallback: T[]): T {
+  const entries = Object.entries(weights) as Array<[T, number | undefined]>
+  const total = entries.reduce((s, [, w]) => s + (w ?? 0), 0)
+  if (total <= 0) return fallback[Math.floor(rng() * fallback.length)]
+  let r = rng() * total
+  for (const [k, w] of entries) {
+    r -= (w ?? 0)
+    if (r <= 0) return k
+  }
+  return fallback[Math.floor(rng() * fallback.length)]
+}
+
+/** `baseKalt` is the property's reference Kaltmiete (used to size the applicant's
+ *  budget tier); `askingKalt` is what the player is actually asking. `nebenkosten`
+ *  is added to both so the qualification compares Warmmiete to budget.
+ *  `district` biases the persona pool toward the local milieu. */
+export function generateApplicants(rng: () => number, baseKalt: number, condition: number, askingKalt: number, nebenkosten: number, count: number, district?: string): Applicant[] {
   const out: Applicant[] = []
+  const askingWarm = askingKalt + nebenkosten
+  const milieu = district ? DISTRICT_MILIEU[district] : undefined
   for (let i = 0; i < count; i++) {
-    const persona = TENANT_PERSONAS[Math.floor(rng() * TENANT_PERSONAS.length)]
+    const persona = milieu
+      ? pickWeighted<TenantPersonality>(rng, milieu, TENANT_PERSONAS)
+      : TENANT_PERSONAS[Math.floor(rng() * TENANT_PERSONAS.length)]
     const [rMin, rMax] = RELIABILITY_BY_PERSONA[persona]
     const reliability = Math.round(rMin + rng() * (rMax - rMin))
     const blurbs = TENANT_BLURBS[persona]
     const blurb = blurbs[Math.floor(rng() * blurbs.length)]
     const incomeMult = INCOME_MULT_BY_PERSONA[persona] * (0.85 + rng() * 0.3)
-    const baseInc = Math.max(1500, Math.round(askingRent * incomeMult))
-    const baseBudget = baseRent * RENT_BUDGET_MULT[persona] * (0.85 + rng() * 0.3)
+    const baseInc = Math.max(1500, Math.round(askingWarm * incomeMult))
+    // budget tier is sized to the property's reference Warmmiete
+    const baseBudget = (baseKalt + nebenkosten) * RENT_BUDGET_MULT[persona] * (0.85 + rng() * 0.3)
     // demanding tenants only consider properties in good condition
     const conditionPenalty = persona === 'demanding' && condition < 60 ? 0.7 : 1.0
     const maxRentBudget = Math.round(baseBudget * conditionPenalty)
-    // partyer/student less willing if rent extremely high
-    if (askingRent > maxRentBudget * 1.05) continue
+    // applicant compares warm asking vs warm budget
+    if (askingWarm > maxRentBudget * 1.05) continue
     const leaseOpts = LEASE_PREF[persona]
     out.push({
       id: 'a_' + Math.random().toString(36).slice(2, 9),
