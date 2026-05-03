@@ -14,6 +14,18 @@
   --bad: #ff7676;
   --accent: #4eb4e0;
   --accent-2: #845cf2;
+  /* UX-3: spacing scale + radii + control heights */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --r-sm: 4px;
+  --r-md: 8px;
+  --r-lg: 10px;
+  --btn-h: 36px;
+  --btn-h-sm: 26px;
+  --btn-h-big: 44px;
 }
 
 * { box-sizing: border-box; }
@@ -169,6 +181,27 @@ body {
   text-align: center; color: var(--muted);
   padding: 30px 10px; font-size: 13px;
 }
+
+/* Inline applicants in vacant unit cards (UX-3) */
+.inline-apps {
+  margin-top: var(--sp-2);
+  display: flex; flex-direction: column; gap: var(--sp-1);
+}
+.inline-apps-head {
+  font-size: 11px; color: var(--muted);
+  letter-spacing: 0.3px; margin-bottom: 2px;
+}
+.inline-app {
+  display: grid;
+  grid-template-columns: 24px 1fr auto;
+  gap: var(--sp-2); align-items: center;
+  padding: var(--sp-2);
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: var(--r-sm);
+  font-size: 12px;
+}
+.inline-app-emoji { font-size: 18px; text-align: center; }
+.inline-app-info { line-height: 1.35; }
+.inline-app button { width: auto; }
 
 /* ============ Activity Log (UX Pass 2) ============ */
 
@@ -423,12 +456,6 @@ body {
 }
 .eviction-status b { color: var(--bad); }
 
-button.danger {
-  background: rgba(255, 118, 118, 0.15); border: 1px solid var(--bad); color: var(--bad);
-  border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px;
-}
-button.danger:hover { background: var(--bad); color: #fff; }
-button.danger.small { padding: 4px 8px; font-size: 11px; }
 .t-head { display: flex; gap: 8px; align-items: baseline; margin-bottom: 8px; }
 .t-job { color: var(--muted); font-size: 12px; }
 .t-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -491,9 +518,9 @@ button.danger.small { padding: 4px 8px; font-size: 11px; }
 }
 .unit-tenant-row.vacant { color: var(--muted); }
 .unit-actions {
-  display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px;
+  display: flex; gap: var(--sp-1); flex-wrap: wrap; margin-top: var(--sp-2);
 }
-.unit-actions button { font-size: 11px; padding: 4px 8px; }
+.unit-actions button { width: auto; flex: 0 1 auto; }
 
 /* WEG card on DealSheet */
 .weg-card {
@@ -662,8 +689,9 @@ button.danger.small { padding: 4px 8px; font-size: 11px; }
 .sell-broker-num > div:first-child { font-weight: 700; }
 
 .rent-hike-row {
-  display: flex; flex-direction: column; gap: 4px; margin-top: 8px;
+  display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-3);
 }
+.rent-hike-row button { width: 100%; }
 
 .rent-hike-overlay {
   position: absolute; inset: 0;
@@ -682,28 +710,37 @@ button.danger.small { padding: 4px 8px; font-size: 11px; }
 .rent-hike-buttons { display: flex; gap: 8px; margin-top: 10px; }
 .rent-hike-buttons button { flex: 1; }
 
-button.primary {
-  background: var(--gold); color: #2a2200;
-  border: 0; border-radius: 8px; padding: 12px; font-size: 15px; font-weight: 800;
-  cursor: pointer; width: 100%;
+/* UX-3: unified button system. All variants share height + radius + transitions;
+ * `.small` and `.big` are size modifiers. Default is full-width inside their
+ * container; only override per-context when really needed. */
+button.primary, button.ghost, button.danger {
+  height: var(--btn-h);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-md);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  width: 100%;
+  transition: background 0.1s, color 0.1s, border-color 0.1s, transform 0.05s;
+  letter-spacing: 0.2px;
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: var(--sp-2);
 }
-button.primary:hover { background: #ffd84d; }
-button.primary.big { padding: 16px; font-size: 16px; }
+button.primary:active, button.ghost:active, button.danger:active { transform: translateY(1px); }
+button.primary:disabled, button.ghost:disabled, button.danger:disabled { opacity: 0.45; cursor: not-allowed; }
 
-button.danger {
-  background: var(--bg-3); color: var(--bad);
-  border: 1px solid var(--bad); border-radius: 6px; padding: 10px;
-  width: 100%; font-weight: 600; cursor: pointer; margin-top: 8px;
-}
-button.danger:hover { background: var(--bad); color: var(--bg-1); }
+button.primary { background: var(--gold); color: #2a2200; border: 0; }
+button.primary:hover:not(:disabled) { background: #ffd84d; }
 
-button.ghost {
-  background: transparent; color: var(--muted);
-  border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
-  cursor: pointer; font-size: 12px; margin-top: 8px;
-}
-button.ghost:hover { color: var(--text); border-color: var(--accent); }
-button.small { font-size: 11px; padding: 4px 8px; }
+button.danger { background: rgba(255, 118, 118, 0.10); color: var(--bad); border: 1px solid var(--bad); }
+button.danger:hover:not(:disabled) { background: var(--bad); color: var(--bg-1); }
+
+button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+button.ghost:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+
+/* Size modifiers */
+button.small { height: var(--btn-h-sm); padding: 0 var(--sp-2); font-size: 11px; }
+button.big   { height: var(--btn-h-big); font-size: 15px; font-weight: 800; }
 
 /* =========== Negotiation Modal =========== */
 #neg-modal {
@@ -960,8 +997,6 @@ button.small { font-size: 11px; padding: 4px 8px; }
   background: var(--bg-2); border: 1px dashed var(--line); border-radius: 10px;
 }
 
-button.small { padding: 6px 10px; font-size: 12px; }
-button.primary.small { padding: 6px 10px; font-size: 12px; }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* =========== Menu Modal =========== */
