@@ -28,6 +28,9 @@ export interface Tenant {
   agreedKaltMiete: number   // Kaltmiete — the part the player books as income
   agreedNebenkosten: number // Heizung/Wasser/Hausgeld; tenant pays on top, doesn't enter player's books
   deposit: number           // security deposit held
+  /** Game-month of the last successful rent hike. Used by raiseRent for the
+   *  Kappungsgrenze (12-month cooldown per tenant). */
+  lastRentHikeMonth?: number
 }
 
 export interface Applicant {
@@ -479,8 +482,12 @@ export interface GameState {
   contractorPool: ContractorPoolEntry[]
   /** Pending Eigentuemerversammlungen (M5) — surfaced via HUD when scheduledMonth hits. */
   wegAssemblies: WEGAssembly[]
+  /** Difficulty tier picked at game start (M7). Acts as a multiplier on costs/risks. */
+  difficulty: Difficulty
   rngSeed: number
 }
+
+export type Difficulty = 'easy' | 'standard' | 'hardcore'
 
 export interface SellerNegotiationState {
   propertyId: string

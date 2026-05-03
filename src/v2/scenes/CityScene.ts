@@ -60,8 +60,11 @@ export class CityScene extends Phaser.Scene {
     this.propertyLayer = this.add.container(0, 0)
     this.worldRoot.add(this.propertyLayer)
 
-    // Engine
-    this.engine = new Engine(this.city.layout)
+    // Engine — pick up the difficulty chosen at the start screen (only relevant
+    // for a fresh game; on continue, the saved difficulty wins via tryLoad).
+    const chosenDifficulty = (window as any).__immolife_difficulty as 'easy' | 'standard' | 'hardcore' | undefined
+    this.engine = new Engine(this.city.layout, chosenDifficulty ? { freshStart: true, difficulty: chosenDifficulty } : {})
+    if (chosenDifficulty) delete (window as any).__immolife_difficulty
 
     // Camera setup
     const worldW = this.city.pixelWidth()
@@ -307,7 +310,7 @@ export class CityScene extends Phaser.Scene {
       : ''
     this.hoverDiv.innerHTML = `
       <div class="pt-name">${escape(this.engine.nameFor(p))}</div>
-      <div class="pt-sub">${capitalize(p.type)} · ${districtName(p.district)} · ${p.yearBuilt}</div>
+      <div class="pt-sub">${capitalize(p.type)}${p.buildingForm === 'mfh' ? ` · MFH ${p.units.length} Einh.` : p.buildingForm === 'wg' ? ` · WG ${p.units.length} Zi.` : ''} · ${districtName(p.district)} · ${p.yearBuilt}</div>
       <div class="pt-row"><span>${isOwned ? 'Wert' : 'Preis'}</span><b>${formatEuro(isOwned ? p.marketValue : p.price)}</b></div>
       <div class="pt-row"><span>Miete</span><b>${formatEuro(p.baseRent)}/M</b></div>
       <div class="pt-row"><span>Zustand</span><b class="${condClass}">${Math.round(p.condition)}%</b></div>

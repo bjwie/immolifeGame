@@ -859,6 +859,27 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   text-shadow: 0 0 40px rgba(241,196,15,0.3);
 }
 #start-screen .tagline { color: var(--muted); font-size: 16px; margin: 8px 0 30px; }
+#start-screen .difficulty-row {
+  margin: 10px 0 24px; max-width: 540px;
+}
+#start-screen .diff-title {
+  text-align: center; font-size: 12px; color: var(--muted);
+  letter-spacing: 1.5px; margin-bottom: 8px;
+}
+#start-screen .diff-options {
+  display: flex; gap: 8px; justify-content: center;
+}
+#start-screen .diff-opt {
+  flex: 1 1 0; min-width: 150px;
+  background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 12px; cursor: pointer;
+  text-align: center; transition: border-color 0.1s, transform 0.1s;
+}
+#start-screen .diff-opt:hover { border-color: var(--accent); transform: translateY(-2px); }
+#start-screen .diff-opt.sel { border-color: var(--gold); background: rgba(241, 196, 15, 0.08); }
+#start-screen .diff-opt input { display: none; }
+#start-screen .diff-name { font-weight: 800; font-size: 14px; margin-bottom: 4px; }
+#start-screen .diff-desc { font-size: 11px; color: var(--muted); line-height: 1.4; }
 #start-screen .start-buttons { display: flex; flex-direction: column; gap: 10px; width: 280px; }
 #start-screen button {
   background: var(--bg-2); color: var(--text); border: 1px solid var(--line);

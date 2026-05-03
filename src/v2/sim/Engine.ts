@@ -14,19 +14,39 @@ export class Engine {
   private speed: Speed = 1
   private dayDurationMs = 1200       // base ms per game day at 1x
 
-  constructor(layout: CityLayout, opts: { freshStart?: boolean } = {}) {
+  constructor(layout: CityLayout, opts: { freshStart?: boolean; difficulty?: import('./types').Difficulty } = {}) {
     this.layout = layout
     if (!opts.freshStart && this.tryLoad()) {
       // loaded
     } else {
-      this.state = this.freshState()
+      this.state = this.freshState(opts.difficulty ?? 'standard')
       this.seedListings(18)
     }
   }
 
   // ============ INITIALIZATION ============
 
-  private freshState(): GameState {
+  /** Difficulty tuning — single source of truth for the rebalance dampeners (M7). */
+  private static DIFFICULTY: Record<import('./types').Difficulty, {
+    startingCash: number
+    capexRiskMult: number       // multiplier on capex roll probability
+    capexImpactMult: number     // multiplier on conditionImpactIfIgnored
+    capexHoneymoonMonths: number  // skip capex rolls for the first N months of game time
+    capexMinAgeBonus: number    // years added to min-age threshold (delays first capex)
+    lawsuitMonthlyMult: number  // multiplier on Anwaltskosten
+    satisfactionLeaveThreshold: number  // tenants below this leave
+    overheadMonthly: number     // base monthly overhead per portfolio
+  }> = {
+    easy:     { startingCash: 400_000, capexRiskMult: 0.40, capexImpactMult: 0.65, capexHoneymoonMonths: 6, capexMinAgeBonus: 5, lawsuitMonthlyMult: 0.65, satisfactionLeaveThreshold: 15, overheadMonthly: 1100 },
+    standard: { startingCash: 320_000, capexRiskMult: 0.70, capexImpactMult: 0.85, capexHoneymoonMonths: 3, capexMinAgeBonus: 2, lawsuitMonthlyMult: 0.85, satisfactionLeaveThreshold: 20, overheadMonthly: 1300 },
+    hardcore: { startingCash: 250_000, capexRiskMult: 1.00, capexImpactMult: 1.00, capexHoneymoonMonths: 0, capexMinAgeBonus: 0, lawsuitMonthlyMult: 1.00, satisfactionLeaveThreshold: 25, overheadMonthly: 1500 },
+  }
+
+  private diffConfig() {
+    return Engine.DIFFICULTY[this.state.difficulty ?? 'standard']
+  }
+
+  private freshState(difficulty: import('./types').Difficulty = 'standard'): GameState {
     const banks: Bank[] = [
       { id: 'sparkasse', name: 'Sparkasse Berlin', annualRate: 4.2, maxLTV: 0.7, minCreditScore: 600, origination: 0.015, blurb: 'Lokal & verlaesslich. Konservative Konditionen.', color: 0xc0392b, personality: 'conservative', advisorName: 'Herr Becker' },
       { id: 'deutsche', name: 'Deutsche Bank', annualRate: 3.6, maxLTV: 0.8, minCreditScore: 700, origination: 0.012, blurb: 'Premium-Bank, gute Konditionen ab 700 Score.', color: 0x2980b9, personality: 'aggressive', advisorName: 'Frau Dr. Roth' },
@@ -35,7 +55,7 @@ export class Engine {
     ]
 
     const player: Player = {
-      cash: 250_000,
+      cash: Engine.DIFFICULTY[difficulty].startingCash,
       creditScore: 720,
       reputation: 50,
       netWorthHistory: [],
@@ -74,6 +94,7 @@ export class Engine {
       kfwPending: [],
       contractorPool: this.generateContractorPool(),
       wegAssemblies: [],
+      difficulty,
       rngSeed: Math.floor(Math.random() * 1_000_000),
     }
   }
@@ -113,31 +134,40 @@ export class Engine {
   }
 
   private propertyTypeForDistrict(rng: () => number, district: DistrictId): PropertyType {
-    // Mitte/Charlottenburg: more office/tower; outer: more residential
+    // Distribution flatter than the old defaults: apartments stay common in
+    // residential districts but other types appear regularly so the player
+    // sees variety in any given snapshot of 16 listings.
     const r = rng()
     if (district === 'mitte') {
       if (r < 0.18) return 'tower'
-      if (r < 0.42) return 'office'
-      if (r < 0.58) return 'shop'
-      if (r < 0.85) return 'apartment'
-      return 'villa'
+      if (r < 0.34) return 'office'
+      if (r < 0.50) return 'shop'
+      if (r < 0.70) return 'apartment'
+      if (r < 0.85) return 'villa'
+      return 'house'
     }
     if (district === 'charlottenburg') {
       if (r < 0.10) return 'tower'
-      if (r < 0.25) return 'villa'
-      if (r < 0.42) return 'office'
-      return 'apartment'
+      if (r < 0.28) return 'villa'
+      if (r < 0.45) return 'office'
+      if (r < 0.55) return 'shop'
+      if (r < 0.85) return 'apartment'
+      return 'house'
     }
     if (district === 'kreuzberg' || district === 'prenzlauer') {
-      if (r < 0.55) return 'apartment'
-      if (r < 0.75) return 'shop'
-      if (r < 0.88) return 'house'
-      return 'office'
+      if (r < 0.38) return 'apartment'
+      if (r < 0.58) return 'shop'
+      if (r < 0.75) return 'house'
+      if (r < 0.88) return 'office'
+      if (r < 0.95) return 'villa'
+      return 'tower'
     }
     if (district === 'neukoelln' || district === 'wedding') {
-      if (r < 0.6) return 'apartment'
-      if (r < 0.85) return 'house'
-      return 'shop'
+      if (r < 0.40) return 'apartment'
+      if (r < 0.65) return 'house'
+      if (r < 0.85) return 'shop'
+      if (r < 0.95) return 'office'
+      return 'villa'
     }
     return 'apartment'
   }
@@ -449,7 +479,7 @@ export class Engine {
     this.state.lawsuits = this.state.lawsuits.filter(l => l.outcome === 'pending')
 
     // taxes & overhead
-    const overhead = 1500 + Math.round(this.state.owned.length * 80)
+    const overhead = this.diffConfig().overheadMonthly + Math.round(this.state.owned.length * 80)
     expenses += overhead
 
     // apply to cash
@@ -535,7 +565,7 @@ export class Engine {
     t.satisfaction = Math.max(0, Math.min(100, t.satisfaction))
     t.monthsRemaining--
 
-    const cooperativeLeave = !isNomad && (t.satisfaction < 25 || t.monthsRemaining <= 0 || t.monthsBehind >= 3)
+    const cooperativeLeave = !isNomad && (t.satisfaction < this.diffConfig().satisfactionLeaveThreshold || t.monthsRemaining <= 0 || t.monthsBehind >= 3)
     if (cooperativeLeave) {
       const refund = t.personality === 'partyer' && p.condition < 50 ? t.deposit * 0.4 : t.deposit
       this.state.player.cash -= refund
@@ -1579,6 +1609,15 @@ export class Engine {
     if (!u || !u.tenant) return { ok: false, reason: 'Kein Mieter — Miete im naechsten Vertrag setzen' }
     const t = u.tenant
     if (newKalt <= t.agreedKaltMiete) return { ok: false, reason: 'Neue Miete muss hoeher sein' }
+    // Kappungsgrenze: 12-month cooldown per tenant (BGB §558: max 20% in 3y; we
+    // approximate with one hike per 12 months which is the practical equivalent).
+    const COOLDOWN_MONTHS = 12
+    if (typeof t.lastRentHikeMonth === 'number') {
+      const elapsed = this.gameMonth() - t.lastRentHikeMonth
+      if (elapsed < COOLDOWN_MONTHS) {
+        return { ok: false, reason: `Mieterhoehungs-Sperre noch ${COOLDOWN_MONTHS - elapsed} Monate (Kappungsgrenze).` }
+      }
+    }
 
     const ratio = newKalt / Math.max(1, p.mietspiegelKalt)
     const lawsuitChance = ratio <= 1.10 ? 0
@@ -1590,6 +1629,7 @@ export class Engine {
 
     const oldKalt = t.agreedKaltMiete
     t.agreedKaltMiete = newKalt
+    t.lastRentHikeMonth = this.gameMonth()
     u.baseKalt = Math.max(u.baseKalt, newKalt)
     this.syncHeadlineFromUnits(p)
 
@@ -1597,7 +1637,7 @@ export class Engine {
     if (lawsuitChance > 0 && Math.random() < lawsuitChance) {
       lawsuitFiled = true
       const months = 4 + Math.floor(Math.random() * 3)
-      const monthlyCost = 800 + Math.floor(Math.random() * 700)
+      const monthlyCost = Math.round((800 + Math.floor(Math.random() * 700)) * this.diffConfig().lawsuitMonthlyMult)
       const successChance = Math.max(0.05, 1 - lawsuitChance)
       this.state.lawsuits.push({
         id: 'ls_' + Math.random().toString(36).slice(2, 9),
@@ -1666,7 +1706,7 @@ export class Engine {
     if (!u?.tenant) return null
     const t = u.tenant
     const months = 4 + Math.floor(Math.random() * 3)
-    const monthlyCost = 1000 + Math.floor(Math.random() * 500)
+    const monthlyCost = Math.round((1000 + Math.floor(Math.random() * 500)) * this.diffConfig().lawsuitMonthlyMult)
     const isNomad = t.personality === 'nomad' && !t.disguisePersonality
     const grounds =
       (isNomad ? 0.5 : 0) +
@@ -1688,7 +1728,7 @@ export class Engine {
     }
     const est = this.evictionEstimate(propertyId, u.id)!
     const months = 4 + Math.floor(Math.random() * 3)
-    const monthlyCost = 1000 + Math.floor(Math.random() * 500)
+    const monthlyCost = Math.round((1000 + Math.floor(Math.random() * 500)) * this.diffConfig().lawsuitMonthlyMult)
     const lawsuit: Lawsuit = {
       id: 'ev_' + Math.random().toString(36).slice(2, 9),
       propertyId,
@@ -1728,6 +1768,8 @@ export class Engine {
       }
       return
     }
+    // Honeymoon: skip capex rolls during the player's first N months.
+    if (this.gameMonth() < this.diffConfig().capexHoneymoonMonths) return
     const ev = this.rollCapex(p, rng)
     if (ev) {
       p.pendingCapex = ev
@@ -1787,19 +1829,19 @@ export class Engine {
   }
 
   private rollCapex(p: Property, rng: () => number): CapexEvent | null {
+    const cfg = this.diffConfig()
     const ageYears = this.state.time.year - p.yearBuilt
-    if (ageYears < 25) return null
+    if (ageYears < 25 + cfg.capexMinAgeBonus) return null
     // condition multiplier — bad shape doubles the risk, top shape halves it
     const condMult = Math.max(0.4, 1.5 - p.condition / 100)
     const candidates: CapexKind[] = []
     for (const kind of Object.keys(Engine.CAPEX_TABLE) as CapexKind[]) {
       const e = Engine.CAPEX_TABLE[kind]
-      if (ageYears < e.minAgeYears) continue
-      const risk = e.baseRiskAtCond50 * condMult
+      if (ageYears < e.minAgeYears + cfg.capexMinAgeBonus) continue
+      const risk = e.baseRiskAtCond50 * condMult * cfg.capexRiskMult
       if (rng() < risk) candidates.push(kind)
     }
     if (candidates.length === 0) return null
-    // pick one — if multiple rolled in the same month, take the most expensive (drama)
     candidates.sort((a, b) => Engine.CAPEX_TABLE[b].minCost - Engine.CAPEX_TABLE[a].minCost)
     const kind = candidates[0]
     const e = Engine.CAPEX_TABLE[kind]
@@ -1812,7 +1854,7 @@ export class Engine {
       title: e.title,
       body: e.body,
       cost,
-      conditionImpactIfIgnored: e.impact,
+      conditionImpactIfIgnored: Math.round(e.impact * cfg.capexImpactMult),
       conditionGainIfPaid: e.gain,
       appearedMonth: this.gameMonth(),
       deadlineMonth: this.gameMonth() + grace,
@@ -1859,7 +1901,7 @@ export class Engine {
       if (p.wegMembership) maintenance += p.wegMembership.hausgeldMonthly
     }
     for (const l of this.state.loans) loanPayments += l.monthlyPayment
-    const overhead = 1500 + Math.round(this.state.owned.length * 80)
+    const overhead = this.diffConfig().overheadMonthly + Math.round(this.state.owned.length * 80)
     return { rent: Math.round(rent), maintenance, loanPayments, overhead, net: Math.round(rent - maintenance - loanPayments - overhead) }
   }
 
@@ -2018,6 +2060,8 @@ export class Engine {
       this.state.listings.forEach(ensureUnits)
       this.state.owned.forEach(ensureUnits)
       if (!Array.isArray(this.state.wegAssemblies)) this.state.wegAssemblies = []
+      // M7: difficulty default for old saves
+      if (!this.state.difficulty) this.state.difficulty = 'standard'
       return true
     } catch { return false }
   }
