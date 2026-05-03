@@ -1,6 +1,7 @@
 import type { Engine } from '../sim/Engine'
 import { formatEuro } from '../sim/Engine'
 import type { BankNegotiationState, BankOfferTerms, Property, SellerNegotiationState } from '../sim/types'
+import { ModalManager, type ManagedModal } from './ModalManager'
 
 type SellerCallbacks = {
   onAccepted: (negotiatedPrice: number) => void
@@ -20,14 +21,14 @@ export class NegotiationModal {
   private sellerCb: SellerCallbacks | null = null
   private bankCb: BankCallbacks | null = null
   private property: Property | null = null
+  private modal: ManagedModal
 
   constructor(engine: Engine, mountIn: HTMLElement) {
     this.engine = engine
     this.root = document.createElement('div')
     this.root.id = 'neg-modal'
-    this.root.style.display = 'none'
     mountIn.appendChild(this.root)
-    this.root.addEventListener('click', (e) => { if (e.target === this.root) this.cancel() })
+    this.modal = { id: 'negotiation', el: this.root, onCancel: () => this.cancel() }
   }
 
   isOpen(): boolean { return this.sellerNeg !== null || this.bankNeg !== null }
@@ -38,8 +39,8 @@ export class NegotiationModal {
     this.bankCb = null; this.bankNeg = null
     this.sellerNeg = this.engine.startSellerNegotiation(p.id)
     if (!this.sellerNeg) { cb.onCancelled(); return }
-    this.show()
     this.renderSeller()
+    ModalManager.get().push(this.modal)
   }
 
   openBank(bankId: string, p: Property, cb: BankCallbacks) {
@@ -48,34 +49,25 @@ export class NegotiationModal {
     this.sellerCb = null; this.sellerNeg = null
     this.bankNeg = this.engine.startBankNegotiation(bankId, p.id)
     if (!this.bankNeg) { cb.onCancelled(); return }
-    this.show()
     this.renderBank()
-  }
-
-  private show() {
-    // Apply final visible state directly — no transition dependency.
-    this.root.style.display = 'flex'
-    this.root.style.opacity = '1'
-    this.root.classList.add('show')
+    ModalManager.get().push(this.modal)
   }
 
   private cancel() {
-    if (this.sellerCb) this.sellerCb.onCancelled()
-    if (this.bankCb) this.bankCb.onCancelled()
+    const sellerCb = this.sellerCb
+    const bankCb = this.bankCb
     this.close()
+    sellerCb?.onCancelled()
+    bankCb?.onCancelled()
   }
 
   private close() {
-    this.root.classList.remove('show')
-    this.root.style.opacity = ''
-    setTimeout(() => {
-      this.root.style.display = 'none'
-      this.sellerNeg = null
-      this.bankNeg = null
-      this.sellerCb = null
-      this.bankCb = null
-      this.property = null
-    }, 200)
+    ModalManager.get().pop(this.modal)
+    this.sellerNeg = null
+    this.bankNeg = null
+    this.sellerCb = null
+    this.bankCb = null
+    this.property = null
   }
 
   // ============ SELLER ============

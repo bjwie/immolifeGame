@@ -8,6 +8,7 @@ import { DealSheet } from '../ui/DealSheet'
 import { MenuModal } from '../ui/MenuModal'
 import { NegotiationModal } from '../ui/NegotiationModal'
 import { RentalModal } from '../ui/RentalModal'
+import { ModalManager } from '../ui/ModalManager'
 
 const TILE = 48
 
@@ -175,7 +176,11 @@ export class CityScene extends Phaser.Scene {
       const cur = this.engine.getSpeed()
       this.engine.setSpeed(cur === 0 ? 1 : 0)
     })
-    keys.ESC?.on('down', () => { if (this.deal.isOpen()) this.deal.close(); else this.menu.open() })
+    keys.ESC?.on('down', () => {
+      // ModalManager already handles ESC when modals are open (capture phase).
+      // Only act here if nothing is open: open the main menu.
+      if (ModalManager.get().size() === 0) this.menu.open()
+    })
   }
 
   private refreshProperties() {

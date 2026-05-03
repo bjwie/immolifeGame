@@ -1,6 +1,7 @@
 import type { Engine } from '../sim/Engine'
 import { formatEuro } from '../sim/Engine'
 import type { Applicant, Property, TenantPersonality } from '../sim/types'
+import { ModalManager, type ManagedModal } from './ModalManager'
 
 const PERSONA_LABEL: Record<TenantPersonality, string> = {
   tidy: 'Ordentlich',
@@ -30,14 +31,14 @@ export class RentalModal {
   private leaseMonths: number = 24
   private applicants: Applicant[] = []
   private onClosed: (() => void) | null = null
+  private modal: ManagedModal
 
   constructor(engine: Engine, mountIn: HTMLElement) {
     this.engine = engine
     this.root = document.createElement('div')
     this.root.id = 'rental-modal'
-    this.root.style.display = 'none'
     mountIn.appendChild(this.root)
-    this.root.addEventListener('click', (e) => { if (e.target === this.root) this.close() })
+    this.modal = { id: 'rental', el: this.root, onCancel: () => this.close() }
   }
 
   open(p: Property, onClosed?: () => void) {
@@ -47,15 +48,11 @@ export class RentalModal {
     this.leaseMonths = 24
     this.refreshApplicants()
     this.render()
-    this.root.style.display = 'flex'
-    this.root.style.opacity = '1'
-    this.root.classList.add('show')
+    ModalManager.get().push(this.modal)
   }
 
   close() {
-    this.root.classList.remove('show')
-    this.root.style.opacity = ''
-    this.root.style.display = 'none'
+    ModalManager.get().pop(this.modal)
     this.property = null
     this.applicants = []
     const cb = this.onClosed; this.onClosed = null

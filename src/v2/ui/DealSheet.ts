@@ -3,6 +3,7 @@ import { formatEuro } from '../sim/Engine'
 import type { BankOfferTerms, Property } from '../sim/types'
 import type { NegotiationModal } from './NegotiationModal'
 import type { RentalModal } from './RentalModal'
+import { ModalManager, type ManagedModal } from './ModalManager'
 
 const DISTRICT_LABEL: Record<string, string> = {
   mitte: 'Mitte', prenzlauer: 'Prenzlauer Berg', kreuzberg: 'Kreuzberg',
@@ -24,16 +25,16 @@ export class DealSheet {
   private negotiated: { price: number } | null = null  // result of seller negotiation
   private bankOverride: BankOfferTerms | null = null   // result of bank negotiation
   private negotiationModal: NegotiationModal | null = null
+  private modal: ManagedModal
 
   constructor(engine: Engine, mountIn: HTMLElement) {
     this.engine = engine
     this.root = document.createElement('div')
     this.root.id = 'deal-sheet'
-    this.root.style.display = 'none'
     this.root.innerHTML = HTML
     mountIn.appendChild(this.root)
     this.root.querySelector('[data-close]')?.addEventListener('click', () => this.close())
-    this.root.addEventListener('click', (e) => { if (e.target === this.root) this.close() })
+    this.modal = { id: 'dealsheet', el: this.root, onCancel: () => this.close() }
   }
 
   setNegotiationModal(nm: NegotiationModal) { this.negotiationModal = nm }
@@ -47,15 +48,11 @@ export class DealSheet {
     this.negotiated = null
     this.bankOverride = null
     this.render()
-    this.root.style.display = 'flex'
-    this.root.style.opacity = '1'
-    this.root.classList.add('show')
+    ModalManager.get().push(this.modal)
   }
 
   close() {
-    this.root.classList.remove('show')
-    this.root.style.opacity = ''
-    this.root.style.display = 'none'
+    ModalManager.get().pop(this.modal)
     this.current = null
   }
 
@@ -166,39 +163,26 @@ export class DealSheet {
 
   private negotiateSeller() {
     if (!this.current || !this.negotiationModal) return
-    const p = this.current
-    // hide ourselves while neg modal is open
-    this.root.style.visibility = 'hidden'
-    this.negotiationModal.openSeller(p, {
-      onAccepted: (price) => {
-        this.negotiated = { price }
-        this.root.style.visibility = 'visible'
-        this.render()
-      },
-      onCancelled: () => { this.root.style.visibility = 'visible' },
+    this.negotiationModal.openSeller(this.current, {
+      onAccepted: (price) => { this.negotiated = { price }; this.render() },
+      onCancelled: () => { /* manager restores us */ },
     })
   }
 
   private negotiateBank() {
     if (!this.current || !this.negotiationModal || !this.selectedBankId) return
-    this.root.style.visibility = 'hidden'
     this.negotiationModal.openBank(this.selectedBankId, this.current, {
-      onAccepted: (terms) => {
-        this.bankOverride = terms
-        this.root.style.visibility = 'visible'
-        this.render()
-      },
-      onCancelled: () => { this.root.style.visibility = 'visible' },
+      onAccepted: (terms) => { this.bankOverride = terms; this.render() },
+      onCancelled: () => { /* manager restores us */ },
     })
   }
 
   private openBrokerPicker() {
-    // reuse the negotiation modal's broker picker via opening a fake seller neg
+    // reuse the negotiation modal's broker picker via opening a seller negotiation
     if (!this.current || !this.negotiationModal) return
-    this.root.style.visibility = 'hidden'
     this.negotiationModal.openSeller(this.current, {
-      onAccepted: (price) => { this.negotiated = { price }; this.root.style.visibility = 'visible'; this.render() },
-      onCancelled: () => { this.root.style.visibility = 'visible'; this.render() },
+      onAccepted: (price) => { this.negotiated = { price }; this.render() },
+      onCancelled: () => { this.render() },
     })
   }
 
@@ -340,8 +324,7 @@ export class DealSheet {
     })
     this.root.querySelector('[data-show-applicants]')?.addEventListener('click', () => {
       if (!this.rentalModal) return
-      this.root.style.visibility = 'hidden'
-      this.rentalModal.open(p, () => { this.root.style.visibility = 'visible'; this.refresh() })
+      this.rentalModal.open(p, () => { this.refresh() })
     })
     this.root.querySelectorAll('[data-reno]').forEach(b => {
       b.addEventListener('click', () => {
