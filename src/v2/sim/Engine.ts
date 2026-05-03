@@ -466,6 +466,7 @@ export class Engine {
           if (won) {
             if (targetUnit?.tenant && p) {
               const tenantName = targetUnit.tenant.name
+              targetUnit.lastKaltMiete = targetUnit.tenant.agreedKaltMiete
               targetUnit.tenant = undefined
               targetUnit.vacantMonths = 0
               this.syncHeadlineFromUnits(p)
@@ -576,6 +577,7 @@ export class Engine {
       this.state.player.cash -= refund
       const where = p.units.length > 1 ? `${this.nameFor(p)} (${u.label})` : this.nameFor(p)
       this.emit('toast', { kind: t.monthsBehind >= 3 ? 'warning' : 'info', text: `${t.name} zog aus (${where}). Kaution -${Math.round(refund)} EUR.` })
+      u.lastKaltMiete = t.agreedKaltMiete
       u.tenant = undefined
       u.vacantMonths = 0
     }
@@ -1429,11 +1431,21 @@ export class Engine {
       autoCapex: true,
       autoTenant: true,
       autoEviction: true,
+      rentStrategy: 'mietspiegel',
     }
     const fee = this.managementFeeFor(p)
     this.emit('toast', { kind: 'success', text: `Hausverwaltung fuer ${this.nameFor(p)} beauftragt — ${formatEuro(fee)}/M.` })
     this.autoSave()
     return { ok: true, fee }
+  }
+
+  /** Update an existing management's settings (toggles + rent strategy). */
+  updateManagementSettings(propertyId: string, patch: Partial<import('./types').PropertyManagement>): { ok: boolean; reason?: string } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p?.management) return { ok: false, reason: 'Keine Verwaltung beauftragt' }
+    Object.assign(p.management, patch)
+    this.autoSave()
+    return { ok: true }
   }
 
   cancelManagement(propertyId: string): { ok: boolean; reason?: string } {
@@ -1478,17 +1490,27 @@ export class Engine {
       for (const u of p.units) {
         if (u.tenant) continue
         if (u.vacantMonths < 1) continue  // give the player a month to react first
-        const askingKalt = u.baseKalt
+        // Resolve asking-Kaltmiete from the strategy
+        let askingKalt: number
+        switch (m.rentStrategy) {
+          case 'last':
+            askingKalt = u.lastKaltMiete ?? u.baseKalt
+            break
+          case 'mietspiegel':
+            // Top-of-market legal: Mietspiegel × 1.05 (just below the lawsuit threshold of 1.10)
+            askingKalt = Math.round(p.mietspiegelKalt * 1.05)
+            break
+          case 'max':
+          default:
+            askingKalt = u.baseKalt
+        }
         const apps = this.getApplicants(p.id, askingKalt, 5)
         if (apps.length === 0) continue
-        // Pick the highest reliability that fits the warm budget. Avoid obvious
-        // nomad-suspects when possible (we don't see secretPersonality, but we
-        // can prefer disguise candidates with believable income/reliability).
         apps.sort((a, b) => b.reliability - a.reliability)
         const pick = apps[0]
         const leaseMonths = pick.preferredLeaseMonths
         const r = this.signLease(p.id, pick, askingKalt, leaseMonths, u.id)
-        if (r.ok) this.emit('toast', { kind: 'info', text: `Verwaltung: ${pick.name} eingezogen in ${this.nameFor(p)} (${u.label}).` })
+        if (r.ok) this.emit('toast', { kind: 'info', text: `Verwaltung: ${pick.name} eingezogen in ${this.nameFor(p)} (${u.label}) fuer ${formatEuro(askingKalt)} kalt.` })
       }
     }
     void rng
@@ -1808,6 +1830,7 @@ export class Engine {
       return { ok: false, reason: 'Mieter im Rueckstand zieht nicht freiwillig aus' }
     }
     const tenantName = t.name
+    u.lastKaltMiete = t.agreedKaltMiete
     u.tenant = undefined
     u.vacantMonths = 0
     this.syncHeadlineFromUnits(p)
@@ -2181,6 +2204,10 @@ export class Engine {
       if (!Array.isArray(this.state.wegAssemblies)) this.state.wegAssemblies = []
       // M7: difficulty default for old saves
       if (!this.state.difficulty) this.state.difficulty = 'standard'
+      // M8.1: management.rentStrategy default for old saves where it might be missing
+      for (const p of this.state.owned) {
+        if (p.management && !p.management.rentStrategy) p.management.rentStrategy = 'mietspiegel'
+      }
       return true
     } catch { return false }
   }

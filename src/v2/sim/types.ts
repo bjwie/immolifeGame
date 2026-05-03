@@ -68,6 +68,9 @@ export interface Unit {
   vacantMonths: number
   /** Per-unit applicant search budget. Reset on month change in the engine. */
   applicantSearches?: { month: number; remaining: number }
+  /** Last tenant's agreedKaltMiete (set when they leave). Used by Hausverwaltung
+   *  rent-strategy 'last' to re-let at the previous price. */
+  lastKaltMiete?: number
 }
 
 export type BuildingForm = 'single' | 'mfh' | 'wg'
@@ -143,6 +146,13 @@ export interface PropertyManagement {
   autoTenant: boolean
   /** Auto-startEviction once a tenant is 3+ months behind / outed nomad. */
   autoEviction: boolean
+  /**
+   * What asking-Kaltmiete to set when re-letting:
+   *  - 'last'        — previous tenant's Kaltmiete (or baseKalt if none recorded)
+   *  - 'mietspiegel' — district+type Mietspiegel × 1.05 (legal top-of-market, no Mietpreisbremse risk)
+   *  - 'max'         — unit.baseKalt (perfect-condition headline)
+   */
+  rentStrategy: 'last' | 'mietspiegel' | 'max'
 }
 
 export interface Loan {

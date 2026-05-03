@@ -482,17 +482,31 @@ export class DealSheet {
     ` : ''
 
     const mgmtFee = this.engine.managementFeeFor(p)
-    const mgmtHtml = p.management ? `
+    const mgmt = p.management
+    const mgmtHtml = mgmt ? `
       <div class="mgmt-card active">
         <div class="card-title">🏢 HAUSVERWALTUNG AKTIV</div>
-        <div class="micro">Auto-Capex · Auto-Bewerbersuche · Auto-Raeumungsklage. Beauftragt seit ${p.management.hiredMonth} Mon.</div>
         <div class="fin-row"><span>Monatliche Gebuehr</span><b>${formatEuro(mgmtFee)}/M</b></div>
-        <button class="ghost small" data-cancel-mgmt>Verwaltung kuendigen</button>
+        <div class="mgmt-settings">
+          <div class="mgmt-section">
+            <div class="mgmt-section-label">Aufgaben</div>
+            <label class="mgmt-toggle"><input type="checkbox" data-mgmt-toggle="autoCapex" ${mgmt.autoCapex ? 'checked' : ''}> Capex automatisch zahlen</label>
+            <label class="mgmt-toggle"><input type="checkbox" data-mgmt-toggle="autoTenant" ${mgmt.autoTenant ? 'checked' : ''}> Vakante Wohnungen nachvermieten</label>
+            <label class="mgmt-toggle"><input type="checkbox" data-mgmt-toggle="autoEviction" ${mgmt.autoEviction ? 'checked' : ''}> Raeumungsklage bei Rueckstand</label>
+          </div>
+          <div class="mgmt-section">
+            <div class="mgmt-section-label">Mietpreis-Strategie bei Nachvermietung</div>
+            <label class="mgmt-radio ${mgmt.rentStrategy === 'last' ? 'sel' : ''}"><input type="radio" name="mgmt-strategy-${p.id}" value="last" ${mgmt.rentStrategy === 'last' ? 'checked' : ''}> Letzter Mietpreis</label>
+            <label class="mgmt-radio ${mgmt.rentStrategy === 'mietspiegel' ? 'sel' : ''}"><input type="radio" name="mgmt-strategy-${p.id}" value="mietspiegel" ${mgmt.rentStrategy === 'mietspiegel' ? 'checked' : ''}> Mietspiegel × 1.05 (legal Top, ${formatEuro(Math.round(p.mietspiegelKalt * 1.05))} kalt)</label>
+            <label class="mgmt-radio ${mgmt.rentStrategy === 'max' ? 'sel' : ''}"><input type="radio" name="mgmt-strategy-${p.id}" value="max" ${mgmt.rentStrategy === 'max' ? 'checked' : ''}> Maximum (baseKalt, Klage-Risiko moeglich)</label>
+          </div>
+        </div>
+        <button class="ghost small" data-cancel-mgmt>Verwaltung kuendigen (seit ${mgmt.hiredMonth} M)</button>
       </div>
     ` : `
       <div class="mgmt-card">
         <div class="card-title">HAUSVERWALTUNG</div>
-        <div class="micro">Eine professionelle Verwaltung uebernimmt: Capex automatisch zahlen, vakante Wohnungen nachvermieten, bei Mietnomaden Raeumungsklage einleiten.</div>
+        <div class="micro">Eine professionelle Verwaltung uebernimmt: Capex automatisch zahlen, vakante Wohnungen nachvermieten, bei Mietnomaden Raeumungsklage einleiten. Du kannst nach Beauftragung jede Aufgabe einzeln an/aus schalten und die Mietpreis-Strategie waehlen.</div>
         <div class="fin-row"><span>Gebuehr (5% Kaltmiete, min 80€)</span><b>${formatEuro(mgmtFee)}/M</b></div>
         <button class="primary small" data-hire-mgmt>Hausverwaltung beauftragen</button>
       </div>
@@ -657,6 +671,21 @@ export class DealSheet {
     this.root.querySelector('[data-cancel-mgmt]')?.addEventListener('click', () => {
       this.engine.cancelManagement(p.id)
       this.refresh()
+    })
+    this.root.querySelectorAll<HTMLInputElement>('[data-mgmt-toggle]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const key = cb.dataset.mgmtToggle as 'autoCapex' | 'autoTenant' | 'autoEviction'
+        this.engine.updateManagementSettings(p.id, { [key]: cb.checked } as any)
+        this.refresh()
+      })
+    })
+    this.root.querySelectorAll<HTMLInputElement>(`input[name="mgmt-strategy-${p.id}"]`).forEach(r => {
+      r.addEventListener('change', () => {
+        if (r.checked) {
+          this.engine.updateManagementSettings(p.id, { rentStrategy: r.value as 'last' | 'mietspiegel' | 'max' })
+          this.refresh()
+        }
+      })
     })
     this.root.querySelector('[data-convert-wg]')?.addEventListener('click', () => {
       const r = this.engine.convertToWG(p.id)
