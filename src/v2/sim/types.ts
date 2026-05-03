@@ -10,12 +10,16 @@ export type TenantPersonality =
   | 'demanding'  // verlangt Top-Zustand, sehr unzufrieden bei Maengel
   | 'family'     // langfristig, stabil, mittelmaessige Reliability
   | 'student'    // billig, weniger zuverlaessig
+  | 'nomad'      // Mietnomade — zahlt NIE, ignoriert Kuendigung, nur per Raeumungsklage entfernbar
 
 export interface Tenant {
   id: string
   name: string
   occupation: string
   personality: TenantPersonality
+  /** What the UI shows. For 'nomad', this is set to a benign persona until the
+   *  cover blows (3+ months without payment). */
+  disguisePersonality?: TenantPersonality
   reliability: number       // 0-100 — chance to pay rent on time
   income: number            // monthly euros
   satisfaction: number      // 0-100 — drops if condition bad
@@ -30,7 +34,13 @@ export interface Applicant {
   id: string
   name: string
   occupation: string
+  /** Visible persona shown in the applicant list. For nomads this is a disguise
+   *  (quiet/tidy/family). The actual tenant persona is taken from secretPersonality
+   *  on lease signing if present. */
   personality: TenantPersonality
+  /** Hidden true persona, set only for impersonators (Mietnomaden). When the
+   *  player signs the lease, this overrides personality on the resulting Tenant. */
+  secretPersonality?: TenantPersonality
   reliability: number      // 0-100
   income: number           // monthly euros
   maxRentBudget: number    // what they're willing to pay
@@ -225,14 +235,16 @@ export interface CapexEvent {
 export interface Lawsuit {
   id: string
   propertyId: string
-  reason: 'rent-hike'        // future: 'eviction', 'damage'
+  reason: 'rent-hike' | 'eviction'
   monthsRemaining: number
   totalMonths: number
   monthlyCost: number        // Anwaltskosten — drains every month while active
   totalSpent: number
   successChance: number      // 0..1 — player's chance to win
-  /** if won, the new rent stays; if lost, rent reverts to this Kaltmiete */
-  revertToKalt: number
+  /** rent-hike only: if won, the new rent stays; if lost, rent reverts to this Kaltmiete */
+  revertToKalt?: number
+  /** eviction only: id of the tenant being evicted, for context if they get replaced mid-suit */
+  tenantId?: string
   outcome: 'pending' | 'won' | 'lost'
 }
 

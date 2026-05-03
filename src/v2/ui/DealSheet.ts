@@ -256,11 +256,18 @@ export class DealSheet {
   private renderOwnedActions(p: Property) {
     this.root.querySelector('#ds-banks')!.innerHTML = ''
     const t = p.tenant
-    const personaLabels: Record<string, string> = { tidy: 'Ordentlich', partyer: 'Partyfreudig', quiet: 'Ruhig', demanding: 'Anspruchsvoll', family: 'Familie', student: 'Student:in' }
-    const personaTag = t?.personality ? `<span class="persona-tag persona-${t.personality}">${personaLabels[t.personality] ?? t.personality}</span>` : ''
+    const personaLabels: Record<string, string> = { tidy: 'Ordentlich', partyer: 'Partyfreudig', quiet: 'Ruhig', demanding: 'Anspruchsvoll', family: 'Familie', student: 'Student:in', nomad: 'Mietnomade' }
+    // Display the disguise persona while it's still in effect (cover not yet blown).
+    const displayedPersona = t?.disguisePersonality ?? t?.personality
+    const personaTag = displayedPersona ? `<span class="persona-tag persona-${displayedPersona}">${personaLabels[displayedPersona] ?? displayedPersona}</span>` : ''
+    // Eviction logic: which button to show
+    const activeEviction = this.engine.state.lawsuits.find(l => l.propertyId === p.id && l.reason === 'eviction' && l.outcome === 'pending')
+    const canCooperativeQuit = t && t.personality !== 'nomad' && t.monthsBehind < 2
+    const evictionEst = t && !activeEviction ? this.engine.evictionEstimate(p.id) : null
+    const nomadRevealed = t && t.personality === 'nomad' && !t.disguisePersonality
     const tenantHtml = t ? `
-      <div class="tenant-card">
-        <div class="t-head"><b>${escape(t.name)}</b> ${personaTag} <span class="t-job">${escape(t.occupation)}</span></div>
+      <div class="tenant-card ${nomadRevealed ? 'nomad-alert' : ''}">
+        <div class="t-head"><b>${escape(t.name)}</b> ${personaTag} ${nomadRevealed ? '<span class="bad" style="font-weight:800">⚠ MIETNOMADE</span>' : ''} <span class="t-job">${escape(t.occupation)}</span></div>
         <div class="t-stats">
           <div><label>Kaltmiete</label><b>${formatEuro(t.agreedKaltMiete ?? p.baseRent)}/M</b></div>
           <div><label>Nebenkosten</label><b>${formatEuro(t.agreedNebenkosten ?? p.nebenkosten ?? 0)}/M</b></div>
@@ -270,9 +277,18 @@ export class DealSheet {
           <div><label>Vertrag</label><b>${t.monthsRemaining} Monate</b></div>
           <div><label>Rueckstand</label><b class="${t.monthsBehind > 0 ? 'bad' : ''}">${t.monthsBehind} Monate</b></div>
         </div>
+        ${activeEviction ? `
+          <div class="eviction-status">
+            <b>⚖ Raeumungsklage laeuft</b>
+            <div class="micro">Noch ${activeEviction.monthsRemaining} M · Anwaltskosten ${formatEuro(activeEviction.monthlyCost)}/M · bisher ${formatEuro(activeEviction.totalSpent)} · Erfolgschance ${Math.round(activeEviction.successChance * 100)}%</div>
+          </div>
+        ` : ''}
         <div class="rent-hike-row">
           <button class="ghost small" data-rent-hike>📈 Miete erhoehen (Mietspiegel ${DISTRICT_LABEL[p.district]}/${TYPE_LABEL[p.type]}: ${formatEuro(p.mietspiegelKalt ?? p.baseRent)})</button>
-          <button class="ghost small" data-evict>Mietverhaeltnis kuendigen (-5 Reputation)</button>
+          ${canCooperativeQuit ? `<button class="ghost small" data-evict>Mietverhaeltnis kuendigen (-5 Reputation)</button>` : ''}
+          ${!activeEviction && evictionEst && (t.personality === 'nomad' || t.monthsBehind >= 2) ? `
+            <button class="danger small" data-start-eviction>🧑‍⚖️ Raeumungsklage einleiten (~${evictionEst.months} M, ${formatEuro(evictionEst.totalCost)}, ${Math.round(evictionEst.successChance * 100)}% Erfolg)</button>
+          ` : ''}
         </div>
       </div>` : `
       <div class="tenant-card vacant">
@@ -338,6 +354,11 @@ export class DealSheet {
 
     this.root.querySelector('[data-evict]')?.addEventListener('click', () => {
       this.engine.evictTenant(p.id); this.refresh()
+    })
+    this.root.querySelector('[data-start-eviction]')?.addEventListener('click', () => {
+      const r = this.engine.startEviction(p.id)
+      if (!r.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: r.reason ?? 'Klage nicht moeglich' })
+      this.refresh()
     })
     this.root.querySelector('[data-show-applicants]')?.addEventListener('click', () => {
       if (!this.rentalModal) return

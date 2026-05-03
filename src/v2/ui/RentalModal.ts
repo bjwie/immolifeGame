@@ -10,9 +10,10 @@ const PERSONA_LABEL: Record<TenantPersonality, string> = {
   demanding: 'Anspruchsvoll',
   family: 'Familie',
   student: 'Student:in',
+  nomad: 'Mietnomade',
 }
 const PERSONA_EMOJI: Record<TenantPersonality, string> = {
-  tidy: '🧹', partyer: '🎉', quiet: '🤫', demanding: '🧐', family: '👨‍👩‍👧', student: '🎓',
+  tidy: '🧹', partyer: '🎉', quiet: '🤫', demanding: '🧐', family: '👨‍👩‍👧', student: '🎓', nomad: '🏚',
 }
 const PERSONA_BG: Record<TenantPersonality, string> = {
   tidy: 'linear-gradient(135deg,#16a085,#27ae60)',
@@ -21,6 +22,7 @@ const PERSONA_BG: Record<TenantPersonality, string> = {
   demanding: 'linear-gradient(135deg,#5d3478,#9b59b6)',
   family: 'linear-gradient(135deg,#2980b9,#3498db)',
   student: 'linear-gradient(135deg,#d4ac0d,#f1c40f)',
+  nomad: 'linear-gradient(135deg,#3a1f1f,#7b2f2f)',
 }
 
 export class RentalModal {

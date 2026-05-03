@@ -247,6 +247,20 @@ body {
   padding: 12px; margin-bottom: 14px;
 }
 .tenant-card.vacant { background: rgba(248,193,78,0.08); border-color: rgba(248,193,78,0.3); }
+.tenant-card.nomad-alert { background: rgba(255, 118, 118, 0.12); border-color: rgba(255, 118, 118, 0.55); }
+
+.eviction-status {
+  background: rgba(255, 118, 118, 0.10); border: 1px solid rgba(255, 118, 118, 0.4);
+  border-radius: 6px; padding: 8px 10px; margin: 8px 0;
+}
+.eviction-status b { color: var(--bad); }
+
+button.danger {
+  background: rgba(255, 118, 118, 0.15); border: 1px solid var(--bad); color: var(--bad);
+  border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px;
+}
+button.danger:hover { background: var(--bad); color: #fff; }
+button.danger.small { padding: 4px 8px; font-size: 11px; }
 .t-head { display: flex; gap: 8px; align-items: baseline; margin-bottom: 8px; }
 .t-job { color: var(--muted); font-size: 12px; }
 .t-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }

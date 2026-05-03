@@ -1,4 +1,4 @@
-import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, CapexEvent, CapexKind, GameState, GameTime, Loan, MarketEvent, Player, Property, PropertyType, SellerNegotiationState, Speed, Tenant } from './types'
+import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, CapexEvent, CapexKind, GameState, GameTime, Lawsuit, Loan, MarketEvent, Player, Property, PropertyType, SellerNegotiationState, Speed, Tenant } from './types'
 import type { CityLayout, DistrictDef, DistrictId } from '../render/CityRenderer'
 import { generateApplicants, pickPropertyName, pickSeller } from './names'
 
@@ -306,7 +306,9 @@ export class Engine {
         // whether tenants leave (auto-eviction below at <25) and reputation drift —
         // multiplying it back into willPay double-penalizes and makes the HUD
         // cashflow forecast (which uses reliability only) over-promise.
-        const willPay = rng() < (t.reliability / 100)
+        // Mietnomaden never pay; their cover blows after 3 missed months (UI reveals).
+        const isNomad = t.personality === 'nomad'
+        const willPay = !isNomad && rng() < (t.reliability / 100)
         if (willPay) {
           // Only Kaltmiete enters the player's books. Nebenkosten are paid by the
           // tenant on top and pass straight to suppliers (heating/water/Hausgeld).
@@ -314,6 +316,11 @@ export class Engine {
           t.monthsBehind = Math.max(0, t.monthsBehind - 1)
         } else {
           t.monthsBehind++
+          // Disguise blows after 3 missed months — reveal real persona to the player
+          if (isNomad && t.disguisePersonality && t.monthsBehind >= 3) {
+            t.disguisePersonality = undefined
+            this.emit('toast', { kind: 'error', text: `${t.name} ist ein Mietnomade! Nur per Raeumungsklage entfernbar.` })
+          }
         }
         // satisfaction shifts with condition; demanding tenants are pickier
         const condTarget = t.personality === 'demanding' ? p.condition - 10 : p.condition + 10
@@ -321,8 +328,10 @@ export class Engine {
         t.satisfaction += (targetSat - t.satisfaction) * 0.4
         t.satisfaction = Math.max(0, Math.min(100, t.satisfaction))
         t.monthsRemaining--
-        // leave if very dissatisfied or lease ended or 3 months behind
-        if (t.satisfaction < 25 || t.monthsRemaining <= 0 || t.monthsBehind >= 3) {
+        // Cooperative tenants leave if very dissatisfied / lease ended / 3+ months behind.
+        // Mietnomaden ignore all of this — they only leave via Raeumungsklage (startEviction).
+        const cooperativeLeave = !isNomad && (t.satisfaction < 25 || t.monthsRemaining <= 0 || t.monthsBehind >= 3)
+        if (cooperativeLeave) {
           // refund deposit (minus damage if partyer trashed the place)
           const refund = t.personality === 'partyer' && p.condition < 50 ? t.deposit * 0.4 : t.deposit
           this.state.player.cash -= refund
@@ -390,13 +399,31 @@ export class Engine {
         const won = rng() < ls.successChance
         ls.outcome = won ? 'won' : 'lost'
         const p = this.state.owned.find(pp => pp.id === ls.propertyId)
-        if (won) {
-          this.emit('toast', { kind: 'success', text: `Klage gewonnen — Mieterhoehung haelt. Kosten ${formatEuro(ls.totalSpent)}.` })
-        } else {
-          // revert tenant rent + reputation hit + small Bussgeld already in monthlyCost
-          if (p?.tenant) p.tenant.agreedKaltMiete = ls.revertToKalt
-          this.state.player.reputation = Math.max(0, this.state.player.reputation - 10)
-          this.emit('toast', { kind: 'error', text: `Klage verloren — Miete zurueckgesetzt, Reputation -10. Kosten ${formatEuro(ls.totalSpent)}.` })
+        if (ls.reason === 'rent-hike') {
+          if (won) {
+            this.emit('toast', { kind: 'success', text: `Klage gewonnen — Mieterhoehung haelt. Kosten ${formatEuro(ls.totalSpent)}.` })
+          } else {
+            if (p?.tenant && typeof ls.revertToKalt === 'number') p.tenant.agreedKaltMiete = ls.revertToKalt
+            this.state.player.reputation = Math.max(0, this.state.player.reputation - 10)
+            this.emit('toast', { kind: 'error', text: `Klage verloren — Miete zurueckgesetzt, Reputation -10. Kosten ${formatEuro(ls.totalSpent)}.` })
+          }
+        } else if (ls.reason === 'eviction') {
+          // The tenant may have left or been swapped during the case; check by tenantId.
+          const stillSameTenant = !!p?.tenant && p.tenant.id === ls.tenantId
+          if (won) {
+            if (stillSameTenant && p) {
+              const tenantName = p.tenant!.name
+              p.tenant = undefined
+              p.vacantMonths = 0
+              this.state.player.reputation = Math.max(0, this.state.player.reputation - 5)
+              this.emit('toast', { kind: 'success', text: `Raeumung erfolgreich — ${tenantName} ist raus. Gesamtkosten ${formatEuro(ls.totalSpent)}.` })
+            } else {
+              this.emit('toast', { kind: 'success', text: `Raeumungsklage gewonnen — Mieter war bereits weg. Kosten ${formatEuro(ls.totalSpent)}.` })
+            }
+          } else {
+            this.state.player.reputation = Math.max(0, this.state.player.reputation - 10)
+            this.emit('toast', { kind: 'error', text: `Raeumungsklage verloren — Mieter bleibt. Kosten ${formatEuro(ls.totalSpent)}, Reputation -10.` })
+          }
         }
       }
     }
@@ -608,12 +635,18 @@ export class Engine {
     if (warm > applicant.maxRentBudget * 1.05) return { ok: false, reason: 'Bewerber kann sich diese Warmmiete nicht leisten' }
 
     const deposit = kaltMiete * 2
+    // Secret persona (e.g. nomad masquerading as quiet) overrides the visible one,
+    // and zero-out reliability so they will never pay.
+    const truePersonality = applicant.secretPersonality ?? applicant.personality
+    const trueReliability = truePersonality === 'nomad' ? 0 : applicant.reliability
     p.tenant = {
       id: applicant.id,
       name: applicant.name,
       occupation: applicant.occupation,
-      personality: applicant.personality,
-      reliability: applicant.reliability,
+      personality: truePersonality,
+      // disguise is what the UI shows until the cover blows
+      ...(applicant.secretPersonality ? { disguisePersonality: applicant.personality } : {}),
+      reliability: trueReliability,
       income: applicant.income,
       satisfaction: 75,
       monthsRemaining: leaseMonths,
@@ -795,15 +828,75 @@ export class Engine {
     return { ratio, lawsuitChance }
   }
 
-  evictTenant(propertyId: string) {
+  /**
+   * Cooperative termination — works only for tenants who'll actually leave when asked
+   * (i.e. not Mietnomaden, not deeply in arrears). Costs -5 Reputation.
+   * Suggest startEviction() for problem tenants.
+   */
+  evictTenant(propertyId: string): { ok: boolean; reason?: string } {
     const p = this.state.owned.find(pp => pp.id === propertyId)
-    if (!p?.tenant) return
-    const tenantName = p.tenant.name
+    if (!p?.tenant) return { ok: false, reason: 'Kein Mieter' }
+    const t = p.tenant
+    if (t.personality === 'nomad') {
+      this.emit('toast', { kind: 'error', text: `${t.name} ignoriert die Kuendigung — nur Raeumungsklage hilft.` })
+      return { ok: false, reason: 'Mieter ignoriert Kuendigung — Raeumungsklage einleiten' }
+    }
+    if (t.monthsBehind >= 2) {
+      this.emit('toast', { kind: 'error', text: `${t.name} verweigert Auszug bei Mietrueckstand. Raeumungsklage erforderlich.` })
+      return { ok: false, reason: 'Mieter im Rueckstand zieht nicht freiwillig aus' }
+    }
+    const tenantName = t.name
     p.tenant = undefined
     p.vacantMonths = 0
     this.state.player.reputation = Math.max(0, this.state.player.reputation - 5)
     this.emit('toast', { kind: 'warning', text: `${tenantName} gekuendigt — Reputation -5` })
     this.autoSave()
+    return { ok: true }
+  }
+
+  /** UI helper: how good is the eviction case before the player commits? */
+  evictionEstimate(propertyId: string): { months: number; monthlyCost: number; totalCost: number; successChance: number } | null {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p?.tenant) return null
+    const t = p.tenant
+    const months = 4 + Math.floor(Math.random() * 3) // 4-6 (random preview, real value rolled on start)
+    const monthlyCost = 1000 + Math.floor(Math.random() * 500) // 1000-1500
+    // Strong cases: nomad (cover blown), 3+ months behind, or below-25 satisfaction with valid grounds
+    const isNomad = t.personality === 'nomad' && !t.disguisePersonality  // only if cover blew
+    const grounds =
+      (isNomad ? 0.5 : 0) +
+      Math.min(0.4, t.monthsBehind * 0.1) +
+      (t.satisfaction < 25 ? 0.05 : 0)
+    const successChance = Math.min(0.95, 0.45 + grounds)
+    return { months, monthlyCost, totalCost: months * monthlyCost, successChance }
+  }
+
+  /** Start a Raeumungsklage. Tenant remains in the property until the suit ends. */
+  startEviction(propertyId: string): { ok: boolean; reason?: string; lawsuit?: Lawsuit } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p?.tenant) return { ok: false, reason: 'Kein Mieter' }
+    if (this.state.lawsuits.some(l => l.propertyId === propertyId && l.reason === 'eviction' && l.outcome === 'pending')) {
+      return { ok: false, reason: 'Klage laeuft bereits' }
+    }
+    const est = this.evictionEstimate(propertyId)!
+    const months = 4 + Math.floor(Math.random() * 3)
+    const monthlyCost = 1000 + Math.floor(Math.random() * 500)
+    const lawsuit: Lawsuit = {
+      id: 'ev_' + Math.random().toString(36).slice(2, 9),
+      propertyId,
+      reason: 'eviction',
+      monthsRemaining: months,
+      totalMonths: months,
+      monthlyCost,
+      totalSpent: 0,
+      successChance: est.successChance,
+      tenantId: p.tenant.id,
+      outcome: 'pending',
+    }
+    this.state.lawsuits.push(lawsuit)
+    this.emit('toast', { kind: 'warning', text: `Raeumungsklage gegen ${p.tenant.name} eingereicht — ${months} M, ${formatEuro(monthlyCost)}/M, Erfolg ${(est.successChance * 100).toFixed(0)}%.` })
+    this.autoSave()
+    return { ok: true, lawsuit }
   }
 
   // ============ CAPEX ============

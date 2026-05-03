@@ -76,8 +76,9 @@ export class HUD {
     for (const ls of s.lawsuits) {
       const chip = document.createElement('div')
       chip.className = 'event-chip lawsuit'
-      chip.textContent = `⚖ Klage (${ls.monthsRemaining} M, ${formatEuro(ls.monthlyCost)}/M)`
-      chip.title = `Mieterhoehung-Klage. Gesamtkosten bisher ${formatEuro(ls.totalSpent)}. Erfolgschance ${(ls.successChance * 100).toFixed(0)}%.`
+      const label = ls.reason === 'eviction' ? 'Raeumung' : 'Mieterhoehung'
+      chip.textContent = `⚖ ${label} (${ls.monthsRemaining} M, ${formatEuro(ls.monthlyCost)}/M)`
+      chip.title = `${label}-Klage. Gesamtkosten bisher ${formatEuro(ls.totalSpent)}. Erfolgschance ${(ls.successChance * 100).toFixed(0)}%.`
       events.appendChild(chip)
     }
     const pendingCapex = s.owned.filter(p => p.pendingCapex)
