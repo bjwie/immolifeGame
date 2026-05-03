@@ -127,12 +127,19 @@ export class CityRenderer {
     const { tilesW, tilesH, tileSize, tiles, districts } = this.layout
     const g = this.scene.add.graphics()
 
-    // base grass with subtle noise
+    const neighborAt = (x: number, y: number): TileKind | null => {
+      if (x < 0 || x >= tilesW || y < 0 || y >= tilesH) return null
+      return tiles[y * tilesW + x]
+    }
+
+    // base layer + per-tile detail
     for (let y = 0; y < tilesH; y++) {
       for (let x = 0; x < tilesW; x++) {
         const t = tiles[y * tilesW + x]
         const px = x * tileSize, py = y * tileSize
-        this.drawTile(g, t, px, py, tileSize, x, y)
+        const n = neighborAt(x, y - 1), s = neighborAt(x, y + 1)
+        const w = neighborAt(x - 1, y), e = neighborAt(x + 1, y)
+        this.drawTile(g, t, px, py, tileSize, x, y, n, s, e, w)
       }
     }
 
@@ -157,9 +164,10 @@ export class CityRenderer {
     }
   }
 
-  private drawTile(g: Phaser.GameObjects.Graphics, t: TileKind, x: number, y: number, s: number, tx: number, ty: number) {
+  private drawTile(g: Phaser.GameObjects.Graphics, t: TileKind, x: number, y: number, s: number, tx: number, ty: number, n?: TileKind | null, sd?: TileKind | null, e?: TileKind | null, w?: TileKind | null) {
+    const isRoad = (k: TileKind | null | undefined) => k === 'road_h' || k === 'road_v' || k === 'road_x'
     switch (t) {
-      case 'grass':
+      case 'grass': {
         g.fillStyle(0x6abf52, 1); g.fillRect(x, y, s, s)
         // subtle noise dots
         const seed = (tx * 91 + ty * 53) & 0xff
@@ -169,23 +177,62 @@ export class CityRenderer {
           g.fillStyle(((seed + i) & 1) ? 0x5aa647 : 0x78cf64, 0.6)
           g.fillRect(x + ox, y + oy, 2, 2)
         }
+        // Trees: ~30% of grass tiles bordering a sidewalk (= urban-edge), deterministic
+        const adjSidewalk = n === 'sidewalk' || sd === 'sidewalk' || e === 'sidewalk' || w === 'sidewalk'
+        if (adjSidewalk && (seed & 7) < 2) {
+          const cx = x + s / 2 + ((seed >> 3) & 7) - 4
+          const cy = y + s / 2 + ((seed >> 5) & 7) - 4
+          // shadow
+          g.fillStyle(0x000000, 0.18); g.fillEllipse(cx + 2, cy + 4, 14, 5)
+          // trunk
+          g.fillStyle(0x6b4226, 1); g.fillRect(cx - 1, cy + 1, 2, 5)
+          // crown
+          g.fillStyle(0x2e7a26, 1); g.fillCircle(cx, cy, 7)
+          g.fillStyle(0x46b042, 1); g.fillCircle(cx - 2, cy - 2, 4)
+          g.fillStyle(0x78cf64, 0.8); g.fillCircle(cx + 2, cy - 1, 2)
+        }
         break
+      }
       case 'sidewalk':
         g.fillStyle(0xc8c4bc, 1); g.fillRect(x, y, s, s)
+        // pavement seams
         g.fillStyle(0xb0aca4, 0.8)
         g.fillRect(x, y, s, 1); g.fillRect(x, y + s - 1, s, 1)
         g.fillRect(x + s / 2 - 1, y, 1, s)
+        // Curb: stronger dark stripe along edges that touch a road
+        g.fillStyle(0x6e6e72, 0.95)
+        if (isRoad(n)) g.fillRect(x, y, s, 2)
+        if (isRoad(sd)) g.fillRect(x, y + s - 2, s, 2)
+        if (isRoad(w)) g.fillRect(x, y, 2, s)
+        if (isRoad(e)) g.fillRect(x + s - 2, y, 2, s)
         break
-      case 'road_h':
+      case 'road_h': {
         g.fillStyle(0x3a3a3e, 1); g.fillRect(x, y, s, s)
+        // asphalt grit
+        const aSeed = (tx * 13 + ty * 7) & 0xff
+        for (let i = 0; i < 5; i++) {
+          const ox = (((aSeed + i * 23) * 5) & 0x2f) % s
+          const oy = (((aSeed + i * 11) * 3) & 0x2f) % s
+          g.fillStyle((aSeed + i) & 1 ? 0x2c2c30 : 0x4a4a4e, 0.5)
+          g.fillRect(x + ox, y + oy, 2, 1)
+        }
         g.fillStyle(0xf2c94c, 1)
         for (let dx = 4; dx < s; dx += 12) g.fillRect(x + dx, y + s / 2 - 1, 6, 2)
         break
-      case 'road_v':
+      }
+      case 'road_v': {
         g.fillStyle(0x3a3a3e, 1); g.fillRect(x, y, s, s)
+        const aSeed = (tx * 13 + ty * 7) & 0xff
+        for (let i = 0; i < 5; i++) {
+          const ox = (((aSeed + i * 23) * 5) & 0x2f) % s
+          const oy = (((aSeed + i * 11) * 3) & 0x2f) % s
+          g.fillStyle((aSeed + i) & 1 ? 0x2c2c30 : 0x4a4a4e, 0.5)
+          g.fillRect(x + ox, y + oy, 2, 1)
+        }
         g.fillStyle(0xf2c94c, 1)
         for (let dy = 4; dy < s; dy += 12) g.fillRect(x + s / 2 - 1, y + dy, 2, 6)
         break
+      }
       case 'road_x':
         g.fillStyle(0x3a3a3e, 1); g.fillRect(x, y, s, s)
         // crosswalk bars

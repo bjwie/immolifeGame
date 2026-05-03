@@ -51,7 +51,50 @@ const PALETTES: Record<BuildingKind, Array<Omit<BuildingStyle, 'kind' | 'width' 
 const DAMAGE_TINT = 0x3a2820
 
 export class BuildingRenderer {
+  /** LRU-capped cache. Insertion-ordered Map; we evict from the front when over the cap. */
   private static textureCache = new Map<string, true>()
+  private static MAX_CACHE = 500
+
+  /**
+   * Opt-in asset override: drop PNGs into `assets/v2/buildings/<kind>_NN.png`
+   * (`<kind>_01.png` through `<kind>_04.png`). Phaser's loader silently ignores
+   * 404s, so absent files are fine — the renderer then stays procedural.
+   * Loaded textures are keyed `asset_<kind>_0` through `_3`. Call once in scene `preload`.
+   *
+   * The existing flat `assets/buildings/*.png` files are intentionally NOT loaded
+   * here because they are 32×32 sprite-sheets from the legacy v1 build; loading
+   * them as single images would look wrong.
+   */
+  static preloadAssets(scene: Phaser.Scene) {
+    // Suppress 404 noise from optional files — they're expected.
+    scene.load.on('loaderror', (file: any) => {
+      if (typeof file?.key === 'string' && file.key.startsWith('asset_')) {
+        // silently skip; the procedural fallback handles missing assets
+      }
+    })
+    const kinds: BuildingKind[] = ['house', 'villa', 'apartment', 'shop', 'office', 'tower']
+    for (const kind of kinds) {
+      for (let i = 1; i <= 4; i++) {
+        const num = String(i).padStart(2, '0')
+        const key = `asset_${kind}_${i - 1}`
+        if (!scene.textures.exists(key)) {
+          scene.load.image(key, `assets/v2/buildings/${kind}_${num}.png`)
+        }
+      }
+    }
+  }
+
+  /** Look up an external asset texture for a building if any are loaded. */
+  private static externalAssetKey(scene: Phaser.Scene, kind: BuildingKind, seed: number): string | null {
+    // Try variants 0..3, picking deterministically by seed so the same building
+    // always uses the same asset.
+    for (let i = 0; i < 4; i++) {
+      const idx = (seed + i) & 3
+      const key = `asset_${kind}_${idx}`
+      if (scene.textures.exists(key)) return key
+    }
+    return null
+  }
 
   static rollStyle(kind: BuildingKind, seed: number, condition: number = 100): BuildingStyle {
     const rng = mulberry32(seed)
@@ -93,9 +136,22 @@ export class BuildingRenderer {
     ].join(':')
   }
 
-  static ensureTexture(scene: Phaser.Scene, style: BuildingStyle, ownedBadge: boolean = false): string {
+  static ensureTexture(scene: Phaser.Scene, style: BuildingStyle, ownedBadge: boolean = false, seed?: number): string {
+    // 1) External asset override: if an asset PNG is loaded for this kind, use it.
+    //    The crown/owned-badge falls away — the for-sale price tag already differentiates.
+    if (typeof seed === 'number') {
+      const assetKey = this.externalAssetKey(scene, style.kind, seed)
+      if (assetKey) return assetKey
+    }
+
+    // 2) Procedural — cached and LRU-bounded.
     const key = this.textureKey(style, ownedBadge)
-    if (this.textureCache.has(key) && scene.textures.exists(key)) return key
+    if (this.textureCache.has(key) && scene.textures.exists(key)) {
+      // Re-insert to mark as recently used (insertion-order LRU).
+      this.textureCache.delete(key)
+      this.textureCache.set(key, true)
+      return key
+    }
 
     const padding = 6
     const totalW = style.width + padding * 2
@@ -109,6 +165,14 @@ export class BuildingRenderer {
     g.generateTexture(key, totalW, totalH)
     g.destroy()
     this.textureCache.set(key, true)
+
+    // LRU eviction: if oversized, drop oldest entries (Map iteration is insertion-order).
+    while (this.textureCache.size > this.MAX_CACHE) {
+      const oldest = this.textureCache.keys().next().value
+      if (!oldest) break
+      this.textureCache.delete(oldest)
+      if (scene.textures.exists(oldest)) scene.textures.remove(oldest)
+    }
     return key
   }
 
@@ -279,6 +343,13 @@ export class BuildingRenderer {
     g.fillRect(ox, oy + 6, w, h - 6)
     g.fillStyle(roof, 1)
     g.fillRect(ox - 2, oy, w + 4, 8)
+    // rooftop AC units
+    g.fillStyle(0x707880, 1)
+    g.fillRect(ox + 4, oy + 2, 6, 4)
+    g.fillRect(ox + w - 12, oy + 2, 7, 4)
+    g.fillStyle(0x404850, 1)
+    g.fillRect(ox + 5, oy + 3, 4, 1)
+    g.fillRect(ox + w - 11, oy + 3, 5, 1)
     // glass facade - big rows
     const cols = 4
     const winW = 10, winH = 12
@@ -323,6 +394,9 @@ export class BuildingRenderer {
     g.fillRect(ox + tipNarrow - 1, oy, w - tipNarrow * 2 + 2, 4)
     g.fillStyle(accent, 1)
     g.fillRect(ox + w / 2 - 1, oy - 6, 2, 6)
+    // rooftop AC + satellite
+    g.fillStyle(0x808890, 1); g.fillRect(ox + tipNarrow + 2, oy + 4, 5, 3)
+    g.fillStyle(0xb0b8c0, 1); g.fillCircle(ox + w - tipNarrow - 4, oy + 5, 2)
     // windows
     const cols = 3
     const winW = 8, winH = 10

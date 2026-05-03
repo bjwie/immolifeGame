@@ -38,6 +38,12 @@ export class CityScene extends Phaser.Scene {
 
   constructor() { super({ key: 'CityScene' }) }
 
+  preload() {
+    // Load optional asset PNGs (Kenney pack or own art). Missing files are
+    // silently ignored — the renderer falls back to procedural drawing.
+    BuildingRenderer.preloadAssets(this)
+  }
+
   create() {
     const width = this.scale.width || this.cameras.main.width || 1280
     const height = this.scale.height || this.cameras.main.height || 720
@@ -220,7 +226,7 @@ export class CityScene extends Phaser.Scene {
         } else {
           // just refresh texture if condition tier changed
           const style = BuildingRenderer.rollStyle(p.type, p.styleSeed, Math.round(p.condition / 5) * 5)
-          const key = BuildingRenderer.ensureTexture(this, style, isOwned)
+          const key = BuildingRenderer.ensureTexture(this, style, isOwned, p.styleSeed)
           const img = existing.getAt(0) as Phaser.GameObjects.Image
           if (img && img.texture.key !== key) img.setTexture(key)
         }
@@ -232,7 +238,7 @@ export class CityScene extends Phaser.Scene {
 
   private spawnPropertySprite(p: Property, isOwned: boolean) {
     const style = BuildingRenderer.rollStyle(p.type, p.styleSeed, Math.round(p.condition / 5) * 5)
-    const key = BuildingRenderer.ensureTexture(this, style, isOwned)
+    const key = BuildingRenderer.ensureTexture(this, style, isOwned, p.styleSeed)
     const pos = this.city.tileToWorld(p.tileX, p.tileY)
     const container = this.add.container(pos.x, pos.y)
     const img = this.add.image(0, 0, key).setOrigin(0.5, 0.85) // anchor at base
