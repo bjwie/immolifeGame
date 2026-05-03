@@ -1,4 +1,4 @@
-import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, CapexEvent, CapexKind, GameState, GameTime, Lawsuit, Loan, MarketEvent, Player, Property, PropertyType, SellerNegotiationState, Speed, Tenant } from './types'
+import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, CapexEvent, CapexKind, ContractorOffer, ContractorTier, GameState, GameTime, GewerkKind, GewerkStep, Lawsuit, Loan, MarketEvent, Player, Property, PropertyType, RenovationContract, RenovationScope, SellerNegotiationState, Speed, Tenant } from './types'
 import type { CityLayout, DistrictDef, DistrictId } from '../render/CityRenderer'
 import { generateApplicants, pickPropertyName, pickSeller } from './names'
 
@@ -43,6 +43,10 @@ export class Engine {
       negotiationSkill: 25,
       bankRelations: { sparkasse: 10, deutsche: 10, volksbank: 10, online: 10 },
       brokerId: null,
+      contractorRelations: [],
+      schwarzJobsThisYear: 0,
+      totalSchwarzJobs: 0,
+      taxAuditsExperienced: 0,
     }
 
     const time: GameTime = { day: 1, month: 1, year: 2026, total: 0 }
@@ -66,6 +70,9 @@ export class Engine {
       loans: [],
       lawsuits: [],
       capexHistory: [],
+      pfuschPending: [],
+      kfwPending: [],
+      contractorPool: this.generateContractorPool(),
       rngSeed: Math.floor(Math.random() * 1_000_000),
     }
   }
@@ -312,7 +319,9 @@ export class Engine {
         if (willPay) {
           // Only Kaltmiete enters the player's books. Nebenkosten are paid by the
           // tenant on top and pass straight to suppliers (heating/water/Hausgeld).
-          income += t.agreedKaltMiete
+          // Mietminderung during active renovation reduces what gets booked.
+          const reductionFactor = p.activeRenovation ? (1 - p.activeRenovation.rentReductionPct) : 1
+          income += Math.round(t.agreedKaltMiete * reductionFactor)
           t.monthsBehind = Math.max(0, t.monthsBehind - 1)
         } else {
           t.monthsBehind++
@@ -354,7 +363,17 @@ export class Engine {
 
       // capex roll — major repairs based on age + condition
       this.tickCapex(p, rng)
+
+      // active renovation — advance current step, complete steps, roll risks
+      this.tickRenovation(p, rng)
     }
+
+    // Pfusch maturing → convert to capex
+    this.tickPfusch()
+    // KfW refunds
+    this.tickKfw()
+    // Annual Schwarz audit (only triggers in January)
+    this.maybeRollTaxAudit()
 
     // loans
     for (const ln of this.state.loans) {
@@ -742,24 +761,501 @@ export class Engine {
     return { ok: true, net }
   }
 
-  renovate(propertyId: string, level: 'basic' | 'modern' | 'luxury'): { ok: boolean; reason?: string } {
+  // ============ RENOVATION (M2.5) ============
+
+  /** Per-Gewerk baseline cost (pre-property-multiplier) and base duration in days. */
+  private static GEWERK_SPEC: Record<GewerkKind, { label: string; baseCost: number; baseDays: number; rentBoost: number; conditionGain: number; finishing: boolean; capexLink?: CapexKind }> = {
+    abbruch:         { label: 'Abbruch & Entkernung',  baseCost: 4500,  baseDays: 12, rentBoost: 0,    conditionGain: 0,  finishing: false },
+    rohbau:          { label: 'Rohbau / Wanddurchbrueche', baseCost: 9000, baseDays: 18, rentBoost: 0.01, conditionGain: 4, finishing: false },
+    sanitaer:        { label: 'Sanitaer-Rohinstallation', baseCost: 8500,  baseDays: 14, rentBoost: 0.02, conditionGain: 6,  finishing: false, capexLink: 'steigstrang' },
+    elektrik:        { label: 'Elektrik-Rohinstallation', baseCost: 7500,  baseDays: 12, rentBoost: 0.02, conditionGain: 6,  finishing: false, capexLink: 'elektrik' },
+    heizung_install: { label: 'Heizung einbauen',         baseCost: 14000, baseDays: 16, rentBoost: 0.03, conditionGain: 8,  finishing: false, capexLink: 'heizung' },
+    fenster_install: { label: 'Fenster tauschen',         baseCost: 8000,  baseDays: 10, rentBoost: 0.03, conditionGain: 6,  finishing: false, capexLink: 'fenster' },
+    dach_decken:     { label: 'Dach decken',              baseCost: 22000, baseDays: 22, rentBoost: 0.02, conditionGain: 8,  finishing: false, capexLink: 'dach' },
+    fassade_putz:    { label: 'Fassade verputzen',        baseCost: 18000, baseDays: 20, rentBoost: 0.03, conditionGain: 7,  finishing: false, capexLink: 'fassade' },
+    estrich:         { label: 'Estrich legen',            baseCost: 6000,  baseDays: 10, rentBoost: 0.01, conditionGain: 4,  finishing: false },
+    trockenbau:      { label: 'Trockenbau / Putz',        baseCost: 5500,  baseDays: 12, rentBoost: 0.01, conditionGain: 3,  finishing: false },
+    fliesen:         { label: 'Fliesen (Bad/Kueche)',     baseCost: 7000,  baseDays: 14, rentBoost: 0.04, conditionGain: 5,  finishing: true },
+    maler:           { label: 'Maler',                     baseCost: 3500,  baseDays: 8,  rentBoost: 0.02, conditionGain: 4,  finishing: true },
+    boden:           { label: 'Boden verlegen',           baseCost: 5500,  baseDays: 9,  rentBoost: 0.03, conditionGain: 5,  finishing: true },
+    endmontage:      { label: 'Endmontage & Uebergabe',   baseCost: 2500,  baseDays: 6,  rentBoost: 0.01, conditionGain: 2,  finishing: true },
+  }
+
+  /** Default Gewerk sequence per scope. Player can re-order at their own risk. */
+  private static SCOPE_PLAN: Record<RenovationScope, GewerkKind[]> = {
+    capex: [],  // capex sequences are derived from CapexEvent.kind
+    basic: ['maler', 'boden'],
+    modern: ['abbruch', 'rohbau', 'sanitaer', 'elektrik', 'estrich', 'trockenbau', 'maler', 'boden', 'endmontage'],
+    luxury: ['abbruch', 'rohbau', 'sanitaer', 'elektrik', 'heizung_install', 'fenster_install', 'estrich', 'trockenbau', 'fliesen', 'maler', 'boden', 'endmontage'],
+  }
+
+  /** Map a Capex kind to the single Gewerk that fixes it. */
+  private static CAPEX_TO_GEWERK: Record<CapexKind, GewerkKind> = {
+    elektrik: 'elektrik', fenster: 'fenster_install', steigstrang: 'sanitaer',
+    fassade: 'fassade_putz', heizung: 'heizung_install', dach: 'dach_decken',
+  }
+
+  /** Tier multipliers — premium is more expensive but quality+lower risk. */
+  private static TIER_PROFILE: Record<ContractorTier, { costMult: number; durMult: number; overrun: number; pfusch: number; insolv: number; quality: number }> = {
+    cheap:    { costMult: 0.78, durMult: 1.30, overrun: 0.30, pfusch: 0.20, insolv: 0.020, quality: -2 },
+    standard: { costMult: 1.00, durMult: 1.00, overrun: 0.10, pfusch: 0.08, insolv: 0.003, quality: 0  },
+    premium:  { costMult: 1.30, durMult: 0.85, overrun: 0.04, pfusch: 0.02, insolv: 0.000, quality: 4  },
+    gu:       { costMult: 1.20, durMult: 0.90, overrun: 0.00, pfusch: 0.05, insolv: 0.000, quality: 2  },
+  }
+
+  private static CONTRACTOR_FIRST_NAMES = ['Klaus', 'Heinz', 'Murat', 'Bogdan', 'Stefan', 'Goran', 'Ali', 'Jens', 'Mario', 'Andrzej', 'Dimitri', 'Hassan', 'Frank', 'Werner', 'Thomas', 'Dragan']
+  private static CONTRACTOR_LAST_NAMES = ['Werk', 'Schmidt', 'Yilmaz', 'Kowalski', 'Maier', 'Petrovic', 'Hassan', 'Mueller', 'Ricci', 'Novak', 'Becker', 'Aydin', 'Vogel', 'Krause', 'Lehmann', 'Stojanovic']
+  private static CONTRACTOR_BLURBS: Record<ContractorTier, string[]> = {
+    cheap: ['kommt mit Sprinter und 2 Mann', 'macht alles in cash, fragt nicht viel', 'hat nicht viel zu sagen, kommt aber morgens'],
+    standard: ['solides Mittelstands-Buero', 'redet wenig, arbeitet ordentlich', 'Meisterbetrieb mit Innungs-Schein'],
+    premium: ['Fachbetrieb mit Architekten-Empfehlung', 'arbeitet auch fuer Denkmalschutz', 'jeden Tag Bauleiter vor Ort'],
+    gu: ['kompletter Generalunternehmer-Service', 'einer fuer alles, garantiert Pauschalpreis', 'koordiniert alle Gewerke selbst'],
+  }
+
+  /** Generate ~30 contractors at game init — persistent so loyalty across jobs works. */
+  private generateContractorPool(): import('./types').ContractorPoolEntry[] {
+    const out: import('./types').ContractorPoolEntry[] = []
+    const tiers: ContractorTier[] = ['cheap', 'cheap', 'standard', 'standard', 'standard', 'premium', 'gu']
+    const gewerke = Object.keys(Engine.GEWERK_SPEC) as GewerkKind[]
+    let seed = (Math.random() * 1_000_000) | 0
+    const rnd = () => { seed = (seed + 0x9e3779b9) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296 }
+    for (let i = 0; i < 32; i++) {
+      const tier = tiers[Math.floor(rnd() * tiers.length)]
+      const fn = Engine.CONTRACTOR_FIRST_NAMES[Math.floor(rnd() * Engine.CONTRACTOR_FIRST_NAMES.length)]
+      const ln = Engine.CONTRACTOR_LAST_NAMES[Math.floor(rnd() * Engine.CONTRACTOR_LAST_NAMES.length)]
+      const specialty: GewerkKind | 'gu' = tier === 'gu' ? 'gu' : gewerke[Math.floor(rnd() * gewerke.length)]
+      const profile = Engine.TIER_PROFILE[tier]
+      const blurbs = Engine.CONTRACTOR_BLURBS[tier]
+      out.push({
+        id: 'c_' + i.toString(36) + '_' + (seed >>> 0).toString(36).slice(-3),
+        name: `${fn} ${ln}`,
+        tier,
+        specialty,
+        // small per-contractor jitter on top of tier baseline
+        baseOverrunChance: Math.max(0, profile.overrun + (rnd() - 0.5) * 0.05),
+        basePfuschChance: Math.max(0, profile.pfusch + (rnd() - 0.5) * 0.04),
+        baseInsolvencyChance: Math.max(0, profile.insolv + (rnd() - 0.5) * 0.005),
+        baseQualityBonus: profile.quality + Math.round((rnd() - 0.5) * 2),
+        blurb: blurbs[Math.floor(rnd() * blurbs.length)],
+      })
+    }
+    return out
+  }
+
+  /** Compute the player's loyalty discount for a contractor (0..0.15). */
+  private loyaltyDiscount(contractorId: string): number {
+    const rel = this.state.player.contractorRelations.find(r => r.contractorId === contractorId)
+    if (!rel) return 0
+    return Math.min(0.15, rel.jobsCompleted * 0.05)
+  }
+
+  /** Default plan for a scope OR the single-Gewerk plan for a capex. */
+  plansForScope(p: Property, scope: RenovationScope): GewerkKind[] {
+    if (scope === 'capex') {
+      const cap = p.pendingCapex
+      if (!cap) return []
+      return [Engine.CAPEX_TO_GEWERK[cap.kind]]
+    }
+    return Engine.SCOPE_PLAN[scope].slice()
+  }
+
+  /** Generate 3 contractor offers for one Gewerk on one property. Includes the player's
+   *  loyal contractors first when they fit. Use `costForOffer` to derive the actual €. */
+  generateOffersForGewerk(propertyId: string, gewerk: GewerkKind): ContractorOffer[] {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return []
+    const pool = this.state.contractorPool.filter(c => c.tier !== 'gu')
+    // Sort: loyal contractors first (they "make time" for repeat customers)
+    pool.sort((a, b) => (this.loyaltyDiscount(b.id) - this.loyaltyDiscount(a.id)))
+    // Pick 3 — one per non-gu tier ideally
+    const byTier = new Map<ContractorTier, typeof pool[0]>()
+    for (const c of pool) {
+      if (!byTier.has(c.tier)) byTier.set(c.tier, c)
+      if (byTier.size === 3) break
+    }
+    const picks = Array.from(byTier.values()).slice(0, 3)
+    while (picks.length < 3 && pool[picks.length]) picks.push(pool[picks.length])
+
+    return picks.map((c, i) => {
+      const tierProfile = Engine.TIER_PROFILE[c.tier]
+      const loyalty = this.loyaltyDiscount(c.id)
+      const loyaltyTag = loyalty > 0 ? ` -${Math.round(loyalty * 100)}% Loyalitaet` : ''
+      return {
+        id: 'o_' + propertyId + '_' + gewerk + '_' + i,
+        contractorId: c.id,
+        contractorName: c.name + loyaltyTag,
+        tier: c.tier,
+        specialty: c.specialty === 'gu' ? gewerk : c.specialty,
+        costMultiplier: tierProfile.costMult * (1 - loyalty),
+        durationMultiplier: tierProfile.durMult,
+        overrunChance: c.baseOverrunChance,
+        pfuschChance: c.basePfuschChance,
+        insolvencyChance: c.baseInsolvencyChance,
+        qualityBonus: c.baseQualityBonus,
+        blurb: c.blurb,
+      } as ContractorOffer
+    })
+  }
+
+  /** Single GU offer: covers the entire scope as one contract. */
+  generateGUOffer(propertyId: string, scope: RenovationScope): ContractorOffer | null {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return null
+    const plan = this.plansForScope(p, scope)
+    if (plan.length === 0) return null
+    const sizeFactor = 0.85 + (p.baseRent / 2500)
+    const totalBase = plan.reduce((s, g) => s + Engine.GEWERK_SPEC[g].baseCost * sizeFactor, 0)
+    const totalDays = plan.reduce((s, g) => s + Engine.GEWERK_SPEC[g].baseDays, 0)
+    // Pick the best loyalty-relevant GU from pool, otherwise generate a stable one
+    const guPool = this.state.contractorPool.filter(c => c.tier === 'gu')
+    guPool.sort((a, b) => this.loyaltyDiscount(b.id) - this.loyaltyDiscount(a.id))
+    const c = guPool[0]
+    if (!c) return null
+    const profile = Engine.TIER_PROFILE.gu
+    const loyalty = this.loyaltyDiscount(c.id)
+    const markup = 0.20  // fixed GU markup
+    const loyaltyTag = loyalty > 0 ? ` -${Math.round(loyalty * 100)}% Loyalitaet` : ''
+    void totalBase; void totalDays
+    return {
+      id: 'gu_' + propertyId + '_' + scope,
+      contractorId: c.id,
+      contractorName: c.name + loyaltyTag,
+      tier: 'gu' as ContractorTier,
+      specialty: 'gu' as 'gu',
+      costMultiplier: (1 + markup) * (1 - loyalty),
+      durationMultiplier: profile.durMult,
+      overrunChance: 0,
+      pfuschChance: c.basePfuschChance,
+      insolvencyChance: 0,
+      qualityBonus: c.baseQualityBonus,
+      blurb: c.blurb,
+    } as ContractorOffer
+  }
+
+  /** Compute an offer's actual euros and duration for UI / startRenovation use. */
+  costForOffer(offer: ContractorOffer, gewerk: GewerkKind, p: Property, isSchwarz: boolean, material: 'standard' | 'premium'): { cost: number; duration: number } {
+    const spec = Engine.GEWERK_SPEC[gewerk]
+    const sizeFactor = 0.85 + (p.baseRent / 2500)
+    const baseCost = spec.baseCost * sizeFactor
+    let cost = baseCost * offer.costMultiplier
+    if (material === 'premium' && spec.finishing) cost *= 1.30
+    if (isSchwarz) cost *= 0.65  // -35% for off-the-books
+    return { cost: Math.round(cost), duration: Math.round(spec.baseDays * offer.durationMultiplier) }
+  }
+
+  /**
+   * Plan for the player to commit. Each item names a Gewerk + chosen offer + flags.
+   * For GU mode pass `gu: true` and a single offer; the engine will derive steps.
+   */
+  startRenovation(
+    propertyId: string,
+    scope: RenovationScope,
+    plan: { gewerk: GewerkKind; offer: ContractorOffer; isSchwarz: boolean; material: 'standard' | 'premium' }[],
+    isGU: boolean,
+  ): { ok: boolean; reason?: string; contract?: RenovationContract } {
     const p = this.state.owned.find(pp => pp.id === propertyId)
     if (!p) return { ok: false, reason: 'Nicht im Besitz' }
-    const cost = level === 'basic' ? 8000 : level === 'modern' ? 22000 : 55000
-    const condGain = level === 'basic' ? 18 : level === 'modern' ? 38 : 60
-    const rentMult = level === 'basic' ? 1.04 : level === 'modern' ? 1.12 : 1.25
-    const valueMult = level === 'basic' ? 1.02 : level === 'modern' ? 1.08 : 1.18
-    const scaledCost = Math.round(cost * (1 + (p.baseRent / 5000)))
-    if (this.state.player.cash < scaledCost) return { ok: false, reason: `Brauchst ${formatEuro(scaledCost)}` }
-    this.state.player.cash -= scaledCost
-    p.condition = Math.min(100, p.condition + condGain)
-    p.baseRent = Math.round(p.baseRent * rentMult)
-    p.marketValue *= valueMult
-    p.lastRenovationMonth = this.gameMonth()
-    this.emit('renovated', { property: p, level, cost: scaledCost })
-    this.emit('toast', { kind: 'success', text: `Renovierung ${level} abgeschlossen (-${formatEuro(scaledCost)})` })
+    if (p.activeRenovation) return { ok: false, reason: 'Bereits eine Renovierung aktiv' }
+    if (plan.length === 0) return { ok: false, reason: 'Kein Plan' }
+    const steps: GewerkStep[] = plan.map((row, i) => {
+      const { cost, duration } = this.costForOffer(row.offer, row.gewerk, p, row.isSchwarz, row.material)
+      return {
+        id: 's_' + i + '_' + row.gewerk,
+        gewerk: row.gewerk,
+        contractorId: row.offer.contractorId,
+        contractorName: row.offer.contractorName.split(' -')[0],  // strip the loyalty tag
+        contractorTier: row.offer.tier,
+        baseCost: cost,
+        agreedCost: cost,
+        paidSoFar: 0,
+        durationDays: duration,
+        daysRemaining: duration,
+        status: i === 0 ? 'active' : 'pending',
+        isSchwarz: row.isSchwarz,
+        material: row.material,
+        warrantyMonths: row.isSchwarz ? 0 : 60,
+      }
+    })
+    const totalCost = steps.reduce((s, st) => s + st.agreedCost, 0)
+    if (this.state.player.cash < totalCost * 0.3) return { ok: false, reason: `Mindestens 30% Anzahlung (${formatEuro(Math.round(totalCost * 0.3))}) benoetigt.` }
+
+    // KfW eligibility: must include heizung+fenster+fassade in the same project (energetic combo)
+    const gewerkSet = new Set(plan.map(r => r.gewerk))
+    const kfwEligible = gewerkSet.has('heizung_install') && gewerkSet.has('fenster_install') && gewerkSet.has('fassade_putz')
+    const kfwSubsidyPct = kfwEligible ? 0.30 : 0
+
+    // Modernisierung eligibility
+    const modernizationEligible = (scope === 'modern' || scope === 'luxury') && !!p.tenant
+
+    // Effects on completion (sum of gewerk contributions)
+    const conditionGain = plan.reduce((s, r) => s + Engine.GEWERK_SPEC[r.gewerk].conditionGain + (r.material === 'premium' ? 2 : 0), 0)
+    const rentMult = 1 + plan.reduce((s, r) => s + Engine.GEWERK_SPEC[r.gewerk].rentBoost + (r.material === 'premium' ? 0.01 : 0), 0)
+    const valueMult = 1 + (rentMult - 1) * 0.6  // value follows rent boost dampened
+
+    const contract: RenovationContract = {
+      id: 'r_' + Math.random().toString(36).slice(2, 9),
+      propertyId,
+      scope,
+      isGU,
+      guMarkup: isGU ? 0.20 : 0,
+      steps,
+      currentStepIndex: 0,
+      startMonth: this.gameMonth(),
+      totalAgreedCost: totalCost,
+      totalPaidSoFar: 0,
+      rentReductionPct: scope === 'capex' || scope === 'basic' ? 0.05 : 0.15,
+      conditionGainOnComplete: conditionGain,
+      rentMultOnComplete: rentMult,
+      valueMultOnComplete: valueMult,
+      modernizationEligible,
+      kfwSubsidyPct,
+      status: 'active',
+    }
+    p.activeRenovation = contract
+
+    // Anzahlung — 30% upfront, the rest accrues per step completion
+    const downPayment = Math.round(totalCost * 0.3)
+    this.state.player.cash -= downPayment
+    contract.totalPaidSoFar = downPayment
+
+    // Track Schwarz jobs immediately (regardless of completion — the work is happening)
+    const schwarzCount = plan.filter(r => r.isSchwarz).length
+    if (schwarzCount > 0) {
+      this.state.player.schwarzJobsThisYear += schwarzCount
+      this.state.player.totalSchwarzJobs += schwarzCount
+    }
+
+    this.emit('renovationStart', { contract })
+    this.emit('toast', { kind: 'success', text: `Renovierung gestartet — Anzahlung ${formatEuro(downPayment)}, ${steps.length} Gewerke, ~${Math.round(steps.reduce((s, st) => s + st.durationDays, 0) / 30)} Monate.` })
     this.autoSave()
-    return { ok: true }
+    return { ok: true, contract }
+  }
+
+  cancelRenovation(propertyId: string): { ok: boolean; refund?: number; reason?: string } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p?.activeRenovation) return { ok: false, reason: 'Keine aktive Renovierung' }
+    const c = p.activeRenovation
+    // Refund: 50% of unpaid, lose the rest as Vertragsstrafe
+    const unpaid = c.totalAgreedCost - c.totalPaidSoFar
+    const refund = Math.round(unpaid * 0.5)
+    this.state.player.cash += refund
+    c.status = 'cancelled'
+    p.activeRenovation = undefined
+    this.emit('toast', { kind: 'warning', text: `Renovierung abgebrochen — Restzahlung halbiert zurueck (${formatEuro(refund)}). Restkosten verloren.` })
+    this.autoSave()
+    return { ok: true, refund }
+  }
+
+  /** §559 BGB Modernisierungsumlage — 11% of agreedKaltMiete legally added once per modernization,
+   *  no Mietspiegel-related lawsuit risk. Only after a 'modern' or 'luxury' renovation completed
+   *  with a tenant in place. */
+  applyModernisierungUmlage(propertyId: string): { ok: boolean; reason?: string; newKalt?: number } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    if (!p.modernizationUmlageAvailable) return { ok: false, reason: 'Keine Umlage verfuegbar — erst nach Modernisierung mit Mieter' }
+    if (!p.tenant) return { ok: false, reason: 'Kein Mieter' }
+    const newKalt = Math.round(p.tenant.agreedKaltMiete * 1.11)
+    p.tenant.agreedKaltMiete = newKalt
+    p.modernizationUmlageAvailable = false
+    this.emit('toast', { kind: 'success', text: `Modernisierungsumlage angewandt — Kaltmiete +11% auf ${formatEuro(newKalt)}, ohne Klagerisiko.` })
+    this.autoSave()
+    return { ok: true, newKalt }
+  }
+
+  /** Tick the active renovation: advance current step, complete steps, roll risks. */
+  private tickRenovation(p: Property, rng: () => number) {
+    if (!p.activeRenovation) return
+    const c = p.activeRenovation
+    if (c.status !== 'active') return
+    const step = c.steps[c.currentStepIndex]
+    if (!step) return
+    // 1 month = 30 days of work
+    step.daysRemaining -= 30
+
+    // Insolvency roll mid-step (cheap only, very rare)
+    if (step.status === 'active' && step.contractorTier === 'cheap') {
+      const insolveProb = Engine.TIER_PROFILE.cheap.insolv
+      if (rng() < insolveProb) {
+        const lost = step.paidSoFar
+        this.emit('toast', { kind: 'error', text: `${step.contractorName} ist pleite! Anzahlung ${formatEuro(lost)} verloren — Auftrag fuer ${Engine.GEWERK_SPEC[step.gewerk].label} wird neu vergeben.` })
+        // Replace with a standard-tier emergency contractor at +20% cost
+        const replacement = this.state.contractorPool.find(c2 => c2.tier === 'standard') || this.state.contractorPool[0]
+        if (replacement) {
+          step.contractorId = replacement.id
+          step.contractorName = replacement.name + ' (Notfall +20%)'
+          step.contractorTier = 'standard'
+          const extra = Math.round(step.agreedCost * 0.2)
+          step.agreedCost += extra
+          c.totalAgreedCost += extra
+          step.daysRemaining = step.durationDays  // restart duration
+        }
+      }
+    }
+
+    // Mid-project Nachforderung roll (once per step, after ~50% done)
+    if (step.status === 'active' && !step.overrunTriggered && step.daysRemaining < step.durationDays * 0.5) {
+      const profile = Engine.TIER_PROFILE[step.contractorTier]
+      if (rng() < profile.overrun) {
+        step.overrunTriggered = true
+        const factor = 0.20 + rng() * 0.20  // +20-40%
+        const extra = Math.round(step.agreedCost * factor)
+        step.agreedCost += extra
+        c.totalAgreedCost += extra
+        // Auto-approved but visible — could become a player-decision modal later
+        this.emit('toast', { kind: 'warning', text: `Nachforderung von ${step.contractorName}: +${formatEuro(extra)} fuer ${Engine.GEWERK_SPEC[step.gewerk].label}.` })
+      }
+    }
+
+    // Completion?
+    if (step.daysRemaining <= 0) {
+      // Final payment for this step (remaining unpaid portion, proportional)
+      const stepShare = step.agreedCost - step.paidSoFar
+      this.state.player.cash -= stepShare
+      step.paidSoFar = step.agreedCost
+      c.totalPaidSoFar += stepShare
+      step.status = 'done'
+
+      // Pfusch roll on completion (delayed capex 6-18 months out)
+      if (!step.isSchwarz && step.warrantyMonths > 0) {
+        // official work — pfusch chance reduced by warranty
+        const profile = Engine.TIER_PROFILE[step.contractorTier]
+        if (rng() < profile.pfusch * 0.5) {
+          step.pfuschTriggered = true
+          this.schedulePfusch(p, step.gewerk, rng)
+        }
+      } else {
+        // Schwarz — full pfusch chance
+        const profile = Engine.TIER_PROFILE[step.contractorTier]
+        if (rng() < profile.pfusch * 1.5) {
+          step.pfuschTriggered = true
+          this.schedulePfusch(p, step.gewerk, rng)
+        }
+      }
+
+      // Update loyalty — completed jobs count
+      this.bumpLoyalty(step.contractorId, step.contractorName, step.agreedCost)
+
+      this.emit('toast', { kind: 'info', text: `${Engine.GEWERK_SPEC[step.gewerk].label} fertig (${step.contractorName}).` })
+
+      // Advance to next step or finish
+      c.currentStepIndex++
+      if (c.currentStepIndex >= c.steps.length) {
+        this.completeRenovation(p)
+      } else {
+        c.steps[c.currentStepIndex].status = 'active'
+      }
+    }
+  }
+
+  private completeRenovation(p: Property) {
+    if (!p.activeRenovation) return
+    const c = p.activeRenovation
+    p.condition = Math.min(100, p.condition + c.conditionGainOnComplete)
+    p.baseRent = Math.round(p.baseRent * c.rentMultOnComplete)
+    p.marketValue = Math.round(p.marketValue * c.valueMultOnComplete)
+    p.lastRenovationMonth = this.gameMonth()
+    if (c.modernizationEligible) p.modernizationUmlageAvailable = true
+    if (c.kfwSubsidyPct > 0) {
+      const refund = Math.round(c.totalAgreedCost * c.kfwSubsidyPct)
+      this.state.kfwPending.push({ id: 'kfw_' + Math.random().toString(36).slice(2, 9), triggerMonth: this.gameMonth() + 2, amount: refund })
+      this.emit('toast', { kind: 'success', text: `Renovierung abgeschlossen. KfW-Foerderung ${formatEuro(refund)} kommt in 2 Monaten.` })
+    } else {
+      this.emit('toast', { kind: 'success', text: `Renovierung abgeschlossen — Zustand +${c.conditionGainOnComplete}, Miete +${Math.round((c.rentMultOnComplete - 1) * 100)}%.` })
+    }
+    c.status = 'done'
+    p.activeRenovation = undefined
+    this.emit('renovationDone', { property: p, contract: c })
+  }
+
+  private schedulePfusch(p: Property, gewerk: GewerkKind, rng: () => number) {
+    const spec = Engine.GEWERK_SPEC[gewerk]
+    const capexKind: CapexKind = spec.capexLink ?? 'elektrik'
+    const trigger = this.gameMonth() + 6 + Math.floor(rng() * 12)
+    this.state.pfuschPending.push({
+      id: 'pf_' + Math.random().toString(36).slice(2, 9),
+      propertyId: p.id,
+      triggerMonth: trigger,
+      capexKind,
+      costEstimate: spec.baseCost * 1.5,
+    })
+  }
+
+  private bumpLoyalty(contractorId: string, contractorName: string, jobAmount: number) {
+    let rel = this.state.player.contractorRelations.find(r => r.contractorId === contractorId)
+    if (!rel) {
+      rel = { contractorId, contractorName, jobsCompleted: 0, totalSpent: 0, lastJobMonth: this.gameMonth() }
+      this.state.player.contractorRelations.push(rel)
+    }
+    rel.jobsCompleted++
+    rel.totalSpent += jobAmount
+    rel.lastJobMonth = this.gameMonth()
+  }
+
+  /** Tick scheduled pfusch — convert to a proper CapexEvent when its month arrives. */
+  private tickPfusch() {
+    const m = this.gameMonth()
+    const due = this.state.pfuschPending.filter(pf => pf.triggerMonth <= m)
+    for (const pf of due) {
+      const p = this.state.owned.find(pp => pp.id === pf.propertyId)
+      if (!p || p.pendingCapex) continue  // skip if property already has a pending capex
+      const cost = Math.round(pf.costEstimate * (0.8 + Math.random() * 0.4))
+      p.pendingCapex = {
+        id: 'cx_' + Math.random().toString(36).slice(2, 9),
+        propertyId: p.id,
+        kind: pf.capexKind,
+        title: `Pfusch-Folgeschaden: ${pf.capexKind}`,
+        body: 'Frueherer Pfusch eines Handwerkers macht sich jetzt bemerkbar. Alles muss nochmal saniert werden.',
+        cost,
+        conditionImpactIfIgnored: 25,
+        conditionGainIfPaid: 12,
+        appearedMonth: m,
+        deadlineMonth: m + 5,
+        state: 'pending',
+      }
+      this.emit('toast', { kind: 'error', text: `Pfusch-Folgeschaden in ${this.nameFor(p)}: ${formatEuro(cost)} faellig.` })
+    }
+    this.state.pfuschPending = this.state.pfuschPending.filter(pf => pf.triggerMonth > m)
+  }
+
+  /** Tick scheduled KfW refunds — pay out when bureaucracy completes. */
+  private tickKfw() {
+    const m = this.gameMonth()
+    const due = this.state.kfwPending.filter(k => k.triggerMonth <= m)
+    for (const k of due) {
+      this.state.player.cash += k.amount
+      this.emit('toast', { kind: 'success', text: `KfW-Foerderung eingegangen: ${formatEuro(k.amount)}.` })
+    }
+    this.state.kfwPending = this.state.kfwPending.filter(k => k.triggerMonth > m)
+  }
+
+  /** Once a year (January), roll for a tax audit. Probability depends on Schwarz job count,
+   *  property portfolio size (more visibility), and district mix (Mitte = high enforcement). */
+  private maybeRollTaxAudit() {
+    if (this.state.time.month !== 1) return
+    if (this.state.player.schwarzJobsThisYear === 0) {
+      this.state.player.schwarzJobsThisYear = 0
+      return
+    }
+    // base risk: 4% per Schwarz job this year, modulated by district enforcement
+    const properties = this.state.owned
+    const enforcement = properties.length === 0 ? 1 : properties.reduce((s, p) => {
+      const factor = p.district === 'mitte' ? 1.5 : p.district === 'charlottenburg' ? 1.2
+        : p.district === 'wedding' ? 0.5 : p.district === 'neukoelln' ? 0.7 : 1.0
+      return s + factor
+    }, 0) / properties.length
+    const auditProb = Math.min(0.85, 0.04 * this.state.player.schwarzJobsThisYear * enforcement)
+    if (Math.random() < auditProb) {
+      // Rough penalty: 3x what you "saved" by going Schwarz this year
+      // We approximate the saved amount as ~35% of an average Gewerk cost (~6000) per job
+      const savedEstimate = this.state.player.schwarzJobsThisYear * 0.35 * 6000
+      const fine = Math.round(savedEstimate * 3)
+      this.state.player.cash -= fine
+      this.state.player.reputation = Math.max(0, this.state.player.reputation - 15)
+      this.state.player.creditScore = Math.max(300, this.state.player.creditScore - 50)
+      this.state.player.taxAuditsExperienced++
+      this.emit('toast', { kind: 'error', text: `🚨 Zoll-Pruefung! ${this.state.player.schwarzJobsThisYear} Schwarz-Jobs entdeckt. Strafe ${formatEuro(fine)}, Reputation -15, Score -50.` })
+    }
+    this.state.player.schwarzJobsThisYear = 0
   }
 
   /**
@@ -1043,7 +1539,10 @@ export class Engine {
   monthlyCashflow(): { rent: number; maintenance: number; loanPayments: number; overhead: number; net: number } {
     let rent = 0, maintenance = 0, loanPayments = 0
     for (const p of this.state.owned) {
-      if (p.tenant) rent += this.effectiveRent(p) * (p.tenant.reliability / 100)
+      if (p.tenant) {
+        const reductionFactor = p.activeRenovation ? (1 - p.activeRenovation.rentReductionPct) : 1
+        rent += this.effectiveRent(p) * (p.tenant.reliability / 100) * reductionFactor
+      }
       maintenance += this.maintenanceCost(p)
     }
     for (const l of this.state.loans) loanPayments += l.monthlyPayment
@@ -1176,6 +1675,16 @@ export class Engine {
       if (!Array.isArray(this.state.lawsuits)) this.state.lawsuits = []
       // M2: capex history (pendingCapex on individual properties is fine as undef)
       if (!Array.isArray(this.state.capexHistory)) this.state.capexHistory = []
+      // M2.5: renovation/contractor state
+      if (!Array.isArray(this.state.player.contractorRelations)) this.state.player.contractorRelations = []
+      if (typeof this.state.player.schwarzJobsThisYear !== 'number') this.state.player.schwarzJobsThisYear = 0
+      if (typeof this.state.player.totalSchwarzJobs !== 'number') this.state.player.totalSchwarzJobs = 0
+      if (typeof this.state.player.taxAuditsExperienced !== 'number') this.state.player.taxAuditsExperienced = 0
+      if (!Array.isArray(this.state.pfuschPending)) this.state.pfuschPending = []
+      if (!Array.isArray(this.state.kfwPending)) this.state.kfwPending = []
+      if (!Array.isArray(this.state.contractorPool) || this.state.contractorPool.length === 0) {
+        this.state.contractorPool = this.generateContractorPool()
+      }
       return true
     } catch { return false }
   }

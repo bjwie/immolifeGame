@@ -34,6 +34,8 @@ export class HUD {
     engine.on('achievement', (a: any) => this.celebrate(a.title, a.desc))
     engine.on('capex', () => this.refresh())
     engine.on('capexPaid', () => this.refresh())
+    engine.on('renovationStart', () => this.refresh())
+    engine.on('renovationDone', () => this.refresh())
   }
 
   private bindControls() {
@@ -90,7 +92,26 @@ export class HUD {
       chip.title = pendingCapex.map(p => `${p.pendingCapex!.title} — Frist ${p.pendingCapex!.deadlineMonth - this.engine.gameMonth()} M`).join('\n')
       events.appendChild(chip)
     }
-    if (s.market.events.length === 0 && s.lawsuits.length === 0 && pendingCapex.length === 0) {
+    const activeRenos = s.owned.filter(p => p.activeRenovation)
+    if (activeRenos.length > 0) {
+      const chip = document.createElement('div')
+      chip.className = 'event-chip reno'
+      chip.textContent = `🔨 ${activeRenos.length} Renovierung${activeRenos.length === 1 ? '' : 'en'} laeuft`
+      chip.title = activeRenos.map(p => {
+        const c = p.activeRenovation!
+        const step = c.steps[c.currentStepIndex]
+        return `${this.engine.nameFor(p)}: Schritt ${c.currentStepIndex + 1}/${c.steps.length}${step ? ` (${step.contractorName})` : ''}`
+      }).join('\n')
+      events.appendChild(chip)
+    }
+    if (s.player.schwarzJobsThisYear > 0) {
+      const chip = document.createElement('div')
+      chip.className = 'event-chip schwarz'
+      chip.textContent = `🚫 Schwarz: ${s.player.schwarzJobsThisYear} Jobs YTD`
+      chip.title = `${s.player.schwarzJobsThisYear} Schwarzarbeit-Jobs in diesem Jahr — Audit-Risiko steigt mit jedem. Reset im Januar.\nGesamt: ${s.player.totalSchwarzJobs} · Audits erlebt: ${s.player.taxAuditsExperienced}`
+      events.appendChild(chip)
+    }
+    if (s.market.events.length === 0 && s.lawsuits.length === 0 && pendingCapex.length === 0 && activeRenos.length === 0) {
       const chip = document.createElement('div')
       chip.className = 'event-chip muted'
       chip.textContent = 'Markt ruhig'

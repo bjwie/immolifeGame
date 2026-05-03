@@ -84,6 +84,10 @@ export interface Property {
   applicantSearches?: { month: number; remaining: number }
   /** Pending major repair (Steigstrang/Heizung/Dach etc.). Max 1 at a time per property. */
   pendingCapex?: CapexEvent
+  /** Active renovation contract — tenant gets Mietminderung, no other contract until done. */
+  activeRenovation?: RenovationContract
+  /** True after a modern/luxury renovation completes; lets player invoke Modernisierungsumlage once. */
+  modernizationUmlageAvailable?: boolean
 }
 
 export interface Loan {
@@ -130,6 +134,12 @@ export interface Player {
   bankRelations: Record<string, number>  // bankId -> relation score 0..100
   /** id of currently hired broker, or null */
   brokerId: string | null
+  /** Persistent contractor loyalty — discount of 5% per repeat job, capped at -15%. */
+  contractorRelations: ContractorRelation[]
+  /** Schwarzarbeit counters — used by the annual audit roll. */
+  schwarzJobsThisYear: number
+  totalSchwarzJobs: number
+  taxAuditsExperienced: number
 }
 
 export type BrokerSpecialty = 'residential' | 'commercial' | 'luxury' | 'budget'
@@ -216,6 +226,135 @@ export interface Achievement {
 
 export type CapexKind = 'elektrik' | 'fenster' | 'steigstrang' | 'fassade' | 'heizung' | 'dach'
 
+// =========== RENOVATION ===========
+
+export type GewerkKind =
+  | 'abbruch'        // Demolition / Entkernung
+  | 'rohbau'         // Walls / structural
+  | 'sanitaer'       // Plumbing rough-in
+  | 'elektrik'       // Electrical rough-in
+  | 'heizung_install' // Heating install
+  | 'fenster_install' // Window install
+  | 'dach_decken'    // Roofing
+  | 'fassade_putz'   // Facade plaster
+  | 'estrich'        // Floor screed
+  | 'trockenbau'     // Drywall
+  | 'fliesen'        // Tiles (bath/kitchen)
+  | 'maler'          // Painting
+  | 'boden'          // Flooring
+  | 'endmontage'     // Final fittings
+
+export type RenovationScope = 'capex' | 'basic' | 'modern' | 'luxury'
+
+export type ContractorTier = 'cheap' | 'standard' | 'premium' | 'gu'
+
+export interface ContractorOffer {
+  /** offer id (unique per generation), used to identify the chosen offer */
+  id: string
+  /** stable contractor identity — same person across multiple jobs/properties for loyalty */
+  contractorId: string
+  contractorName: string
+  tier: ContractorTier
+  /** Specialty area for flavour text — not strictly enforced */
+  specialty?: GewerkKind | 'gu'
+  /** Multipliers vs base cost/duration */
+  costMultiplier: number
+  durationMultiplier: number
+  /** Risk knobs */
+  overrunChance: number     // 0..1 — chance of mid-project Nachforderung (+20-40%)
+  pfuschChance: number      // 0..1 — chance of bad work that triggers a delayed capex
+  insolvencyChance: number  // 0..1 — chance to bail mid-project (only realistic for cheap)
+  /** Quality bonus added to the property's condition gain on completion */
+  qualityBonus: number
+  /** Flavour blurb for the offer card */
+  blurb: string
+}
+
+export interface GewerkStep {
+  id: string
+  gewerk: GewerkKind
+  contractorId: string
+  contractorName: string
+  contractorTier: ContractorTier
+  baseCost: number          // pre-Schwarz, pre-Material, pre-Loyalty
+  agreedCost: number        // what was contracted (after all discounts/markups)
+  paidSoFar: number         // for partial payments / Nachträge
+  durationDays: number
+  daysRemaining: number
+  status: 'pending' | 'active' | 'done'
+  isSchwarz: boolean
+  /** Premium materials (€-tier upgrade) — only meaningful for finishing trades */
+  material: 'standard' | 'premium'
+  /** Warranty months remaining after completion (0 for Schwarz) */
+  warrantyMonths: number
+  /** If true, this step suffered Pfusch and a follow-up capex was scheduled */
+  pfuschTriggered?: boolean
+  /** If true, this step suffered a Nachforderung */
+  overrunTriggered?: boolean
+}
+
+export interface RenovationContract {
+  id: string
+  propertyId: string
+  scope: RenovationScope
+  isGU: boolean
+  guMarkup: number          // e.g. 0.20 for 20%
+  steps: GewerkStep[]
+  /** index of the currently-active step (or -1 if all done) */
+  currentStepIndex: number
+  startMonth: number
+  totalAgreedCost: number
+  totalPaidSoFar: number
+  /** Mietminderung applied to tenant's Kalt during build (0..1) */
+  rentReductionPct: number
+  /** Effects applied on completion */
+  conditionGainOnComplete: number
+  rentMultOnComplete: number
+  valueMultOnComplete: number
+  /** Eligible for §559 BGB Modernisierungsumlage (modern/luxury only, with tenant) */
+  modernizationEligible: boolean
+  /** KfW subsidy percentage if energetic combo qualifies (heizung+fenster+fassade) */
+  kfwSubsidyPct: number
+  status: 'active' | 'done' | 'cancelled'
+}
+
+export interface ContractorRelation {
+  contractorId: string
+  contractorName: string
+  jobsCompleted: number
+  totalSpent: number
+  lastJobMonth: number
+}
+
+export interface ContractorPoolEntry {
+  id: string
+  name: string
+  tier: ContractorTier
+  specialty: GewerkKind | 'gu'
+  baseOverrunChance: number
+  basePfuschChance: number
+  baseInsolvencyChance: number
+  baseQualityBonus: number
+  blurb: string
+}
+
+export interface PfuschPending {
+  id: string
+  propertyId: string
+  /** when the manifestation hits — converted to a CapexEvent at that point */
+  triggerMonth: number
+  capexKind: CapexKind
+  costEstimate: number
+}
+
+export interface KfwRefundPending {
+  id: string
+  triggerMonth: number
+  amount: number
+}
+
+export type CapexKind2 = CapexKind  // re-export marker for clarity
+
 export interface CapexEvent {
   id: string
   propertyId: string
@@ -259,6 +398,12 @@ export interface GameState {
   loans: Loan[]
   lawsuits: Lawsuit[]
   capexHistory: CapexEvent[]
+  /** Pfusch from cheap/Schwarz work that materialises later as capex. */
+  pfuschPending: PfuschPending[]
+  /** KfW-Förderung refunds queued for delayed payout (2 months bureaucracy). */
+  kfwPending: KfwRefundPending[]
+  /** Persistent pool of contractors so loyalty across jobs/properties works. */
+  contractorPool: ContractorPoolEntry[]
   rngSeed: number
 }
 

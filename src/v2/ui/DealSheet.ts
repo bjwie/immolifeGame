@@ -1,9 +1,18 @@
 import type { Engine } from '../sim/Engine'
 import { formatEuro } from '../sim/Engine'
-import type { BankOfferTerms, Property } from '../sim/types'
+import type { BankOfferTerms, GewerkKind, Property } from '../sim/types'
 import type { NegotiationModal } from './NegotiationModal'
 import type { RentalModal } from './RentalModal'
+import type { RenovationModal } from './RenovationModal'
 import { ModalManager, type ManagedModal } from './ModalManager'
+
+const Engine_GEWERK_LABEL: Record<GewerkKind, string> = {
+  abbruch: 'Abbruch & Entkernung', rohbau: 'Rohbau', sanitaer: 'Sanitaer',
+  elektrik: 'Elektrik', heizung_install: 'Heizung', fenster_install: 'Fenster',
+  dach_decken: 'Dach', fassade_putz: 'Fassade', estrich: 'Estrich',
+  trockenbau: 'Trockenbau', fliesen: 'Fliesen', maler: 'Maler', boden: 'Boden',
+  endmontage: 'Endmontage',
+}
 
 const DISTRICT_LABEL: Record<string, string> = {
   mitte: 'Mitte', prenzlauer: 'Prenzlauer Berg', kreuzberg: 'Kreuzberg',
@@ -39,7 +48,9 @@ export class DealSheet {
 
   setNegotiationModal(nm: NegotiationModal) { this.negotiationModal = nm }
   setRentalModal(rm: RentalModal) { this.rentalModal = rm }
+  setRenovationModal(rm: RenovationModal) { this.renovationModal = rm }
   private rentalModal: RentalModal | null = null
+  private renovationModal: RenovationModal | null = null
 
   open(p: Property, isOwned: boolean) {
     this.current = p
@@ -320,30 +331,60 @@ export class DealSheet {
         <div class="fin-row"><span>Frist</span><b>${cap.deadlineMonth - this.engine.gameMonth()} Monate</b></div>
         <div class="fin-row"><span>Bei Verfall</span><b class="bad">-${cap.conditionImpactIfIgnored} Zustand, Mieter -20 Zufriedenheit</b></div>
         <div class="fin-row"><span>Bei Reparatur</span><b class="good">+${cap.conditionGainIfPaid} Zustand</b></div>
-        <button class="primary" data-pay-capex>Jetzt reparieren (${formatEuro(cap.cost)})</button>
+        <button class="primary" data-plan-capex>🛠 Handwerker beauftragen</button>
       </div>` : ''
 
-    this.root.querySelector('#ds-actions')!.innerHTML = `
-      ${capexHtml}
-      ${tenantHtml}
-      ${loanHtml}
+    const reno = p.activeRenovation
+    const renoHtml = reno ? `
+      <div class="reno-active-card">
+        <div class="card-title">RENOVIERUNG LAEUFT</div>
+        ${reno.steps.map((s, i) => `
+          <div class="reno-step ${s.status}">
+            <span>${i + 1}. ${Engine_GEWERK_LABEL[s.gewerk] ?? s.gewerk}</span>
+            <span class="reno-step-meta">${escape(s.contractorName)} · ${s.status === 'done' ? '✓' : s.status === 'active' ? `${Math.max(0, Math.round(s.daysRemaining))} Tage` : 'wartet'}${s.isSchwarz ? ' · 🚫' : ''}${s.material === 'premium' ? ' · ⭐' : ''}</span>
+          </div>
+        `).join('')}
+        <div class="fin-row"><span>Bisher gezahlt</span><b>${formatEuro(reno.totalPaidSoFar)} / ${formatEuro(reno.totalAgreedCost)}</b></div>
+        <div class="fin-row"><span>Mietminderung</span><b class="bad">-${Math.round(reno.rentReductionPct * 100)}%</b></div>
+        <button class="ghost small" data-cancel-reno>Renovierung abbrechen (50% Rest zurueck)</button>
+      </div>
+    ` : ''
+
+    const renoBoxHtml = !reno ? `
       <div class="reno-box">
-        <div class="card-title">Renovierung</div>
+        <div class="card-title">Renovierung beauftragen</div>
         <div class="reno-grid">
-          <button class="reno-btn" data-reno="basic">
+          <button class="reno-btn" data-plan-scope="basic">
             <div class="r-head">Grundsanierung</div>
-            <div class="r-info">+18 Zustand · +4% Miete</div>
+            <div class="r-info">Maler + Boden · ~1 Monat</div>
           </button>
-          <button class="reno-btn" data-reno="modern">
+          <button class="reno-btn" data-plan-scope="modern">
             <div class="r-head">Modernisierung</div>
-            <div class="r-info">+38 Zustand · +12% Miete</div>
+            <div class="r-info">9 Gewerke · ~3-4 Monate</div>
           </button>
-          <button class="reno-btn" data-reno="luxury">
+          <button class="reno-btn" data-plan-scope="luxury">
             <div class="r-head">Luxus-Sanierung</div>
-            <div class="r-info">+60 Zustand · +25% Miete</div>
+            <div class="r-info">12 Gewerke · ~5-6 Monate</div>
           </button>
         </div>
       </div>
+    ` : ''
+
+    const umlageHtml = p.modernizationUmlageAvailable && p.tenant ? `
+      <div class="umlage-card">
+        <div class="card-title">§559 BGB MODERNISIERUNGSUMLAGE</div>
+        <div class="micro">Nach Modernisierung darfst du legal +11% Kaltmiete verlangen, ohne Klagerisiko.</div>
+        <button class="primary small" data-apply-umlage>+11% Miete legal anwenden</button>
+      </div>
+    ` : ''
+
+    this.root.querySelector('#ds-actions')!.innerHTML = `
+      ${capexHtml}
+      ${renoHtml}
+      ${tenantHtml}
+      ${loanHtml}
+      ${renoBoxHtml}
+      ${umlageHtml}
       <div class="sell-box">
         <div class="fin-row"><span>Verkaufspreis (- 4% Gebuehren)</span><b>${formatEuro(sellPrice)}</b></div>
         ${loan ? `<div class="fin-row"><span>Hypothek tilgen (+1% Penalty)</span><b>-${formatEuro(payoff)}</b></div>` : ''}
@@ -364,13 +405,24 @@ export class DealSheet {
       if (!this.rentalModal) return
       this.rentalModal.open(p, () => { this.refresh() })
     })
-    this.root.querySelectorAll('[data-reno]').forEach(b => {
+    this.root.querySelectorAll('[data-plan-scope]').forEach(b => {
       b.addEventListener('click', () => {
-        const lvl = (b as HTMLElement).dataset.reno as 'basic' | 'modern' | 'luxury'
-        const r = this.engine.renovate(p.id, lvl)
-        if (!r.ok) this.engine['emit']?.('toast', { kind: 'error', text: r.reason ?? 'Renovierung fehlgeschlagen' })
-        this.refresh()
+        const scope = (b as HTMLElement).dataset.planScope as 'basic' | 'modern' | 'luxury'
+        if (this.renovationModal) this.renovationModal.open(p, scope, () => this.refresh())
       })
+    })
+    this.root.querySelector('[data-plan-capex]')?.addEventListener('click', () => {
+      if (this.renovationModal) this.renovationModal.open(p, 'capex', () => this.refresh())
+    })
+    this.root.querySelector('[data-cancel-reno]')?.addEventListener('click', () => {
+      const r = this.engine.cancelRenovation(p.id)
+      if (!r.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: r.reason ?? 'Abbruch fehlgeschlagen' })
+      this.refresh()
+    })
+    this.root.querySelector('[data-apply-umlage]')?.addEventListener('click', () => {
+      const r = this.engine.applyModernisierungUmlage(p.id)
+      if (!r.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: r.reason ?? 'Umlage fehlgeschlagen' })
+      this.refresh()
     })
     this.root.querySelector('[data-sell]')?.addEventListener('click', () => {
       const before = this.engine.netWorth()
@@ -383,11 +435,6 @@ export class DealSheet {
       void before
     })
     this.root.querySelector('[data-rent-hike]')?.addEventListener('click', () => this.openRentHike(p))
-    this.root.querySelector('[data-pay-capex]')?.addEventListener('click', () => {
-      const r = this.engine.payCapex(p.id)
-      if (!r.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: r.reason ?? 'Reparatur fehlgeschlagen' })
-      this.refresh()
-    })
   }
 
   private openRentHike(p: Property) {
