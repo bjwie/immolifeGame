@@ -1,4 +1,4 @@
-import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, GameState, GameTime, Loan, MarketEvent, Player, Property, PropertyType, SellerNegotiationState, Speed, Tenant } from './types'
+import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, CapexEvent, CapexKind, GameState, GameTime, Loan, MarketEvent, Player, Property, PropertyType, SellerNegotiationState, Speed, Tenant } from './types'
 import type { CityLayout, DistrictDef, DistrictId } from '../render/CityRenderer'
 import { generateApplicants, pickPropertyName, pickSeller } from './names'
 
@@ -65,6 +65,7 @@ export class Engine {
       owned: [],
       loans: [],
       lawsuits: [],
+      capexHistory: [],
       rngSeed: Math.floor(Math.random() * 1_000_000),
     }
   }
@@ -341,6 +342,9 @@ export class Engine {
       // maintenance always due
       const m = this.maintenanceCost(p)
       expenses += m
+
+      // capex roll — major repairs based on age + condition
+      this.tickCapex(p, rng)
     }
 
     // loans
@@ -802,6 +806,135 @@ export class Engine {
     this.autoSave()
   }
 
+  // ============ CAPEX ============
+
+  /**
+   * Major repair roll — building parts wear out by age, accelerated by poor
+   * condition. Each property holds at most one pending capex at a time, so we
+   * also handle the "deadline reached without payment" branch here.
+   */
+  private tickCapex(p: Property, rng: () => number) {
+    if (p.pendingCapex) {
+      // expired?
+      if (this.gameMonth() >= p.pendingCapex.deadlineMonth) {
+        const cap = p.pendingCapex
+        cap.state = 'expired'
+        p.condition = Math.max(0, p.condition - cap.conditionImpactIfIgnored)
+        if (p.tenant) p.tenant.satisfaction = Math.max(0, p.tenant.satisfaction - 20)
+        this.state.capexHistory.push(cap)
+        p.pendingCapex = undefined
+        this.emit('toast', { kind: 'error', text: `${cap.title} bei ${this.nameFor(p)} ignoriert — Zustand -${cap.conditionImpactIfIgnored}, Mieter sauer.` })
+      }
+      return
+    }
+    const ev = this.rollCapex(p, rng)
+    if (ev) {
+      p.pendingCapex = ev
+      this.emit('capex', ev)
+      this.emit('toast', { kind: 'warning', text: `⚠ ${ev.title} in ${this.nameFor(p)} — ${formatEuro(ev.cost)} binnen ${ev.deadlineMonth - this.gameMonth()} Monaten` })
+    }
+  }
+
+  /** Tuned probabilities and cost ranges per capex kind. */
+  private static CAPEX_TABLE: Record<CapexKind, {
+    minAgeYears: number
+    baseRiskAtCond50: number    // monthly probability when condition = 50
+    minCost: number
+    maxCost: number
+    impact: number              // condition drop if ignored
+    gain: number                // condition rise if paid
+    title: string
+    body: string
+    deadlineMonths: [number, number]  // [min, max] grace period
+  }> = {
+    elektrik: {
+      minAgeYears: 30, baseRiskAtCond50: 0.005, minCost: 4000, maxCost: 9000,
+      impact: 22, gain: 12, title: 'Elektrik defekt',
+      body: 'Sicherungen fliegen regelmaessig. Stromleitungen muessen erneuert werden.',
+      deadlineMonths: [4, 8],
+    },
+    fenster: {
+      minAgeYears: 30, baseRiskAtCond50: 0.006, minCost: 5000, maxCost: 12000,
+      impact: 18, gain: 12, title: 'Fenster undicht',
+      body: 'Holzfenster aus dem Bestand sind zugig. Mieter beschweren sich ueber Heizkosten.',
+      deadlineMonths: [6, 10],
+    },
+    steigstrang: {
+      minAgeYears: 40, baseRiskAtCond50: 0.008, minCost: 8000, maxCost: 15000,
+      impact: 25, gain: 15, title: 'Steigstrang muss saniert werden',
+      body: 'Das Wassersteigrohr ist marode. Wenn es bricht, gibt es einen Wasserschaden.',
+      deadlineMonths: [4, 7],
+    },
+    fassade: {
+      minAgeYears: 40, baseRiskAtCond50: 0.005, minCost: 15000, maxCost: 30000,
+      impact: 22, gain: 14, title: 'Fassade broeckelt',
+      body: 'Putz fault ab, Fugen gehen auf. Spaetestens jetzt teure Sanierung faellig.',
+      deadlineMonths: [8, 14],
+    },
+    heizung: {
+      minAgeYears: 25, baseRiskAtCond50: 0.010, minCost: 12000, maxCost: 25000,
+      impact: 28, gain: 16, title: 'Heizung ausgefallen',
+      body: 'Der Brenner gibt auf. Im Winter ohne Heizung droht Mietminderung.',
+      deadlineMonths: [3, 6],
+    },
+    dach: {
+      minAgeYears: 50, baseRiskAtCond50: 0.004, minCost: 20000, maxCost: 40000,
+      impact: 35, gain: 18, title: 'Dach undicht',
+      body: 'Bei Starkregen tropft es ins Treppenhaus. Komplette Eindeckung empfohlen.',
+      deadlineMonths: [6, 12],
+    },
+  }
+
+  private rollCapex(p: Property, rng: () => number): CapexEvent | null {
+    const ageYears = this.state.time.year - p.yearBuilt
+    if (ageYears < 25) return null
+    // condition multiplier — bad shape doubles the risk, top shape halves it
+    const condMult = Math.max(0.4, 1.5 - p.condition / 100)
+    const candidates: CapexKind[] = []
+    for (const kind of Object.keys(Engine.CAPEX_TABLE) as CapexKind[]) {
+      const e = Engine.CAPEX_TABLE[kind]
+      if (ageYears < e.minAgeYears) continue
+      const risk = e.baseRiskAtCond50 * condMult
+      if (rng() < risk) candidates.push(kind)
+    }
+    if (candidates.length === 0) return null
+    // pick one — if multiple rolled in the same month, take the most expensive (drama)
+    candidates.sort((a, b) => Engine.CAPEX_TABLE[b].minCost - Engine.CAPEX_TABLE[a].minCost)
+    const kind = candidates[0]
+    const e = Engine.CAPEX_TABLE[kind]
+    const cost = Math.round(e.minCost + rng() * (e.maxCost - e.minCost))
+    const grace = e.deadlineMonths[0] + Math.floor(rng() * (e.deadlineMonths[1] - e.deadlineMonths[0] + 1))
+    return {
+      id: 'cx_' + Math.random().toString(36).slice(2, 9),
+      propertyId: p.id,
+      kind,
+      title: e.title,
+      body: e.body,
+      cost,
+      conditionImpactIfIgnored: e.impact,
+      conditionGainIfPaid: e.gain,
+      appearedMonth: this.gameMonth(),
+      deadlineMonth: this.gameMonth() + grace,
+      state: 'pending',
+    }
+  }
+
+  payCapex(propertyId: string): { ok: boolean; reason?: string } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p?.pendingCapex) return { ok: false, reason: 'Keine offene Reparatur' }
+    const cap = p.pendingCapex
+    if (this.state.player.cash < cap.cost) return { ok: false, reason: `Brauchst ${formatEuro(cap.cost)}` }
+    this.state.player.cash -= cap.cost
+    cap.state = 'paid'
+    p.condition = Math.min(100, p.condition + cap.conditionGainIfPaid)
+    this.state.capexHistory.push(cap)
+    p.pendingCapex = undefined
+    this.emit('capexPaid', { property: p, capex: cap })
+    this.emit('toast', { kind: 'success', text: `${cap.title} repariert (-${formatEuro(cap.cost)}, +${cap.conditionGainIfPaid} Zustand).` })
+    this.autoSave()
+    return { ok: true }
+  }
+
   // ============ DERIVED ============
 
   gameMonth(): number {
@@ -948,6 +1081,8 @@ export class Engine {
       this.state.owned.forEach(migrateProperty)
       // M1: lawsuits array
       if (!Array.isArray(this.state.lawsuits)) this.state.lawsuits = []
+      // M2: capex history (pendingCapex on individual properties is fine as undef)
+      if (!Array.isArray(this.state.capexHistory)) this.state.capexHistory = []
       return true
     } catch { return false }
   }

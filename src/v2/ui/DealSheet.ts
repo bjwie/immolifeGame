@@ -295,7 +295,20 @@ export class DealSheet {
         ${loan.paymentsMissed > 0 ? `<div class="fin-row warn"><span>Verpasste Raten</span><b>${loan.paymentsMissed}</b></div>` : ''}
       </div>` : ''
 
+    const cap = p.pendingCapex
+    const capexHtml = cap ? `
+      <div class="capex-card">
+        <div class="capex-head">⚠ ${escape(cap.title)}</div>
+        <div class="capex-body">${escape(cap.body)}</div>
+        <div class="fin-row"><span>Reparaturkosten</span><b>${formatEuro(cap.cost)}</b></div>
+        <div class="fin-row"><span>Frist</span><b>${cap.deadlineMonth - this.engine.gameMonth()} Monate</b></div>
+        <div class="fin-row"><span>Bei Verfall</span><b class="bad">-${cap.conditionImpactIfIgnored} Zustand, Mieter -20 Zufriedenheit</b></div>
+        <div class="fin-row"><span>Bei Reparatur</span><b class="good">+${cap.conditionGainIfPaid} Zustand</b></div>
+        <button class="primary" data-pay-capex>Jetzt reparieren (${formatEuro(cap.cost)})</button>
+      </div>` : ''
+
     this.root.querySelector('#ds-actions')!.innerHTML = `
+      ${capexHtml}
       ${tenantHtml}
       ${loanHtml}
       <div class="reno-box">
@@ -349,6 +362,11 @@ export class DealSheet {
       void before
     })
     this.root.querySelector('[data-rent-hike]')?.addEventListener('click', () => this.openRentHike(p))
+    this.root.querySelector('[data-pay-capex]')?.addEventListener('click', () => {
+      const r = this.engine.payCapex(p.id)
+      if (!r.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: r.reason ?? 'Reparatur fehlgeschlagen' })
+      this.refresh()
+    })
   }
 
   private openRentHike(p: Property) {

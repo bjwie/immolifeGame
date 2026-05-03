@@ -72,6 +72,8 @@ export interface Property {
   seller?: SellerInfo      // who's selling (private or agent-listed)
   /** Per-month applicant search budget. Initialised lazily; reset on month change. */
   applicantSearches?: { month: number; remaining: number }
+  /** Pending major repair (Steigstrang/Heizung/Dach etc.). Max 1 at a time per property. */
+  pendingCapex?: CapexEvent
 }
 
 export interface Loan {
@@ -202,6 +204,24 @@ export interface Achievement {
   test: (state: GameState) => boolean
 }
 
+export type CapexKind = 'elektrik' | 'fenster' | 'steigstrang' | 'fassade' | 'heizung' | 'dach'
+
+export interface CapexEvent {
+  id: string
+  propertyId: string
+  kind: CapexKind
+  title: string
+  body: string
+  cost: number
+  /** how much condition drops if the player ignores this until the deadline */
+  conditionImpactIfIgnored: number
+  /** how much condition GAINS if the player pays (counts as mini-renovation) */
+  conditionGainIfPaid: number
+  appearedMonth: number
+  deadlineMonth: number
+  state: 'pending' | 'paid' | 'expired'
+}
+
 export interface Lawsuit {
   id: string
   propertyId: string
@@ -226,6 +246,7 @@ export interface GameState {
   owned: Property[]
   loans: Loan[]
   lawsuits: Lawsuit[]
+  capexHistory: CapexEvent[]
   rngSeed: number
 }
 

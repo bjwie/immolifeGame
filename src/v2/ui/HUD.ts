@@ -32,6 +32,8 @@ export class HUD {
     engine.on('event', (e: any) => this.toast(e.title, 'info'))
     engine.on('toast', (t: any) => this.toast(t.text, t.kind))
     engine.on('achievement', (a: any) => this.celebrate(a.title, a.desc))
+    engine.on('capex', () => this.refresh())
+    engine.on('capexPaid', () => this.refresh())
   }
 
   private bindControls() {
@@ -78,7 +80,16 @@ export class HUD {
       chip.title = `Mieterhoehung-Klage. Gesamtkosten bisher ${formatEuro(ls.totalSpent)}. Erfolgschance ${(ls.successChance * 100).toFixed(0)}%.`
       events.appendChild(chip)
     }
-    if (s.market.events.length === 0 && s.lawsuits.length === 0) {
+    const pendingCapex = s.owned.filter(p => p.pendingCapex)
+    if (pendingCapex.length > 0) {
+      const chip = document.createElement('div')
+      chip.className = 'event-chip capex'
+      const totalCost = pendingCapex.reduce((sum, p) => sum + (p.pendingCapex?.cost ?? 0), 0)
+      chip.textContent = `⚠ ${pendingCapex.length} Reparatur${pendingCapex.length === 1 ? '' : 'en'} faellig (${formatEuro(totalCost)})`
+      chip.title = pendingCapex.map(p => `${p.pendingCapex!.title} — Frist ${p.pendingCapex!.deadlineMonth - this.engine.gameMonth()} M`).join('\n')
+      events.appendChild(chip)
+    }
+    if (s.market.events.length === 0 && s.lawsuits.length === 0 && pendingCapex.length === 0) {
       const chip = document.createElement('div')
       chip.className = 'event-chip muted'
       chip.textContent = 'Markt ruhig'

@@ -99,6 +99,7 @@ body {
 .event-chip { background: var(--bg-3); padding: 5px 8px; border-radius: 6px; font-size: 12px; border-left: 3px solid var(--gold); }
 .event-chip.muted { border-color: var(--line); color: var(--muted); }
 .event-chip.lawsuit { border-color: var(--bad); background: rgba(255, 118, 118, 0.1); }
+.event-chip.capex { border-color: #f8c14e; background: rgba(248, 193, 78, 0.12); }
 
 /* =========== Toasts =========== */
 
@@ -256,6 +257,15 @@ body {
   background: rgba(78,180,224,0.07); border: 1px solid rgba(78,180,224,0.3);
   border-radius: 8px; padding: 10px 12px; margin-bottom: 14px;
 }
+
+.capex-card {
+  background: rgba(255, 118, 118, 0.10); border: 1px solid rgba(255, 118, 118, 0.45);
+  border-radius: 10px; padding: 12px; margin-bottom: 14px;
+}
+.capex-head { font-weight: 800; color: var(--bad); font-size: 14px; }
+.capex-body { font-size: 12px; color: var(--text); margin: 4px 0 8px; line-height: 1.4; }
+.capex-card .fin-row { font-size: 12px; }
+.capex-card button { margin-top: 8px; }
 
 .reno-box { margin-bottom: 14px; }
 .reno-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
