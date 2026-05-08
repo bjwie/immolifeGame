@@ -163,6 +163,20 @@ export class Engine {
       if (this.unlockMetric(cond) < cond.threshold) continue
       this.state.unlockedDistricts.push(d.id)
       this.emit('districtUnlocked', { id: d.id, name: d.name, label: cond.label })
+      this.seedListingsFor(d.id)
+    }
+  }
+
+  /** Spawn 2-3 initial listings for a freshly-unlocked district so the player
+   *  sees inventory there immediately — no need to wait for the next month
+   *  refill cycle. */
+  private seedListingsFor(district: DistrictId) {
+    const rng = this.rng(district.length * 31 + this.gameMonth())
+    const target = 2 + Math.floor(rng() * 2) // 2 or 3
+    let added = 0
+    for (let i = 0; i < target * 6 && added < target; i++) {
+      const np = this.genListing(rng, district)
+      if (np) { this.state.listings.push(np); added++ }
     }
   }
 
@@ -676,7 +690,11 @@ export class Engine {
 
     const r = rng()
     let event: MarketEvent | null = null
-    const districts: DistrictId[] = ['mitte', 'prenzlauer', 'kreuzberg', 'charlottenburg', 'wedding', 'neukoelln']
+    // Market events only roll for districts the player can interact with.
+    // Newly-unlocked districts join the pool automatically; locked districts
+    // stay out of the headlines until they unlock.
+    const districts = this.state.unlockedDistricts
+    if (districts.length === 0) return
     const target = districts[Math.floor(rng() * districts.length)]
     const targetName = this.districtById(target).name
     const expires = this.gameMonth() + 4 + Math.floor(rng() * 5)

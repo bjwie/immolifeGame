@@ -56,15 +56,15 @@ Spielfortschritt freischalten. Nach Unlock verhalten sie sich wie normale Distri
 - [x] 3.6 Commit: "Phase 3: unlock animation + toast"
 
 ## Phase 4 — Listings spawnen im neuen Distrikt
-- [ ] 4.1 Engine.onDistrictUnlocked: nach dem Unlock-Event sofort 1-3 Initial-Listings
+- [x] 4.1 Engine.onDistrictUnlocked: nach dem Unlock-Event sofort 1-3 Initial-Listings
        fuer den neuen Distrikt generieren (nicht erst auf naechsten Monats-Roll warten).
        Nutzt genListing(rng, id).
-- [ ] 4.2 Verifizieren dass das monatliche Listing-Replenish die neuen Distrikte
+- [x] 4.2 Verifizieren dass das monatliche Listing-Replenish die neuen Distrikte
        jetzt mit einbezieht. Falls Engine eine hartkodierte Distrikt-Liste hat
        (siehe `Engine.ts:623`), aus state.unlockedDistricts ableiten statt hardcode.
-- [ ] 4.3 `npm run build` gruen. Eval-Test: Distrikt freischalten -> Listings sind
+- [x] 4.3 `npm run build` gruen. Eval-Test: Distrikt freischalten -> Listings sind
        sofort sichtbar dort.
-- [ ] 4.4 Commit: "Phase 4: spawn listings in newly-unlocked districts"
+- [x] 4.4 Commit: "Phase 4: spawn listings in newly-unlocked districts"
 
 ## Phase 5 — Live-Progress im Banner
 - [ ] 5.1 CityRenderer-Banner fuer locked districts mit Sub-Text:

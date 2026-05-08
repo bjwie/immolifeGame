@@ -126,7 +126,10 @@ export class CityRenderer {
       }
     }
 
-    // buildable spots: grass tiles in UNLOCKED districts adjacent to a sidewalk/road
+    // buildable spots: grass tiles adjacent to a sidewalk/road, in ANY district.
+    // Locked districts also get spots so newly-unlocked districts have inventory
+    // available immediately. Engine.availableBuildableSpots() does the runtime
+    // filter against state.unlockedDistricts.
     const buildableSpots: BuildSpot[] = []
     for (let y = 0; y < tilesH; y++) {
       for (let x = 0; x < tilesW; x++) {
@@ -134,7 +137,7 @@ export class CityRenderer {
         const around = [tiles[(y - 1) * tilesW + x], tiles[(y + 1) * tilesW + x], tiles[y * tilesW + x - 1], tiles[y * tilesW + x + 1]]
         if (around.some(t => t === 'sidewalk' || t === 'road_h' || t === 'road_v' || t === 'road_x')) {
           const d = districts.find(dd => x >= dd.bounds.x && x < dd.bounds.x + dd.bounds.w && y >= dd.bounds.y && y < dd.bounds.y + dd.bounds.h)
-          if (d && !d.locked) buildableSpots.push({ tileX: x, tileY: y, district: d.id })
+          if (d) buildableSpots.push({ tileX: x, tileY: y, district: d.id })
         }
       }
     }
