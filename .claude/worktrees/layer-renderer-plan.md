@@ -15,22 +15,22 @@
        textureKey wird die Konkatenation der Layer.key()-Strings.
 - [x] 1.6 `npm run build` muss gruen sein. Visuelle Parity: starte Dev-Server, oeffne mit ?skip=1,
        mache Screenshot via preview_screenshot. Keine sichtbaren Veraenderungen erwartet.
-- [ ] 1.7 Commit: "Phase 1: extract BuildingRenderer into Layer pipeline (parity)"
+- [x] 1.7 Commit: "Phase 1: extract BuildingRenderer into Layer pipeline (parity)"
 
 ## Phase 2 — Sprite-Stack: State-Layers werden Runtime
-- [ ] 2.1 CityScene.spawnPropertySprite: erstelle einen Phaser.Container statt nackter Sprite.
+- [x] 2.1 CityScene.spawnPropertySprite: erstelle einen Phaser.Container statt nackter Sprite.
        Container haelt: baseSprite (immer da) + Slot fuer ueberlay-Sprites.
        Click/Hover-Handler vom Container, nicht vom baseSprite.
-- [ ] 2.2 OwnedBadgeLayer wird RuntimeLayer (kleiner gebackener Sprite ueberlay statt baked-in).
+- [x] 2.2 OwnedBadgeLayer wird RuntimeLayer (kleiner gebackener Sprite ueberlay statt baked-in).
        textureKey verliert das 'O'-Suffix.
-- [ ] 2.3 ConditionPatinaLayer wird RuntimeLayer (overlay-Sprite mit cracks + tint-rect).
+- [x] 2.3 ConditionPatinaLayer wird RuntimeLayer (overlay-Sprite mit cracks + tint-rect).
        textureKey verliert die condition-Bucket-Zahl. Cache shrinkt drastisch.
-- [ ] 2.4 CityScene.refreshProperties: bei `bought`/`sold`/`renovated`/`leaseSigned` Events
+- [x] 2.4 CityScene.refreshProperties: bei `bought`/`sold`/`renovated`/`leaseSigned` Events
        NICHT mehr destroy+respawn. Nur Overlay-Sprites toggeln/re-mounten.
        Nur bei NEUEN listings spawnen, nur bei verschwundenen entfernen.
-- [ ] 2.5 `npm run build` gruen. Dev-Server: kaufen/verkaufen/renovieren - Building bleibt stabil,
+- [x] 2.5 `npm run build` gruen. Dev-Server: kaufen/verkaufen/renovieren - Building bleibt stabil,
        Badge erscheint/verschwindet smooth, kein Flicker. Screenshot-Vergleich.
-- [ ] 2.6 Commit: "Phase 2: runtime sprite-stack for state overlays"
+- [x] 2.6 Commit: "Phase 2: runtime sprite-stack for state overlays"
 
 ## Phase 3 — DistrictSkinLayer
 - [ ] 3.1 Erweitere PaintContext um district (mitte|prenzlauer|kreuzberg|charlottenburg|wedding|neukoelln).

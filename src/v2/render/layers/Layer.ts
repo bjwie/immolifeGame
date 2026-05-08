@@ -70,12 +70,11 @@ export interface PaintColors {
 }
 
 export function colorsFor(s: BuildingStyle): PaintColors {
-  const condFactor = Math.max(0.4, s.condition / 100)
   return {
-    wall: mixColor(s.wallColor, DAMAGE_TINT, 1 - condFactor),
-    roof: mixColor(s.roofColor, DAMAGE_TINT, 1 - condFactor),
-    trim: mixColor(s.trimColor, DAMAGE_TINT, 1 - condFactor),
-    accent: mixColor(s.accentColor, DAMAGE_TINT, 1 - condFactor),
-    window: s.condition < 30 ? mixColor(s.windowColor, 0x102030, 0.6) : s.windowColor,
+    wall: s.wallColor,
+    roof: s.roofColor,
+    trim: s.trimColor,
+    accent: s.accentColor,
+    window: s.windowColor,
   }
 }

@@ -214,61 +214,63 @@ export class CityScene extends Phaser.Scene {
         this.buildingByPropertyId.delete(id)
       }
     }
-    // add new / refresh existing
+    // add new / update existing
     for (const p of allProps.values()) {
       const isOwned = p.state === 'owned'
       const existing = this.buildingByPropertyId.get(p.id)
       if (existing) {
-        // if ownership flipped (or any other state change requiring new handler),
-        // tear down and respawn so click/hover closures match the new state
-        const wasOwned = (existing as any)._isOwned === true
-        if (wasOwned !== isOwned) {
-          existing.destroy()
-          this.buildingByPropertyId.delete(p.id)
-          this.spawnPropertySprite(p, isOwned)
-        } else {
-          // just refresh texture if condition tier changed
-          const style = BuildingRenderer.rollStyle(p.type, p.styleSeed, Math.round(p.condition / 5) * 5)
-          const key = BuildingRenderer.ensureTexture(this, style, isOwned, p.styleSeed)
-          const img = existing.getAt(0) as Phaser.GameObjects.Image
-          if (img && img.texture.key !== key) img.setTexture(key)
-        }
+        this.updatePropertySprite(existing, p, isOwned)
       } else {
         this.spawnPropertySprite(p, isOwned)
       }
     }
   }
 
+  private updatePropertySprite(container: Phaser.GameObjects.Container, p: Property, isOwned: boolean) {
+    const wasOwned = (container as any)._isOwned === true
+    const style = BuildingRenderer.rollStyle(p.type, p.styleSeed, Math.round(p.condition / 5) * 5)
+
+    // refresh base texture (rare change — only if dimensions/colors mutated)
+    const key = BuildingRenderer.ensureTexture(this, style, p.styleSeed)
+    const baseImg = container.getAt(0) as Phaser.GameObjects.Image
+    if (baseImg && baseImg.texture.key !== key) baseImg.setTexture(key)
+
+    // re-apply runtime overlays (always — covers condition + ownership changes)
+    BuildingRenderer.applyRuntimeOverlays(this, container, style, isOwned, p.styleSeed)
+
+    // ownership flipped: toggle for-sale tag and update click-handler closure cache
+    if (wasOwned !== isOwned) {
+      this.setForSaleTag(container, p, isOwned)
+      ;(container as any)._isOwned = isOwned
+      ;(container as any)._propRef = p
+    } else {
+      // keep property reference fresh (price etc. may have changed)
+      ;(container as any)._propRef = p
+      this.refreshForSaleTagText(container, p, isOwned)
+    }
+  }
+
   private spawnPropertySprite(p: Property, isOwned: boolean) {
     const style = BuildingRenderer.rollStyle(p.type, p.styleSeed, Math.round(p.condition / 5) * 5)
-    const key = BuildingRenderer.ensureTexture(this, style, isOwned, p.styleSeed)
+    const key = BuildingRenderer.ensureTexture(this, style, p.styleSeed)
     const pos = this.city.tileToWorld(p.tileX, p.tileY)
     const container = this.add.container(pos.x, pos.y)
     const img = this.add.image(0, 0, key).setOrigin(0.5, 0.85) // anchor at base
     container.add(img)
 
-    // for-sale price tag bobbing above the building
-    if (!isOwned) {
-      const tagBg = this.add.rectangle(0, -img.height + 12, 70, 18, 0x131c28, 0.95)
-        .setStrokeStyle(1, 0x4eb4e0)
-      const tagTxt = this.add.text(0, -img.height + 12, formatEuro(p.price), {
-        fontFamily: 'monospace', fontSize: '11px', color: '#ffffff', fontStyle: 'bold',
-      }).setOrigin(0.5)
-      container.add(tagBg)
-      container.add(tagTxt)
-      this.tweens.add({ targets: [tagBg, tagTxt], y: '-=4', duration: 1200, ease: 'Sine.inOut', yoyo: true, repeat: -1 })
-      ;(container as any)._tag = tagTxt
-    }
+    BuildingRenderer.applyRuntimeOverlays(this, container, style, isOwned, p.styleSeed)
+    this.setForSaleTag(container, p, isOwned)
 
     container.setSize(style.width, style.height)
     container.setInteractive(new Phaser.Geom.Rectangle(-style.width / 2, -style.height + 6, style.width, style.height), Phaser.Geom.Rectangle.Contains)
 
     container.on('pointerover', () => {
-      // Don't show hover tooltip while any modal covers the world.
       if (ModalManager.get().size() > 0) return
       this.tweens.add({ targets: img, scale: 1.06, duration: 140, ease: 'Sine.out' })
       this.hoveredPropertyId = p.id
-      this.showTooltip(p, container.x, container.y, isOwned)
+      const ownedNow = (container as any)._isOwned === true
+      const propNow = (container as any)._propRef as Property
+      this.showTooltip(propNow, container.x, container.y, ownedNow)
       this.input.setDefaultCursor('pointer')
     })
     container.on('pointerout', () => {
@@ -280,24 +282,54 @@ export class CityScene extends Phaser.Scene {
       this.input.setDefaultCursor('default')
     })
     container.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
-      // Defensive: if any modal is open, the click belongs to the modal, not
-      // to a building behind it. Phaser's pointer events can leak through if
-      // a modal closes between mousedown and the event reaching the canvas.
       if (ModalManager.get().size() > 0) return
-      // ignore if it was a pan drag
       if (pointer.getDistance && pointer.getDistance() > 6) return
-      // ignore right click / middle click — they are pan
       const ev = pointer.event as MouseEvent | undefined
       if (ev && (ev.button === 2 || ev.button === 1 || ev.shiftKey)) return
-      // hide tooltip on click — modal will overlap it
       this.hoveredPropertyId = null
       this.hideTooltip()
-      this.deal.open(p, isOwned)
+      const ownedNow = (container as any)._isOwned === true
+      const propNow = (container as any)._propRef as Property
+      this.deal.open(propNow, ownedNow)
     })
 
     ;(container as any)._isOwned = isOwned
+    ;(container as any)._propRef = p
     this.propertyLayer.add(container)
     this.buildingByPropertyId.set(p.id, container)
+  }
+
+  private setForSaleTag(container: Phaser.GameObjects.Container, p: Property, isOwned: boolean) {
+    const oldBg = (container as any)._tagBg as Phaser.GameObjects.Rectangle | undefined
+    const oldTxt = (container as any)._tag as Phaser.GameObjects.Text | undefined
+    const oldTween = (container as any)._tagTween as Phaser.Tweens.Tween | undefined
+    if (oldTween) oldTween.stop()
+    if (oldBg) oldBg.destroy()
+    if (oldTxt) oldTxt.destroy()
+    ;(container as any)._tagBg = null
+    ;(container as any)._tag = null
+    ;(container as any)._tagTween = null
+
+    if (isOwned) return
+
+    const baseImg = container.getAt(0) as Phaser.GameObjects.Image
+    const yTop = -(baseImg?.height ?? 90) + 12
+    const tagBg = this.add.rectangle(0, yTop, 70, 18, 0x131c28, 0.95).setStrokeStyle(1, 0x4eb4e0)
+    const tagTxt = this.add.text(0, yTop, formatEuro(p.price), {
+      fontFamily: 'monospace', fontSize: '11px', color: '#ffffff', fontStyle: 'bold',
+    }).setOrigin(0.5)
+    container.add(tagBg)
+    container.add(tagTxt)
+    const tween = this.tweens.add({ targets: [tagBg, tagTxt], y: '-=4', duration: 1200, ease: 'Sine.inOut', yoyo: true, repeat: -1 })
+    ;(container as any)._tagBg = tagBg
+    ;(container as any)._tag = tagTxt
+    ;(container as any)._tagTween = tween
+  }
+
+  private refreshForSaleTagText(container: Phaser.GameObjects.Container, p: Property, isOwned: boolean) {
+    if (isOwned) return
+    const tagTxt = (container as any)._tag as Phaser.GameObjects.Text | undefined
+    if (tagTxt) tagTxt.setText(formatEuro(p.price))
   }
 
   private showTooltip(p: Property, worldX: number, worldY: number, isOwned: boolean) {

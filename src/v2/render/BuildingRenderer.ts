@@ -1,5 +1,5 @@
 import Phaser from 'phaser'
-import { BakedLayer, PaintContext, mulberry32 } from './layers/Layer'
+import { BakedLayer, RuntimeLayer, PaintContext, mulberry32 } from './layers/Layer'
 import { HouseBase } from './layers/base/HouseBase'
 import { VillaBase } from './layers/base/VillaBase'
 import { ApartmentBase } from './layers/base/ApartmentBase'
@@ -57,11 +57,16 @@ const PALETTES: Record<BuildingKind, Array<Omit<BuildingStyle, 'kind' | 'width' 
   ],
 }
 
-const LAYER_PIPELINE: BakedLayer[] = [
+const BAKED_PIPELINE: BakedLayer[] = [
   HouseBase, VillaBase, ApartmentBase, ShopBase, OfficeBase, TowerBase,
+]
+
+const RUNTIME_LAYERS: RuntimeLayer[] = [
   ConditionPatinaLayer,
   OwnedBadgeLayer,
 ]
+
+const RUNTIME_LAYER_TAG = '_layerId'
 
 export class BuildingRenderer {
   private static textureCache = new Map<string, true>()
@@ -121,28 +126,28 @@ export class BuildingRenderer {
     }
   }
 
-  static textureKey(style: BuildingStyle, ownedBadge: boolean = false): string {
+  static textureKey(style: BuildingStyle): string {
     const ctx: PaintContext = {
       kind: style.kind,
       style,
       condition: style.condition,
-      ownedBadge,
+      ownedBadge: false,
       seed: 0,
     }
     const parts: string[] = []
-    for (const layer of LAYER_PIPELINE) {
+    for (const layer of BAKED_PIPELINE) {
       if (layer.applies(ctx)) parts.push(layer.key(ctx))
     }
     return parts.join('|')
   }
 
-  static ensureTexture(scene: Phaser.Scene, style: BuildingStyle, ownedBadge: boolean = false, seed?: number): string {
+  static ensureTexture(scene: Phaser.Scene, style: BuildingStyle, seed?: number): string {
     if (typeof seed === 'number') {
       const assetKey = this.externalAssetKey(scene, style.kind, seed)
       if (assetKey) return assetKey
     }
 
-    const key = this.textureKey(style, ownedBadge)
+    const key = this.textureKey(style)
     if (this.textureCache.has(key) && scene.textures.exists(key)) {
       this.textureCache.delete(key)
       this.textureCache.set(key, true)
@@ -160,10 +165,10 @@ export class BuildingRenderer {
       kind: style.kind,
       style,
       condition: style.condition,
-      ownedBadge,
+      ownedBadge: false,
       seed: seed ?? 0,
     }
-    for (const layer of LAYER_PIPELINE) {
+    for (const layer of BAKED_PIPELINE) {
       if (layer.applies(ctx)) layer.paint(g, ctx, padding, padding)
     }
 
@@ -178,6 +183,38 @@ export class BuildingRenderer {
       if (scene.textures.exists(oldest)) scene.textures.remove(oldest)
     }
     return key
+  }
+
+  /** Mount runtime overlay sprites (badge, patina, etc.) into the property container.
+   *  Idempotent — always clears existing runtime overlays before re-mounting.
+   *  Insert position: index 1 (just above the base sprite). */
+  static applyRuntimeOverlays(
+    scene: Phaser.Scene,
+    container: Phaser.GameObjects.Container,
+    style: BuildingStyle,
+    isOwned: boolean,
+    seed?: number,
+  ): void {
+    const existing = container.list.filter(
+      (o: any) => o[RUNTIME_LAYER_TAG] !== undefined,
+    )
+    for (const o of existing) o.destroy()
+
+    const ctx: PaintContext = {
+      kind: style.kind,
+      style,
+      condition: style.condition,
+      ownedBadge: isOwned,
+      seed: seed ?? 0,
+    }
+    let insertAt = 1
+    for (const layer of RUNTIME_LAYERS) {
+      if (!layer.applies(ctx)) continue
+      const obj = layer.mount(scene, ctx)
+      ;(obj as any)[RUNTIME_LAYER_TAG] = layer.id
+      container.addAt(obj, insertAt)
+      insertAt++
+    }
   }
 
   private static drawShadow(g: Phaser.GameObjects.Graphics, cx: number, cy: number, radius: number) {
