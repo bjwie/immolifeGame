@@ -33,9 +33,9 @@
 - [x] 2.6 Commit: "Phase 2: runtime sprite-stack for state overlays"
 
 ## Phase 3 — DistrictSkinLayer
-- [ ] 3.1 Erweitere PaintContext um district (mitte|prenzlauer|kreuzberg|charlottenburg|wedding|neukoelln).
+- [x] 3.1 Erweitere PaintContext um district (mitte|prenzlauer|kreuzberg|charlottenburg|wedding|neukoelln).
        CityScene/CityRenderer reicht district mit, wenn Building gespawnt wird.
-- [ ] 3.2 Lege layers/DistrictSkinLayer.ts an als BakedLayer. Pro District eine Skin-Definition:
+- [x] 3.2 Lege layers/DistrictSkinLayer.ts an als BakedLayer. Pro District eine Skin-Definition:
        - mitte: clean, kuehl, weiss/grau-bias, mehr Glas
        - prenzlauer: Altbau-warmth, Erker-Hint, beige/sand
        - kreuzberg: Graffiti-Tags am Sockel (kleine Pixel-Glyphen), saturierter, gruen/orange-Akzente
@@ -43,11 +43,11 @@
        - wedding: utilitaer, kuehlgrau, weniger Akzentfarbe
        - neukoelln: warme Mid-tones, mehr Schilder/Markisen-Hint
        Skin moduliert die palette des base UND zeichnet 1-3 distinkte Motiv-Pixel-Glyphen.
-- [ ] 3.3 Wire district in BuildingRenderer.ensureTexture und in textureKey ein.
-- [ ] 3.4 `npm run build` gruen. Dev: Stadtansicht zeigt sichtbar verschiedene Distrikte.
+- [x] 3.3 Wire district in BuildingRenderer.ensureTexture und in textureKey ein.
+- [x] 3.4 `npm run build` gruen. Dev: Stadtansicht zeigt sichtbar verschiedene Distrikte.
        Screenshot mit weit rausgezoomter Kamera (preview_eval kann camera.zoom setzen),
        6 Distrikte erkennbar unterschiedlich.
-- [ ] 3.5 Commit: "Phase 3: per-district visual skins"
+- [x] 3.5 Commit: "Phase 3: per-district visual skins"
 
 ## Phase 4 — RenovationScaffoldLayer + OccupancyMarkerLayer
 - [ ] 4.1 layers/RenovationScaffoldLayer.ts als RuntimeLayer:

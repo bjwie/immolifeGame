@@ -231,12 +231,12 @@ export class CityScene extends Phaser.Scene {
     const style = BuildingRenderer.rollStyle(p.type, p.styleSeed, Math.round(p.condition / 5) * 5)
 
     // refresh base texture (rare change — only if dimensions/colors mutated)
-    const key = BuildingRenderer.ensureTexture(this, style, p.styleSeed)
+    const key = BuildingRenderer.ensureTexture(this, style, p.styleSeed, p.district)
     const baseImg = container.getAt(0) as Phaser.GameObjects.Image
     if (baseImg && baseImg.texture.key !== key) baseImg.setTexture(key)
 
     // re-apply runtime overlays (always — covers condition + ownership changes)
-    BuildingRenderer.applyRuntimeOverlays(this, container, style, isOwned, p.styleSeed)
+    BuildingRenderer.applyRuntimeOverlays(this, container, style, isOwned, p.styleSeed, p.district)
 
     // ownership flipped: toggle for-sale tag and update click-handler closure cache
     if (wasOwned !== isOwned) {
@@ -252,13 +252,13 @@ export class CityScene extends Phaser.Scene {
 
   private spawnPropertySprite(p: Property, isOwned: boolean) {
     const style = BuildingRenderer.rollStyle(p.type, p.styleSeed, Math.round(p.condition / 5) * 5)
-    const key = BuildingRenderer.ensureTexture(this, style, p.styleSeed)
+    const key = BuildingRenderer.ensureTexture(this, style, p.styleSeed, p.district)
     const pos = this.city.tileToWorld(p.tileX, p.tileY)
     const container = this.add.container(pos.x, pos.y)
     const img = this.add.image(0, 0, key).setOrigin(0.5, 0.85) // anchor at base
     container.add(img)
 
-    BuildingRenderer.applyRuntimeOverlays(this, container, style, isOwned, p.styleSeed)
+    BuildingRenderer.applyRuntimeOverlays(this, container, style, isOwned, p.styleSeed, p.district)
     this.setForSaleTag(container, p, isOwned)
 
     container.setSize(style.width, style.height)

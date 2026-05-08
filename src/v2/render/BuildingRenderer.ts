@@ -8,6 +8,7 @@ import { OfficeBase } from './layers/base/OfficeBase'
 import { TowerBase } from './layers/base/TowerBase'
 import { ConditionPatinaLayer } from './layers/ConditionPatinaLayer'
 import { OwnedBadgeLayer } from './layers/OwnedBadgeLayer'
+import { DistrictSkinLayer } from './layers/DistrictSkinLayer'
 
 export type BuildingKind = 'house' | 'apartment' | 'office' | 'shop' | 'tower' | 'villa'
 
@@ -59,6 +60,7 @@ const PALETTES: Record<BuildingKind, Array<Omit<BuildingStyle, 'kind' | 'width' 
 
 const BAKED_PIPELINE: BakedLayer[] = [
   HouseBase, VillaBase, ApartmentBase, ShopBase, OfficeBase, TowerBase,
+  DistrictSkinLayer,
 ]
 
 const RUNTIME_LAYERS: RuntimeLayer[] = [
@@ -126,13 +128,14 @@ export class BuildingRenderer {
     }
   }
 
-  static textureKey(style: BuildingStyle): string {
+  static textureKey(style: BuildingStyle, district?: string): string {
     const ctx: PaintContext = {
       kind: style.kind,
       style,
       condition: style.condition,
       ownedBadge: false,
       seed: 0,
+      district,
     }
     const parts: string[] = []
     for (const layer of BAKED_PIPELINE) {
@@ -141,13 +144,13 @@ export class BuildingRenderer {
     return parts.join('|')
   }
 
-  static ensureTexture(scene: Phaser.Scene, style: BuildingStyle, seed?: number): string {
+  static ensureTexture(scene: Phaser.Scene, style: BuildingStyle, seed?: number, district?: string): string {
     if (typeof seed === 'number') {
       const assetKey = this.externalAssetKey(scene, style.kind, seed)
       if (assetKey) return assetKey
     }
 
-    const key = this.textureKey(style)
+    const key = this.textureKey(style, district)
     if (this.textureCache.has(key) && scene.textures.exists(key)) {
       this.textureCache.delete(key)
       this.textureCache.set(key, true)
@@ -167,6 +170,7 @@ export class BuildingRenderer {
       condition: style.condition,
       ownedBadge: false,
       seed: seed ?? 0,
+      district,
     }
     for (const layer of BAKED_PIPELINE) {
       if (layer.applies(ctx)) layer.paint(g, ctx, padding, padding)
@@ -194,6 +198,7 @@ export class BuildingRenderer {
     style: BuildingStyle,
     isOwned: boolean,
     seed?: number,
+    district?: string,
   ): void {
     const existing = container.list.filter(
       (o: any) => o[RUNTIME_LAYER_TAG] !== undefined,
@@ -206,6 +211,7 @@ export class BuildingRenderer {
       condition: style.condition,
       ownedBadge: isOwned,
       seed: seed ?? 0,
+      district,
     }
     let insertAt = 1
     for (const layer of RUNTIME_LAYERS) {
