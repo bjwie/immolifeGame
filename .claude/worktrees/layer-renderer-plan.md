@@ -65,16 +65,16 @@
 - [x] 4.5 Commit: "Phase 4: scaffold + occupancy state overlays"
 
 ## Phase 5 — Apartment-Subtypen (Altbau/Plattenbau/Neubau)
-- [ ] 5.1 Erweitere BuildingStyle um optional subtype: 'altbau' | 'plattenbau' | 'neubau' (nur fuer apartment).
+- [x] 5.1 Erweitere BuildingStyle um optional subtype: 'altbau' | 'plattenbau' | 'neubau' (nur fuer apartment).
        BuildingRenderer.rollStyle: subtype seed-deterministisch rollen, optional district-gewichtet
        (Plattenbau wahrscheinlicher in wedding/neukoelln, Altbau in prenzlauer/charlottenburg).
-- [ ] 5.2 Splitte ApartmentBase.ts in 3 Varianten mit klar verschiedener Optik:
+- [x] 5.2 Splitte ApartmentBase.ts in 3 Varianten mit klar verschiedener Optik:
        - altbau: Erker, Stuck am Sims, hohe schmale Fenster, warme Palette
        - plattenbau: Raster-Fenster gleichmaessig, kuehl-grau, repetitiv, Beton-Akzent
        - neubau: grosse Glasflaechen, klare Linien, weiss/anthrazit
-- [ ] 5.3 textureKey enthaelt subtype.
-- [ ] 5.4 `npm run build` gruen. Dev: mehrere Apartments nebeneinander zeigen 3 unterscheidbare Subtypen.
-- [ ] 5.5 Commit: "Phase 5: apartment subtypes (altbau/plattenbau/neubau)"
+- [x] 5.3 textureKey enthaelt subtype.
+- [x] 5.4 `npm run build` gruen. Dev: mehrere Apartments nebeneinander zeigen 3 unterscheidbare Subtypen.
+- [x] 5.5 Commit: "Phase 5: apartment subtypes (altbau/plattenbau/neubau)"
 
 ## Phase 6 — Polish + Cleanup
 - [ ] 6.1 PNG-Asset-Override (preloadAssets) narrowen: Asset-Texture ersetzt nur die BASE,

@@ -228,7 +228,7 @@ export class CityScene extends Phaser.Scene {
 
   private updatePropertySprite(container: Phaser.GameObjects.Container, p: Property, isOwned: boolean) {
     const wasOwned = (container as any)._isOwned === true
-    const style = BuildingRenderer.rollStyle(p.type, p.styleSeed, Math.round(p.condition / 5) * 5)
+    const style = BuildingRenderer.rollStyle(p.type, p.styleSeed, Math.round(p.condition / 5) * 5, p.district)
 
     // refresh base texture (rare change — only if dimensions/colors mutated)
     const key = BuildingRenderer.ensureTexture(this, style, p.styleSeed, p.district)
@@ -251,7 +251,7 @@ export class CityScene extends Phaser.Scene {
   }
 
   private spawnPropertySprite(p: Property, isOwned: boolean) {
-    const style = BuildingRenderer.rollStyle(p.type, p.styleSeed, Math.round(p.condition / 5) * 5)
+    const style = BuildingRenderer.rollStyle(p.type, p.styleSeed, Math.round(p.condition / 5) * 5, p.district)
     const key = BuildingRenderer.ensureTexture(this, style, p.styleSeed, p.district)
     const pos = this.city.tileToWorld(p.tileX, p.tileY)
     const container = this.add.container(pos.x, pos.y)

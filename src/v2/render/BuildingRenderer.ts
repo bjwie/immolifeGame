@@ -14,6 +14,7 @@ import { OccupancyMarkerLayer } from './layers/OccupancyMarkerLayer'
 import type { Property } from '../sim/types'
 
 export type BuildingKind = 'house' | 'apartment' | 'office' | 'shop' | 'tower' | 'villa'
+export type ApartmentSubtype = 'altbau' | 'plattenbau' | 'neubau'
 
 export interface BuildingStyle {
   kind: BuildingKind
@@ -29,6 +30,7 @@ export interface BuildingStyle {
   litWindows: boolean
   hasSign: boolean
   signColor?: number
+  subtype?: ApartmentSubtype
 }
 
 const PALETTES: Record<BuildingKind, Array<Omit<BuildingStyle, 'kind' | 'width' | 'height' | 'floors' | 'condition' | 'litWindows' | 'hasSign' | 'signColor'>>> = {
@@ -106,11 +108,12 @@ export class BuildingRenderer {
     return null
   }
 
-  static rollStyle(kind: BuildingKind, seed: number, condition: number = 100): BuildingStyle {
+  static rollStyle(kind: BuildingKind, seed: number, condition: number = 100, district?: string): BuildingStyle {
     const rng = mulberry32(seed)
     const palette = PALETTES[kind]
     const p = palette[Math.floor(rng() * palette.length)]
     const sizeProfile = this.sizeFor(kind, rng)
+    const subtype = kind === 'apartment' ? this.rollApartmentSubtype(rng, district) : undefined
     return {
       kind,
       ...p,
@@ -119,7 +122,28 @@ export class BuildingRenderer {
       litWindows: rng() > 0.4,
       hasSign: kind === 'shop' || (kind === 'office' && rng() > 0.6),
       signColor: kind === 'shop' ? [0xc02040, 0x208844, 0x2050a8, 0xc06820][Math.floor(rng() * 4)] : 0xc02040,
+      subtype,
     }
+  }
+
+  private static rollApartmentSubtype(rng: () => number, district?: string): ApartmentSubtype {
+    // District weighting: Plattenbau more likely in wedding/neukoelln,
+    // Altbau more likely in prenzlauer/charlottenburg, Neubau in mitte.
+    const weights: { altbau: number; plattenbau: number; neubau: number } = (() => {
+      switch (district) {
+        case 'prenzlauer': return { altbau: 0.65, plattenbau: 0.10, neubau: 0.25 }
+        case 'charlottenburg': return { altbau: 0.55, plattenbau: 0.10, neubau: 0.35 }
+        case 'mitte': return { altbau: 0.20, plattenbau: 0.10, neubau: 0.70 }
+        case 'wedding': return { altbau: 0.20, plattenbau: 0.55, neubau: 0.25 }
+        case 'neukoelln': return { altbau: 0.30, plattenbau: 0.45, neubau: 0.25 }
+        case 'kreuzberg': return { altbau: 0.45, plattenbau: 0.25, neubau: 0.30 }
+        default: return { altbau: 0.40, plattenbau: 0.30, neubau: 0.30 }
+      }
+    })()
+    const r = rng()
+    if (r < weights.altbau) return 'altbau'
+    if (r < weights.altbau + weights.plattenbau) return 'plattenbau'
+    return 'neubau'
   }
 
   private static sizeFor(kind: BuildingKind, rng: () => number) {
