@@ -45,8 +45,6 @@ export function mulberry32(a: number) {
   }
 }
 
-export const DAMAGE_TINT = 0x3a2820
-
 export function drawWindow(
   g: Phaser.GameObjects.Graphics,
   x: number, y: number, w: number, h: number,

@@ -77,14 +77,14 @@
 - [x] 5.5 Commit: "Phase 5: apartment subtypes (altbau/plattenbau/neubau)"
 
 ## Phase 6 — Polish + Cleanup
-- [ ] 6.1 PNG-Asset-Override (preloadAssets) narrowen: Asset-Texture ersetzt nur die BASE,
+- [x] 6.1 PNG-Asset-Override (preloadAssets) narrowen: Asset-Texture ersetzt nur die BASE,
        alle RuntimeLayer (badge, patina, scaffold, occupancy) laufen weiterhin drueber.
-- [ ] 6.2 LRU-Cache MAX_CACHE Cap pruefen — sollte mit Phase 2 deutlich kleiner werden, ggf. auf 200 senken.
-- [ ] 6.3 BuildingRenderer-Klasse final pruefen: ist sie jetzt deep (kleines Interface,
+- [x] 6.2 LRU-Cache MAX_CACHE Cap pruefen — sollte mit Phase 2 deutlich kleiner werden, ggf. auf 200 senken.
+- [x] 6.3 BuildingRenderer-Klasse final pruefen: ist sie jetzt deep (kleines Interface,
        viel Verhalten)? ensureTexture+rollStyle sollten die einzigen oeffentlichen Methoden bleiben.
        Alles drawX, drawWindow etc. sind Layer-intern.
-- [ ] 6.4 Lese den finalen Renderer + Layer-Verzeichnis durch. Tote Methoden loeschen
+- [x] 6.4 Lese den finalen Renderer + Layer-Verzeichnis durch. Tote Methoden loeschen
        (CLAUDE.md sagt: keine backwards-compat Hacks).
-- [ ] 6.5 `npm run build` gruen, Dev-Server: vollstaendiger Smoke-Test (kaufen, vermieten,
+- [x] 6.5 `npm run build` gruen, Dev-Server: vollstaendiger Smoke-Test (kaufen, vermieten,
        renovieren, verkaufen) ohne visuelle Glitches. Final-Screenshots vom Stadtbild.
-- [ ] 6.6 Commit: "Phase 6: polish, narrow asset override, cleanup"
+- [x] 6.6 Commit: "Phase 6: polish, narrow asset override, cleanup"

@@ -79,7 +79,9 @@ const RUNTIME_LAYER_TAG = '_layerId'
 
 export class BuildingRenderer {
   private static textureCache = new Map<string, true>()
-  private static MAX_CACHE = 500
+  /** Realistic upper bound: 6 kinds × ~3 paletteVariants × 6 districts × (apartment also × 3 subtypes)
+   *  ≈ 200 unique base textures. Cap covers it with headroom for sign variants. */
+  private static MAX_CACHE = 200
 
   static preloadAssets(scene: Phaser.Scene) {
     scene.load.on('loaderror', (file: any) => {
@@ -99,6 +101,10 @@ export class BuildingRenderer {
     }
   }
 
+  /** Returns an asset PNG texture key if one is loaded for this kind, else null.
+   *  When a PNG asset is used, the BAKED_PIPELINE (base + districtSkin) is bypassed —
+   *  the asset replaces both. Runtime overlays (badge, patina, scaffold, occupancy)
+   *  still mount on top via applyRuntimeOverlays, so state-driven visuals remain. */
   private static externalAssetKey(scene: Phaser.Scene, kind: BuildingKind, seed: number): string | null {
     for (let i = 0; i < 4; i++) {
       const idx = (seed + i) & 3
@@ -157,7 +163,7 @@ export class BuildingRenderer {
     }
   }
 
-  static textureKey(style: BuildingStyle, district?: string): string {
+  private static textureKey(style: BuildingStyle, district?: string): string {
     const ctx: PaintContext = {
       kind: style.kind,
       style,
