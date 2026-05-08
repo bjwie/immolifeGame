@@ -101,6 +101,18 @@ export class CityScene extends Phaser.Scene {
     this.engine.on('leaseSigned', () => this.refreshProperties())
     this.engine.on('month', () => this.refreshProperties())
     this.engine.on('reset', () => this.refreshProperties())
+    this.engine.on('districtUnlocked', (data: { id: string; name: string; label: string }) => {
+      this.city.unlockDistrictVisual(data.id as any)
+      this.hud.toast(`${data.name} freigeschaltet!`, 'success')
+      this.refreshProperties()
+    })
+
+    // Reconcile: a save may have districts already unlocked from a previous
+    // session, but the freshly-generated layout marks them locked. Sync the
+    // visual to state without firing a toast.
+    for (const id of this.engine.state.unlockedDistricts) {
+      this.city.unlockDistrictVisual(id as any)
+    }
 
     // Input
     this.setupInput()

@@ -39,6 +39,11 @@ export class CityRenderer {
   private scene: Phaser.Scene
   layout: CityLayout
   rng: () => number
+  /** Per-district lock overlay graphics, kept so we can fade them out on unlock. */
+  private lockOverlays = new Map<DistrictId, Phaser.GameObjects.Graphics>()
+  /** Per-district banner pieces (bg + main label text + sub-text), kept so we can
+   *  swap from "GESPERRT - Name" to plain name and update progress sub-text. */
+  private banners = new Map<DistrictId, { bg: Phaser.GameObjects.Rectangle; text: Phaser.GameObjects.Text; sub?: Phaser.GameObjects.Text }>()
 
   constructor(scene: Phaser.Scene, tileSize: number = 48, seed: number = 1234) {
     this.scene = scene
@@ -158,49 +163,93 @@ export class CityRenderer {
       }
     }
 
-    // Locked districts: dark wash + diagonal stripe overlay so they read as
-    // "off limits" without hiding the underlying layout.
-    for (const d of districts) {
-      if (!d.locked) continue
-      const dx = d.bounds.x * tileSize
-      const dy = d.bounds.y * tileSize
-      const dw = d.bounds.w * tileSize
-      const dh = d.bounds.h * tileSize
-      g.fillStyle(0x0a1018, 0.55)
-      g.fillRect(dx, dy, dw, dh)
-      // diagonal hatch
-      g.fillStyle(0x404a58, 0.35)
-      const stripeStep = 16
-      for (let off = -dh; off < dw; off += stripeStep) {
-        for (let s2 = 0; s2 < dh; s2 += 2) {
-          const sx = dx + off + s2
-          if (sx < dx || sx >= dx + dw) continue
-          g.fillRect(sx, dy + s2, 4, 1)
-        }
-      }
-    }
-
     g.generateTexture('city-bg', tilesW * tileSize, tilesH * tileSize)
     g.destroy()
 
     const bg = this.scene.add.image(0, 0, 'city-bg').setOrigin(0)
     container.add(bg)
 
-    // labels rendered as text on top so they're crisp
+    // Locked-district overlays: NOT baked into city-bg so we can fade them
+    // out on unlock without re-baking the whole world texture.
     for (const d of districts) {
-      const lx = d.bounds.x * tileSize + 6
-      const ly = d.bounds.y * tileSize + 4
-      const display = d.locked ? `GESPERRT - ${d.name}` : d.name
-      const labelText = this.scene.add.text(lx + 6, ly + 1, display.toUpperCase(), {
-        fontFamily: 'monospace', fontSize: '10px',
-        color: d.locked ? '#cfd6df' : '#ffffff',
-        fontStyle: 'bold',
+      if (!d.locked) continue
+      const overlay = this.buildLockOverlay(d, tileSize)
+      this.lockOverlays.set(d.id, overlay)
+      container.add(overlay)
+    }
+
+    // Banners: kept in a Map so we can update them on unlock.
+    for (const d of districts) {
+      this.mountBanner(d, tileSize, container)
+    }
+  }
+
+  private buildLockOverlay(d: DistrictDef, tileSize: number): Phaser.GameObjects.Graphics {
+    const dx = d.bounds.x * tileSize
+    const dy = d.bounds.y * tileSize
+    const dw = d.bounds.w * tileSize
+    const dh = d.bounds.h * tileSize
+    const g = this.scene.add.graphics()
+    g.fillStyle(0x0a1018, 0.55)
+    g.fillRect(dx, dy, dw, dh)
+    g.fillStyle(0x404a58, 0.35)
+    const stripeStep = 16
+    for (let off = -dh; off < dw; off += stripeStep) {
+      for (let s2 = 0; s2 < dh; s2 += 2) {
+        const sx = dx + off + s2
+        if (sx < dx || sx >= dx + dw) continue
+        g.fillRect(sx, dy + s2, 4, 1)
+      }
+    }
+    return g
+  }
+
+  private mountBanner(d: DistrictDef, tileSize: number, container: Phaser.GameObjects.Container) {
+    const lx = d.bounds.x * tileSize + 6
+    const ly = d.bounds.y * tileSize + 4
+    const display = d.locked ? `GESPERRT - ${d.name}` : d.name
+    const labelText = this.scene.add.text(lx + 6, ly + 1, display.toUpperCase(), {
+      fontFamily: 'monospace', fontSize: '10px',
+      color: d.locked ? '#cfd6df' : '#ffffff',
+      fontStyle: 'bold',
+    })
+    const w = labelText.width + 12
+    const banner = this.scene.add.rectangle(lx, ly, w, 14, d.color, d.locked ? 0.7 : 0.9).setOrigin(0)
+    banner.setStrokeStyle(1, 0x000000, d.locked ? 0.6 : 0.4)
+    container.add(banner)
+    container.add(labelText)
+    this.banners.set(d.id, { bg: banner, text: labelText })
+  }
+
+  /** Fade out the lock overlay for the given district, swap the banner styling
+   *  to the unlocked look, and mark the layout DistrictDef as unlocked.
+   *  Idempotent — repeated calls are safe (early-out if already unlocked). */
+  unlockDistrictVisual(id: DistrictId) {
+    const d = this.layout.districts.find(dd => dd.id === id)
+    if (!d || !d.locked) return
+    d.locked = false
+
+    const overlay = this.lockOverlays.get(id)
+    if (overlay) {
+      this.scene.tweens.add({
+        targets: overlay,
+        alpha: 0,
+        duration: 600,
+        ease: 'Sine.out',
+        onComplete: () => { overlay.destroy() },
       })
-      const w = labelText.width + 12
-      const banner = this.scene.add.rectangle(lx, ly, w, 14, d.color, d.locked ? 0.7 : 0.9).setOrigin(0)
-      banner.setStrokeStyle(1, 0x000000, d.locked ? 0.6 : 0.4)
-      container.add(banner)
-      container.add(labelText)
+      this.lockOverlays.delete(id)
+    }
+
+    const banner = this.banners.get(id)
+    if (banner) {
+      banner.text.setText(d.name.toUpperCase())
+      banner.text.setColor('#ffffff')
+      const w = banner.text.width + 12
+      banner.bg.setSize(w, 14)
+      banner.bg.setFillStyle(d.color, 0.9)
+      banner.bg.setStrokeStyle(1, 0x000000, 0.4)
+      if (banner.sub) { banner.sub.destroy(); banner.sub = undefined }
     }
   }
 

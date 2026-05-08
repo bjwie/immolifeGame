@@ -38,22 +38,22 @@ Spielfortschritt freischalten. Nach Unlock verhalten sie sich wie normale Distri
 - [x] 2.5 Commit: "Phase 2: unlock conditions + monthly check"
 
 ## Phase 3 — Visual unlock + Toast
-- [ ] 3.1 CityRenderer-Refactor: das Lock-Overlay (dunkler Wash + Hatch) NICHT
+- [x] 3.1 CityRenderer-Refactor: das Lock-Overlay (dunkler Wash + Hatch) NICHT
        mehr in city-bg backen. Stattdessen pro locked district eine eigene
        Phaser.GameObjects.Graphics ueber dem bg, gespeichert in einer Map
        lockOverlays: Map<DistrictId, Phaser.GameObjects.Graphics> auf der
        CityRenderer-Instanz.
-- [ ] 3.2 Banner pro District ebenfalls in Map<DistrictId, {bg, text}> halten,
+- [x] 3.2 Banner pro District ebenfalls in Map<DistrictId, {bg, text}> halten,
        damit Update moeglich.
-- [ ] 3.3 Methode CityRenderer.unlockDistrictVisual(id): Tween Overlay alpha 1->0
+- [x] 3.3 Methode CityRenderer.unlockDistrictVisual(id): Tween Overlay alpha 1->0
        (~600ms) dann destroy; Banner-Text auf normalen Namen ohne 'GESPERRT - '
        und Banner-Color auf district.color setzen; district.locked = false.
-- [ ] 3.4 CityScene auf engine 'districtUnlocked' hoeren: ruft city.unlockDistrictVisual(id),
+- [x] 3.4 CityScene auf engine 'districtUnlocked' hoeren: ruft city.unlockDistrictVisual(id),
        zeigt einen prominenten Toast ("<Name> ist jetzt freigeschaltet!", success-Stil),
        triggert refreshProperties (damit neue Listings erscheinen koennen).
-- [ ] 3.5 `npm run build` gruen. Eval-Test: districtUnlocked emittet,
+- [x] 3.5 `npm run build` gruen. Eval-Test: districtUnlocked emittet,
        Overlay faded weg, Banner aendert sich.
-- [ ] 3.6 Commit: "Phase 3: unlock animation + toast"
+- [x] 3.6 Commit: "Phase 3: unlock animation + toast"
 
 ## Phase 4 — Listings spawnen im neuen Distrikt
 - [ ] 4.1 Engine.onDistrictUnlocked: nach dem Unlock-Event sofort 1-3 Initial-Listings
