@@ -1,5 +1,6 @@
 import Phaser from 'phaser'
 import type { BuildingStyle, BuildingKind } from '../BuildingRenderer'
+import type { Property } from '../../sim/types'
 
 export interface PaintContext {
   kind: BuildingKind
@@ -9,6 +10,7 @@ export interface PaintContext {
   seed: number
   subtype?: string
   district?: string
+  property?: Property
 }
 
 export interface BakedLayer {

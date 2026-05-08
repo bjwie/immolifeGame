@@ -9,6 +9,9 @@ import { TowerBase } from './layers/base/TowerBase'
 import { ConditionPatinaLayer } from './layers/ConditionPatinaLayer'
 import { OwnedBadgeLayer } from './layers/OwnedBadgeLayer'
 import { DistrictSkinLayer } from './layers/DistrictSkinLayer'
+import { RenovationScaffoldLayer } from './layers/RenovationScaffoldLayer'
+import { OccupancyMarkerLayer } from './layers/OccupancyMarkerLayer'
+import type { Property } from '../sim/types'
 
 export type BuildingKind = 'house' | 'apartment' | 'office' | 'shop' | 'tower' | 'villa'
 
@@ -65,6 +68,8 @@ const BAKED_PIPELINE: BakedLayer[] = [
 
 const RUNTIME_LAYERS: RuntimeLayer[] = [
   ConditionPatinaLayer,
+  RenovationScaffoldLayer,
+  OccupancyMarkerLayer,
   OwnedBadgeLayer,
 ]
 
@@ -199,6 +204,7 @@ export class BuildingRenderer {
     isOwned: boolean,
     seed?: number,
     district?: string,
+    property?: Property,
   ): void {
     const existing = container.list.filter(
       (o: any) => o[RUNTIME_LAYER_TAG] !== undefined,
@@ -212,6 +218,7 @@ export class BuildingRenderer {
       ownedBadge: isOwned,
       seed: seed ?? 0,
       district,
+      property,
     }
     let insertAt = 1
     for (const layer of RUNTIME_LAYERS) {

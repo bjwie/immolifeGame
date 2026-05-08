@@ -236,7 +236,7 @@ export class CityScene extends Phaser.Scene {
     if (baseImg && baseImg.texture.key !== key) baseImg.setTexture(key)
 
     // re-apply runtime overlays (always — covers condition + ownership changes)
-    BuildingRenderer.applyRuntimeOverlays(this, container, style, isOwned, p.styleSeed, p.district)
+    BuildingRenderer.applyRuntimeOverlays(this, container, style, isOwned, p.styleSeed, p.district, p)
 
     // ownership flipped: toggle for-sale tag and update click-handler closure cache
     if (wasOwned !== isOwned) {
@@ -258,7 +258,7 @@ export class CityScene extends Phaser.Scene {
     const img = this.add.image(0, 0, key).setOrigin(0.5, 0.85) // anchor at base
     container.add(img)
 
-    BuildingRenderer.applyRuntimeOverlays(this, container, style, isOwned, p.styleSeed, p.district)
+    BuildingRenderer.applyRuntimeOverlays(this, container, style, isOwned, p.styleSeed, p.district, p)
     this.setForSaleTag(container, p, isOwned)
 
     container.setSize(style.width, style.height)

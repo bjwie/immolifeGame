@@ -50,19 +50,19 @@
 - [x] 3.5 Commit: "Phase 3: per-district visual skins"
 
 ## Phase 4 — RenovationScaffoldLayer + OccupancyMarkerLayer
-- [ ] 4.1 layers/RenovationScaffoldLayer.ts als RuntimeLayer:
+- [x] 4.1 layers/RenovationScaffoldLayer.ts als RuntimeLayer:
        applies(ctx) = ctx.engineProperty.renovation?.activeUntil > now
        mount: gelbe Geruest-Pixel-Sprites entlang einer Wand, optional kleines Kran-Element oben.
-- [ ] 4.2 layers/OccupancyMarkerLayer.ts als RuntimeLayer mit 3 Sub-Sprites:
+- [x] 4.2 layers/OccupancyMarkerLayer.ts als RuntimeLayer mit 3 Sub-Sprites:
        - vacant: kleines "ZU VERMIETEN" Schild (rot-weiss) wenn unit leer
        - nomad: kleines Warn-Icon wenn Tenant.isNomad
        - forSale: Preis-Tag (existiert evtl schon — falls ja, hier integrieren)
-- [ ] 4.3 CityScene reagiert auf engine-events (renovated, leaseSigned, month) und ruft
+- [x] 4.3 CityScene reagiert auf engine-events (renovated, leaseSigned, month) und ruft
        refreshOverlays(propertyId) — geht alle RuntimeLayer durch und mounted/entfernt.
-- [ ] 4.4 `npm run build` gruen. Dev: Renovation starten -> Geruest erscheint. Mietnomade
+- [x] 4.4 `npm run build` gruen. Dev: Renovation starten -> Geruest erscheint. Mietnomade
        erkannt -> Marker erscheint. Verkauf -> alle Overlays sauber abgebaut.
        Screenshots dokumentieren jeden State.
-- [ ] 4.5 Commit: "Phase 4: scaffold + occupancy state overlays"
+- [x] 4.5 Commit: "Phase 4: scaffold + occupancy state overlays"
 
 ## Phase 5 — Apartment-Subtypen (Altbau/Plattenbau/Neubau)
 - [ ] 5.1 Erweitere BuildingStyle um optional subtype: 'altbau' | 'plattenbau' | 'neubau' (nur fuer apartment).
