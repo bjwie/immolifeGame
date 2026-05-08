@@ -96,6 +96,7 @@ export class Engine {
       wegAssemblies: [],
       difficulty,
       rngSeed: Math.floor(Math.random() * 1_000_000),
+      unlockedDistricts: this.layout.districts.filter(d => !d.locked).map(d => d.id),
     }
   }
 
@@ -113,6 +114,19 @@ export class Engine {
 
   private districtById(id: DistrictId): DistrictDef {
     return this.layout.districts.find(d => d.id === id)!
+  }
+
+  /** True if the district is currently buildable for the player. Combines the
+   *  static layout flag with the player's runtime unlock progress. */
+  isDistrictUnlocked(id: DistrictId): boolean {
+    return this.state.unlockedDistricts.includes(id)
+  }
+
+  /** Buildable spots restricted to currently-unlocked districts.
+   *  Use this instead of layout.buildableSpots whenever the engine spawns or
+   *  filters listings, so newly-unlocked districts immediately become usable. */
+  private availableBuildableSpots() {
+    return this.layout.buildableSpots.filter(s => this.isDistrictUnlocked(s.district))
   }
 
   /**
@@ -189,11 +203,13 @@ export class Engine {
   }
 
   private genListing(rng: () => number, district?: DistrictId): Property | null {
-    // pick a random district biased towards diversity
-    const d = district ?? this.layout.districts[Math.floor(rng() * this.layout.districts.length)].id
+    // pick a district from unlocked ones (locked districts produce no listings)
+    const unlocked = this.state.unlockedDistricts
+    const d = district ?? unlocked[Math.floor(rng() * unlocked.length)]
+    if (!d || !this.isDistrictUnlocked(d)) return null
     const districtDef = this.districtById(d)
     // find a free buildable spot in this district
-    const candidates = this.layout.buildableSpots.filter(s => s.district === d && !this.occupiedSpot(s.tileX, s.tileY))
+    const candidates = this.availableBuildableSpots().filter(s => s.district === d && !this.occupiedSpot(s.tileX, s.tileY))
     if (candidates.length === 0) return null
     const spot = candidates[Math.floor(rng() * candidates.length)]
 
@@ -2122,7 +2138,7 @@ export class Engine {
     try {
       const slim = {
         state: this.state,
-        v: 3,
+        v: 4,
         ts: Date.now(),
       }
       localStorage.setItem(SAVE_KEY, JSON.stringify(slim))
@@ -2133,17 +2149,20 @@ export class Engine {
       const raw = localStorage.getItem(SAVE_KEY)
       if (!raw) return false
       const data = JSON.parse(raw)
-      // Accept v=2 (pre-locked-districts world, 36 tiles wide) and v=3
-      // (current world, 60 tiles wide with 4 locked districts on the
-      // edges). v=2 saves get their property tile coords shifted +12 so
-      // they land in the same districts after the world widened.
-      if ((data.v !== 2 && data.v !== 3) || !data.state) return false
+      // Accept v=2 (pre-locked-districts world, 36 tiles wide), v=3 (60-tile
+      // world with locked districts) and v=4 (adds player.unlockedDistricts).
+      // v=2 saves get property tile coords shifted +12; v<4 saves get
+      // unlockedDistricts seeded from the layout.
+      if ((data.v !== 2 && data.v !== 3 && data.v !== 4) || !data.state) return false
       this.state = data.state as GameState
       const fromV2 = data.v === 2
       if (fromV2) {
         const shift = (p: Property) => { p.tileX = p.tileX + 12 }
         this.state.listings.forEach(shift)
         this.state.owned.forEach(shift)
+      }
+      if (!Array.isArray(this.state.unlockedDistricts) || this.state.unlockedDistricts.length === 0) {
+        this.state.unlockedDistricts = this.layout.districts.filter(d => !d.locked).map(d => d.id)
       }
       // sanity defaults
       if (!Array.isArray(this.state.player.netWorthHistory)) this.state.player.netWorthHistory = []

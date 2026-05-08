@@ -509,6 +509,10 @@ export interface GameState {
   /** Difficulty tier picked at game start (M7). Acts as a multiplier on costs/risks. */
   difficulty: Difficulty
   rngSeed: number
+  /** District IDs the player can build/buy in. Locked districts (Spandau,
+   *  Steglitz, Lichtenberg, Marzahn) start excluded and get added when their
+   *  UnlockCondition is met. Always includes the 6 originally-playable ones. */
+  unlockedDistricts: DistrictId[]
 }
 
 export type Difficulty = 'easy' | 'standard' | 'hardcore'
