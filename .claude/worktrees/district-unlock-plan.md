@@ -19,7 +19,7 @@ Spielfortschritt freischalten. Nach Unlock verhalten sie sich wie normale Distri
 - [x] 1.6 Commit: "Phase 1: unlock state + save migration v3->v4"
 
 ## Phase 2 — Unlock conditions
-- [ ] 2.1 Neue Datei src/v2/sim/UnlockConditions.ts mit einem Record
+- [x] 2.1 Neue Datei src/v2/sim/UnlockConditions.ts mit einem Record
        Record<DistrictId, UnlockCondition | null> wobei UnlockCondition =
          { type: 'ownedCount' | 'netWorth' | 'reputation', threshold: number, label: string }
        Default-Werte:
@@ -28,14 +28,14 @@ Spielfortschritt freischalten. Nach Unlock verhalten sie sich wie normale Distri
          lichtenberg: { type: 'ownedCount', threshold: 7, label: 'Besitze 7 Immobilien' }
          marzahn:     { type: 'netWorth', threshold: 1500000, label: 'Vermoegen 1.500.000 EUR' }
        Alle anderen Districts: null (immer entsperrt).
-- [ ] 2.2 Engine.unlockProgress(id): { current, threshold, ratio, label } | null —
+- [x] 2.2 Engine.unlockProgress(id): { current, threshold, ratio, label } | null —
        null fuer bereits entsperrte oder Distrikte ohne Condition.
-- [ ] 2.3 Engine.checkDistrictUnlocks(): in processMonth() aufgerufen. Pruefe alle
+- [x] 2.3 Engine.checkDistrictUnlocks(): in processMonth() aufgerufen. Pruefe alle
        lockedDistricts. Erfuellt -> push in state.unlockedDistricts, emit
        'districtUnlocked' { id, name, label }.
-- [ ] 2.4 `npm run build` gruen. Eval-Test (preview_eval): cash hochsetzen,
+- [x] 2.4 `npm run build` gruen. Eval-Test (preview_eval): cash hochsetzen,
        processMonth() rufen, sehen dass districtUnlocked emittet wird.
-- [ ] 2.5 Commit: "Phase 2: unlock conditions + monthly check"
+- [x] 2.5 Commit: "Phase 2: unlock conditions + monthly check"
 
 ## Phase 3 — Visual unlock + Toast
 - [ ] 3.1 CityRenderer-Refactor: das Lock-Overlay (dunkler Wash + Hatch) NICHT

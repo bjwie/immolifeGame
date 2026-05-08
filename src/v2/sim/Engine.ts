@@ -1,6 +1,7 @@
 import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, CapexEvent, CapexKind, ContractorOffer, ContractorTier, GameState, GameTime, GewerkKind, GewerkStep, Lawsuit, Loan, MarketEvent, Player, Property, PropertyType, RenovationContract, RenovationScope, SellerNegotiationState, Speed, Tenant, Unit, WEGProposal } from './types'
 import type { CityLayout, DistrictDef, DistrictId } from '../render/CityRenderer'
 import { generateApplicants, pickPropertyName, pickSeller } from './names'
+import { UNLOCK_CONDITIONS, type UnlockCondition } from './UnlockConditions'
 
 type Listener = (data?: any) => void
 
@@ -127,6 +128,42 @@ export class Engine {
    *  filters listings, so newly-unlocked districts immediately become usable. */
   private availableBuildableSpots() {
     return this.layout.buildableSpots.filter(s => this.isDistrictUnlocked(s.district))
+  }
+
+  /** Current value of the unlock metric for a given district's condition.
+   *  Pure read on state — no mutation. */
+  private unlockMetric(cond: UnlockCondition): number {
+    switch (cond.type) {
+      case 'ownedCount': return this.state.owned.length
+      case 'netWorth': return this.netWorth()
+      case 'reputation': return this.state.player.reputation
+    }
+  }
+
+  /** Progress for a locked district's unlock condition.
+   *  Returns null for already-unlocked districts or districts without a
+   *  registered condition. UI calls this for the banner sub-text. */
+  unlockProgress(id: DistrictId): { current: number; threshold: number; ratio: number; label: string } | null {
+    if (this.isDistrictUnlocked(id)) return null
+    const cond = UNLOCK_CONDITIONS[id]
+    if (!cond) return null
+    const current = this.unlockMetric(cond)
+    const ratio = Math.min(1, current / cond.threshold)
+    return { current, threshold: cond.threshold, ratio, label: cond.label }
+  }
+
+  /** Walk all locked districts; if their condition is met, push onto
+   *  state.unlockedDistricts and emit 'districtUnlocked'. Called from
+   *  processMonth so unlocks happen on month boundaries. */
+  private checkDistrictUnlocks() {
+    for (const d of this.layout.districts) {
+      if (this.isDistrictUnlocked(d.id)) continue
+      const cond = UNLOCK_CONDITIONS[d.id]
+      if (!cond) continue
+      if (this.unlockMetric(cond) < cond.threshold) continue
+      this.state.unlockedDistricts.push(d.id)
+      this.emit('districtUnlocked', { id: d.id, name: d.name, label: cond.label })
+    }
   }
 
   /**
@@ -358,6 +395,9 @@ export class Engine {
     const rng = this.rng(2)
     let income = 0
     let expenses = 0
+
+    // District unlocks fire at month boundaries; emits 'districtUnlocked'
+    this.checkDistrictUnlocks()
 
     // age listings off market & age stale lifetime
     const remaining: Property[] = []
