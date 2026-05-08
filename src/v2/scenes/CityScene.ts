@@ -95,11 +95,11 @@ export class CityScene extends Phaser.Scene {
     overlay.appendChild(this.hoverDiv)
 
     // Engine -> view sync
-    this.engine.on('bought', () => this.refreshProperties())
-    this.engine.on('sold', (data: any) => { this.refreshProperties(); this.spawnCoinBurst(data.property) })
+    this.engine.on('bought', () => { this.refreshProperties(); this.refreshLockProgress() })
+    this.engine.on('sold', (data: any) => { this.refreshProperties(); this.spawnCoinBurst(data.property); this.refreshLockProgress() })
     this.engine.on('renovated', () => this.refreshProperties())
     this.engine.on('leaseSigned', () => this.refreshProperties())
-    this.engine.on('month', () => this.refreshProperties())
+    this.engine.on('month', () => { this.refreshProperties(); this.refreshLockProgress() })
     this.engine.on('reset', () => this.refreshProperties())
     this.engine.on('districtUnlocked', (data: { id: string; name: string; label: string }) => {
       this.city.unlockDistrictVisual(data.id as any)
@@ -113,6 +113,9 @@ export class CityScene extends Phaser.Scene {
     for (const id of this.engine.state.unlockedDistricts) {
       this.city.unlockDistrictVisual(id as any)
     }
+
+    // Initial sub-text on still-locked districts.
+    this.refreshLockProgress()
 
     // Input
     this.setupInput()
@@ -210,6 +213,17 @@ export class CityScene extends Phaser.Scene {
       // Only act here if nothing is open: open the main menu.
       if (ModalManager.get().size() === 0) this.menu.open()
     })
+  }
+
+  /** Pull current unlockProgress for every locked district and push it into
+   *  each banner's sub-text. Called on bought/sold/month and once on init. */
+  private refreshLockProgress() {
+    for (const d of this.city.layout.districts) {
+      if (this.engine.isDistrictUnlocked(d.id)) continue
+      const p = this.engine.unlockProgress(d.id)
+      if (!p) continue
+      this.city.updateLockBanner(d.id, { current: p.current, threshold: p.threshold })
+    }
   }
 
   private refreshProperties() {

@@ -224,6 +224,31 @@ export class CityRenderer {
     this.banners.set(d.id, { bg: banner, text: labelText })
   }
 
+  /** Refresh the progress sub-text under a locked district's banner.
+   *  Pass null to remove the sub-text (used when a district unlocks).
+   *  Idempotent: creating the sub-text on first call, mutating thereafter. */
+  updateLockBanner(id: DistrictId, progress: { current: number; threshold: number } | null) {
+    const banner = this.banners.get(id)
+    if (!banner) return
+    if (progress === null) {
+      if (banner.sub) { banner.sub.destroy(); banner.sub = undefined }
+      return
+    }
+    const subText = `${formatProgress(progress.current, progress.threshold)}`
+    if (banner.sub) {
+      banner.sub.setText(subText)
+    } else {
+      const lx = banner.bg.x + 6
+      const ly = banner.bg.y + 14
+      banner.sub = this.scene.add.text(lx + 6, ly + 1, subText, {
+        fontFamily: 'monospace', fontSize: '9px', color: '#cfd6df',
+      })
+      // sub-text sits in the same container as the banner pieces
+      const parent = banner.bg.parentContainer
+      if (parent) parent.add(banner.sub)
+    }
+  }
+
   /** Fade out the lock overlay for the given district, swap the banner styling
    *  to the unlocked look, and mark the layout DistrictDef as unlocked.
    *  Idempotent — repeated calls are safe (early-out if already unlocked). */
@@ -378,4 +403,18 @@ function mulberry32(a: number) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
+}
+
+function formatProgress(current: number, threshold: number): string {
+  // Big numbers ('Vermoegen 500.000 EUR') get k-suffix; small (counts) stay raw.
+  if (threshold >= 10_000) {
+    return `${formatBigNum(current)} / ${formatBigNum(threshold)}`
+  }
+  return `${current} / ${threshold}`
+}
+
+function formatBigNum(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M'
+  if (n >= 1_000) return Math.round(n / 1_000) + 'k'
+  return String(n)
 }

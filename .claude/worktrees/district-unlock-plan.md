@@ -67,16 +67,18 @@ Spielfortschritt freischalten. Nach Unlock verhalten sie sich wie normale Distri
 - [x] 4.4 Commit: "Phase 4: spawn listings in newly-unlocked districts"
 
 ## Phase 5 — Live-Progress im Banner
-- [ ] 5.1 CityRenderer-Banner fuer locked districts mit Sub-Text:
+- [x] 5.1 CityRenderer-Banner fuer locked districts mit Sub-Text:
        "GESPERRT - SPANDAU" + 2. Zeile "2/3 Immobilien" (kleinerer Font).
        Methode updateLockBanner(id, current, threshold).
-- [ ] 5.2 Initial-Render: nutze engine.unlockProgress(id) um Banner-Sub-Text zu setzen.
-- [ ] 5.3 Engine emit 'unlockProgress' nach jedem relevanten State-Change
+- [x] 5.2 Initial-Render: nutze engine.unlockProgress(id) um Banner-Sub-Text zu setzen.
+- [x] 5.3 Engine emit 'unlockProgress' nach jedem relevanten State-Change
        ('bought', 'sold', 'financial'). Payload: { id, current, threshold, ratio }.
-- [ ] 5.4 CityScene hoert auf 'unlockProgress', ruft city.updateLockBanner(id, ...).
-- [ ] 5.5 `npm run build` gruen. Visuell: Immobilie kaufen, Spandau-Banner
+       Vereinfachung: kein separater Event — CityScene zieht progress aktiv aus
+       bestehenden bought/sold/month-Events. Spart einen Event-Typ.
+- [x] 5.4 CityScene hoert auf 'unlockProgress', ruft city.updateLockBanner(id, ...).
+- [x] 5.5 `npm run build` gruen. Visuell: Immobilie kaufen, Spandau-Banner
        aktualisiert Zaehler live.
-- [ ] 5.6 Commit: "Phase 5: live unlock progress in locked banners"
+- [x] 5.6 Commit: "Phase 5: live unlock progress in locked banners"
 
 ## Phase 6 — Polish + Klick-Hint + Smoke-Test
 - [ ] 6.1 Klick auf gesperrte Distrikt-Tile (per CityScene Pointer-Handler ueber
