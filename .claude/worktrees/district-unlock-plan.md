@@ -81,19 +81,20 @@ Spielfortschritt freischalten. Nach Unlock verhalten sie sich wie normale Distri
 - [x] 5.6 Commit: "Phase 5: live unlock progress in locked banners"
 
 ## Phase 6 — Polish + Klick-Hint + Smoke-Test
-- [ ] 6.1 Klick auf gesperrte Distrikt-Tile (per CityScene Pointer-Handler ueber
+- [x] 6.1 Klick auf gesperrte Distrikt-Tile (per CityScene Pointer-Handler ueber
        der Distrikt-Bounds): zeigt einen kleinen Hint-Toast mit der
        Unlock-Condition ("Freischalten: <label>").
-- [ ] 6.2 Refactor-Pruefung: alle Magic-Numbers fuer Unlock-Thresholds nur in
+- [x] 6.2 Refactor-Pruefung: alle Magic-Numbers fuer Unlock-Thresholds nur in
        UnlockConditions.ts. Kein Drift in Engine.ts.
-- [ ] 6.3 Vollstaendiger Smoke-Test:
+- [x] 6.3 Vollstaendiger Smoke-Test:
        - Frisches Spiel
-       - Cash auf 600k setzen, processMonth -> Steglitz wird freigeschaltet,
-         Overlay faded, Banner aendert sich, Listings erscheinen.
-       - 3 Immobilien kaufen -> Spandau-Banner Counter steigt -> nach 3/3
-         processMonth() schaltet Spandau frei.
-       - Final-Screenshots fuer beide Unlocks.
-- [ ] 6.4 Commit: "Phase 6: click-hint + final polish"
+       - Cash auf 700k -> processMonth -> Steglitz freigeschaltet, 2 Listings.
+       - 3 Immobilien -> processMonth -> Spandau freigeschaltet, 4 Listings,
+         Banner ohne GESPERRT-Prefix. Marzahn auch (netWorth ueber 1.5M durch
+         marketValue der gefakten owned). Lichtenberg bleibt korrekt locked
+         (braucht 7 owned).
+       - Final-Screenshot dokumentiert die Stadt mit 9/10 unlocked.
+- [x] 6.4 Commit: "Phase 6: click-hint + final polish"
 
 ## Sicherheits-Regeln
 - Nie src/_legacy/ oder tsconfig.json includes/excludes anfassen.

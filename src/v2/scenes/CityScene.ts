@@ -164,7 +164,32 @@ export class CityScene extends Phaser.Scene {
         cam.setScroll(this.panStart.camX - dx, this.panStart.camY - dy)
       }
     })
-    this.input.on('pointerup', () => { this.isPanning = false })
+    this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
+      const wasPan = this.isPanning && p.getDistance && p.getDistance() > 6
+      this.isPanning = false
+      if (wasPan) return
+      const ev = p.event as MouseEvent | undefined
+      if (ev && (ev.button === 2 || ev.button === 1)) return
+      if (ModalManager.get().size() > 0) return
+      // World-space coords of the click
+      const worldX = (p.x / cam.zoom) + cam.scrollX
+      const worldY = (p.y / cam.zoom) + cam.scrollY
+      const tile = this.city.layout.tileSize
+      for (const d of this.city.layout.districts) {
+        if (this.engine.isDistrictUnlocked(d.id)) continue
+        const x0 = d.bounds.x * tile
+        const y0 = d.bounds.y * tile
+        const x1 = x0 + d.bounds.w * tile
+        const y1 = y0 + d.bounds.h * tile
+        if (worldX < x0 || worldX >= x1 || worldY < y0 || worldY >= y1) continue
+        const prog = this.engine.unlockProgress(d.id)
+        const msg = prog
+          ? `${d.name} ist gesperrt - ${prog.label} (${prog.current}/${prog.threshold})`
+          : `${d.name} ist gesperrt`
+        this.hud.toast(msg, 'info')
+        return
+      }
+    })
     this.input.on('pointerupoutside', () => { this.isPanning = false })
 
     // Zoom on wheel
