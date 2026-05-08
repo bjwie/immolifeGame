@@ -1,7 +1,9 @@
 import Phaser from 'phaser'
 
 export type TileKind = 'grass' | 'road_h' | 'road_v' | 'road_x' | 'sidewalk' | 'plaza' | 'park' | 'water'
-export type DistrictId = 'mitte' | 'prenzlauer' | 'kreuzberg' | 'charlottenburg' | 'wedding' | 'neukoelln'
+export type DistrictId =
+  | 'mitte' | 'prenzlauer' | 'kreuzberg' | 'charlottenburg' | 'wedding' | 'neukoelln'
+  | 'spandau' | 'steglitz' | 'lichtenberg' | 'marzahn'
 
 export interface DistrictDef {
   id: DistrictId
@@ -12,6 +14,10 @@ export interface DistrictDef {
   trend: number              // -2 .. +2 percentage points per year extra
   color: number              // banner color
   bounds: { x: number; y: number; w: number; h: number } // tile coordinates
+  /** Locked districts are visible at the city edges but produce no listings,
+   *  no buildings, and render with a dark overlay. They are a teaser for
+   *  future expansion. */
+  locked?: boolean
 }
 
 export interface CityLayout {
@@ -41,24 +47,32 @@ export class CityRenderer {
   }
 
   private generate(tileSize: number): CityLayout {
-    const tilesW = 36
+    const tilesW = 60
     const tilesH = 24
     const tiles: TileKind[] = new Array(tilesW * tilesH).fill('grass')
 
-    // 6 districts in a 3x2 grid
-    const dw = Math.floor(tilesW / 3)
+    // 10 districts in a 5x2 grid: 6 unlocked playable in the centre,
+    // 2 locked teasers on the left and 2 on the right.
+    const dw = Math.floor(tilesW / 5)
     const dh = Math.floor(tilesH / 2)
+    const LOCKED_GREY = 0x586878
     const districtDefs: Omit<DistrictDef, 'bounds'>[] = [
+      // row 0
+      { id: 'spandau', name: 'Spandau', desirability: 50, priceMultiplier: 1.0, rentMultiplier: 1.0, trend: 0, color: LOCKED_GREY, locked: true },
       { id: 'mitte', name: 'Mitte', desirability: 92, priceMultiplier: 1.6, rentMultiplier: 1.5, trend: 1.5, color: 0xc0392b },
       { id: 'prenzlauer', name: 'Prenzlauer Berg', desirability: 84, priceMultiplier: 1.35, rentMultiplier: 1.3, trend: 1.0, color: 0x8e44ad },
       { id: 'charlottenburg', name: 'Charlottenburg', desirability: 78, priceMultiplier: 1.2, rentMultiplier: 1.15, trend: 0.4, color: 0x2980b9 },
+      { id: 'lichtenberg', name: 'Lichtenberg', desirability: 50, priceMultiplier: 1.0, rentMultiplier: 1.0, trend: 0, color: LOCKED_GREY, locked: true },
+      // row 1
+      { id: 'steglitz', name: 'Steglitz', desirability: 50, priceMultiplier: 1.0, rentMultiplier: 1.0, trend: 0, color: LOCKED_GREY, locked: true },
       { id: 'kreuzberg', name: 'Kreuzberg', desirability: 80, priceMultiplier: 1.15, rentMultiplier: 1.2, trend: 1.2, color: 0xe67e22 },
       { id: 'neukoelln', name: 'Neukoelln', desirability: 66, priceMultiplier: 0.9, rentMultiplier: 0.95, trend: 1.4, color: 0x16a085 },
       { id: 'wedding', name: 'Wedding', desirability: 58, priceMultiplier: 0.78, rentMultiplier: 0.85, trend: 0.9, color: 0x7f8c8d },
+      { id: 'marzahn', name: 'Marzahn', desirability: 50, priceMultiplier: 1.0, rentMultiplier: 1.0, trend: 0, color: LOCKED_GREY, locked: true },
     ]
 
     const districts: DistrictDef[] = districtDefs.map((d, i) => {
-      const col = i % 3, row = Math.floor(i / 3)
+      const col = i % 5, row = Math.floor(i / 5)
       return { ...d, bounds: { x: col * dw, y: row * dh, w: dw, h: dh } }
     })
 
@@ -94,8 +108,9 @@ export class CityRenderer {
       if (tx >= 0 && tx < tilesW && ty >= 0 && ty < tilesH) tiles[ty * tilesW + tx] = 'plaza'
     }
 
-    // parks scattered: one per district, 2x2
+    // parks scattered: one per unlocked district, 2x2
     for (const d of districts) {
+      if (d.locked) continue
       const px = d.bounds.x + 1 + Math.floor(this.rng() * (d.bounds.w - 4))
       const py = d.bounds.y + 1 + Math.floor(this.rng() * (d.bounds.h - 4))
       for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
@@ -106,7 +121,7 @@ export class CityRenderer {
       }
     }
 
-    // buildable spots: grass tiles adjacent to a sidewalk or road
+    // buildable spots: grass tiles in UNLOCKED districts adjacent to a sidewalk/road
     const buildableSpots: BuildSpot[] = []
     for (let y = 0; y < tilesH; y++) {
       for (let x = 0; x < tilesW; x++) {
@@ -114,7 +129,7 @@ export class CityRenderer {
         const around = [tiles[(y - 1) * tilesW + x], tiles[(y + 1) * tilesW + x], tiles[y * tilesW + x - 1], tiles[y * tilesW + x + 1]]
         if (around.some(t => t === 'sidewalk' || t === 'road_h' || t === 'road_v' || t === 'road_x')) {
           const d = districts.find(dd => x >= dd.bounds.x && x < dd.bounds.x + dd.bounds.w && y >= dd.bounds.y && y < dd.bounds.y + dd.bounds.h)
-          if (d) buildableSpots.push({ tileX: x, tileY: y, district: d.id })
+          if (d && !d.locked) buildableSpots.push({ tileX: x, tileY: y, district: d.id })
         }
       }
     }
@@ -143,6 +158,28 @@ export class CityRenderer {
       }
     }
 
+    // Locked districts: dark wash + diagonal stripe overlay so they read as
+    // "off limits" without hiding the underlying layout.
+    for (const d of districts) {
+      if (!d.locked) continue
+      const dx = d.bounds.x * tileSize
+      const dy = d.bounds.y * tileSize
+      const dw = d.bounds.w * tileSize
+      const dh = d.bounds.h * tileSize
+      g.fillStyle(0x0a1018, 0.55)
+      g.fillRect(dx, dy, dw, dh)
+      // diagonal hatch
+      g.fillStyle(0x404a58, 0.35)
+      const stripeStep = 16
+      for (let off = -dh; off < dw; off += stripeStep) {
+        for (let s2 = 0; s2 < dh; s2 += 2) {
+          const sx = dx + off + s2
+          if (sx < dx || sx >= dx + dw) continue
+          g.fillRect(sx, dy + s2, 4, 1)
+        }
+      }
+    }
+
     g.generateTexture('city-bg', tilesW * tileSize, tilesH * tileSize)
     g.destroy()
 
@@ -153,12 +190,15 @@ export class CityRenderer {
     for (const d of districts) {
       const lx = d.bounds.x * tileSize + 6
       const ly = d.bounds.y * tileSize + 4
-      const labelText = this.scene.add.text(lx + 6, ly + 1, d.name.toUpperCase(), {
-        fontFamily: 'monospace', fontSize: '10px', color: '#ffffff', fontStyle: 'bold',
+      const display = d.locked ? `GESPERRT - ${d.name}` : d.name
+      const labelText = this.scene.add.text(lx + 6, ly + 1, display.toUpperCase(), {
+        fontFamily: 'monospace', fontSize: '10px',
+        color: d.locked ? '#cfd6df' : '#ffffff',
+        fontStyle: 'bold',
       })
       const w = labelText.width + 12
-      const banner = this.scene.add.rectangle(lx, ly, w, 14, d.color, 0.9).setOrigin(0)
-      banner.setStrokeStyle(1, 0x000000, 0.4)
+      const banner = this.scene.add.rectangle(lx, ly, w, 14, d.color, d.locked ? 0.7 : 0.9).setOrigin(0)
+      banner.setStrokeStyle(1, 0x000000, d.locked ? 0.6 : 0.4)
       container.add(banner)
       container.add(labelText)
     }

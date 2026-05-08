@@ -2122,7 +2122,7 @@ export class Engine {
     try {
       const slim = {
         state: this.state,
-        v: 2,
+        v: 3,
         ts: Date.now(),
       }
       localStorage.setItem(SAVE_KEY, JSON.stringify(slim))
@@ -2133,8 +2133,18 @@ export class Engine {
       const raw = localStorage.getItem(SAVE_KEY)
       if (!raw) return false
       const data = JSON.parse(raw)
-      if (data.v !== 2 || !data.state) return false
+      // Accept v=2 (pre-locked-districts world, 36 tiles wide) and v=3
+      // (current world, 60 tiles wide with 4 locked districts on the
+      // edges). v=2 saves get their property tile coords shifted +12 so
+      // they land in the same districts after the world widened.
+      if ((data.v !== 2 && data.v !== 3) || !data.state) return false
       this.state = data.state as GameState
+      const fromV2 = data.v === 2
+      if (fromV2) {
+        const shift = (p: Property) => { p.tileX = p.tileX + 12 }
+        this.state.listings.forEach(shift)
+        this.state.owned.forEach(shift)
+      }
       // sanity defaults
       if (!Array.isArray(this.state.player.netWorthHistory)) this.state.player.netWorthHistory = []
       if (!Array.isArray(this.state.player.achievements)) this.state.player.achievements = []
