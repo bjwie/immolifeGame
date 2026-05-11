@@ -158,6 +158,7 @@ body {
 .kpi-value.mid { color: var(--mid); }
 .kpi-value.bad { color: var(--bad); }
 .kpi-value.gold { color: var(--gold); }
+.kpi-sub { font-size: 10px; color: var(--muted); margin-top: 4px; line-height: 1.35; }
 
 .quick-actions {
   display: flex; gap: 6px; flex-wrap: wrap;

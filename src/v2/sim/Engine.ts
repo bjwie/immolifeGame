@@ -2108,19 +2108,29 @@ export class Engine {
     return Math.round(this.state.player.cash + propValue - debt)
   }
 
-  monthlyCashflow(): { rent: number; maintenance: number; loanPayments: number; overhead: number; net: number } {
-    let rent = 0, maintenance = 0, loanPayments = 0
+  monthlyCashflow(): { rent: number; maintenance: number; loanPayments: number; management: number; overhead: number; net: number } {
+    let rent = 0, maintenance = 0, loanPayments = 0, management = 0
     for (const p of this.state.owned) {
-      const reductionFactor = p.activeRenovation ? (1 - p.activeRenovation.rentReductionPct) : 1
+      const reductionFactor = p.activeRenovation && p.activeRenovation.status === 'active'
+        ? (1 - p.activeRenovation.rentReductionPct)
+        : 1
       for (const u of p.units) {
         if (u.tenant) rent += u.tenant.agreedKaltMiete * (u.tenant.reliability / 100) * reductionFactor
       }
       maintenance += this.maintenanceCost(p)
       if (p.wegMembership) maintenance += p.wegMembership.hausgeldMonthly
+      if (p.management) management += this.managementFeeFor(p)
     }
     for (const l of this.state.loans) loanPayments += l.monthlyPayment
     const overhead = this.diffConfig().overheadMonthly + Math.round(this.state.owned.length * 80)
-    return { rent: Math.round(rent), maintenance, loanPayments, overhead, net: Math.round(rent - maintenance - loanPayments - overhead) }
+    return {
+      rent: Math.round(rent),
+      maintenance,
+      loanPayments,
+      management,
+      overhead,
+      net: Math.round(rent - maintenance - loanPayments - management - overhead),
+    }
   }
 
   capRate(p: Property): number {
