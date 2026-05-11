@@ -181,21 +181,16 @@ export class Engine {
   }
 
   /**
-   * Local Mietspiegel ("Berliner Mietspiegel"-style) — comparable Kaltmiete for a
-   * given district + property type, deterministic so two apartments in Mitte have
-   * the same reference. Per-property variance lives in the actual `baseRent`, which
-   * already factors in condition + price; mietspiegelKalt is the LEGAL reference
-   * for Mietpreisbremse (raiseRent uses it to compute lawsuit risk).
+   * Per-unit Mietspiegel-Referenz. For single-unit properties this just returns
+   * p.mietspiegelKalt; for MFH it distributes the property-level Mietspiegel
+   * proportional to the unit's share of total base rent, so per-unit ratios
+   * displayed in the UI (and computed in raiseRent) stay meaningful.
    */
-  mietspiegelFor(district: DistrictId, type: PropertyType): number {
-    const d = this.districtById(district)
-    // Typical mid-market Kaltmiete per property type. Exact values are tuned so
-    // newly-listed baseRent sits ~5-15% above mietspiegel (room to negotiate up)
-    // and well-maintained properties can push 10-20% above before suing.
-    const typical: Record<PropertyType, number> = {
-      house: 1100, villa: 2400, apartment: 750, shop: 1400, office: 1800, tower: 1900,
-    }
-    return Math.round(typical[type] * d.rentMultiplier)
+  mietspiegelKaltForUnit(p: Property, u: Unit): number {
+    if (p.units.length <= 1) return p.mietspiegelKalt
+    const totalBase = p.units.reduce((s, x) => s + (x.baseKalt || 0), 0)
+    if (totalBase <= 0) return p.mietspiegelKalt
+    return Math.round(p.mietspiegelKalt * (u.baseKalt / totalBase))
   }
 
   private propertyTypeForDistrict(rng: () => number, district: DistrictId): PropertyType {
@@ -273,8 +268,6 @@ export class Engine {
     const price = Math.round(base * districtDef.priceMultiplier * variance * (0.6 + condition / 200))
     const baseRent = Math.round(price * 0.0048 * districtDef.rentMultiplier)
     const nebenkosten = Math.round(baseRent * (0.22 + rng() * 0.10))
-    // Mietspiegel: deterministic per (district, type) — see mietspiegelFor.
-    const mietspiegelKalt = this.mietspiegelFor(d, type)
 
     // M5: ~30% of apartment/tower listings are MFH (whole building, multiple units).
     // Everything else is single-unit. House/villa/shop/office stay 1-unit.
@@ -335,7 +328,10 @@ export class Engine {
       basePrice: finalPrice,
       baseRent: finalBaseRent,
       nebenkosten,
-      mietspiegelKalt,
+      // Mietspiegel = baseRent / 1.05 so the property's natural rent sits 5%
+      // above Mietspiegel — legal under Mietpreisbremse (threshold 1.10x).
+      // Annual maybeAdjustMietspiegel keeps drifting this upward.
+      mietspiegelKalt: Math.round(finalBaseRent / 1.05),
       condition,
       yearBuilt,
       monthsOnMarket: 0,
@@ -2241,7 +2237,12 @@ export class Engine {
       // and split legacy Tenant.agreedRent into agreedKaltMiete / agreedNebenkosten.
       const migrateProperty = (p: Property) => {
         if (typeof p.nebenkosten !== 'number') p.nebenkosten = Math.round(p.baseRent * 0.25)
-        if (typeof p.mietspiegelKalt !== 'number') p.mietspiegelKalt = this.mietspiegelFor(p.district, p.type)
+        // Re-derive mietspiegelKalt from baseRent for ALL saved properties.
+        // Earlier versions stored a (district, type) table value that drifted
+        // far from the actual baseRent and made the rent UI misleading
+        // (signed below or above by 50%+). Anchoring to baseRent / 1.05 keeps
+        // the legal threshold meaningful and the displayed ratios accurate.
+        p.mietspiegelKalt = Math.round(p.baseRent / 1.05)
         if (p.tenant) {
           const t = p.tenant as Tenant & { agreedRent?: number }
           if (typeof t.agreedKaltMiete !== 'number') {
