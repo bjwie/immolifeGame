@@ -333,11 +333,19 @@ export class DealSheet {
       </div>
     ` : ''
 
+    const tenantUnit = !isMulti ? p.units[0] : undefined
+    const tenantMietspiegel = tenantUnit ? this.engine.mietspiegelKaltForUnit(p, tenantUnit) : p.mietspiegelKalt
+    const tenantKalt = t?.agreedKaltMiete ?? p.baseRent
+    const tenantRatio = tenantKalt / Math.max(1, tenantMietspiegel)
+    const tenantDeltaPct = Math.round((tenantRatio - 1) * 100)
+    const tenantSpiegelClass = tenantRatio <= 1.10 && tenantRatio >= 0.95 ? 'good' : tenantRatio <= 1.20 ? 'mid' : 'bad'
+    const tenantSpiegelTag = t ? `<span class="${tenantSpiegelClass}" style="font-size:10px;font-weight:600;margin-left:6px">${formatSpiegelDelta(tenantDeltaPct)}</span>` : ''
+
     const tenantHtml = !isMulti && t ? `
       <div class="tenant-card ${nomadRevealed ? 'nomad-alert' : ''}">
         <div class="t-head"><b>${escape(t.name)}</b> ${personaTag} ${nomadRevealed ? '<span class="bad" style="font-weight:800">⚠ MIETNOMADE</span>' : ''} <span class="t-job">${escape(t.occupation)}</span></div>
         <div class="t-stats">
-          <div><label>Kaltmiete</label><b>${formatEuro(t.agreedKaltMiete ?? p.baseRent)}/M</b></div>
+          <div><label>Kaltmiete</label><b>${formatEuro(t.agreedKaltMiete ?? p.baseRent)}/M</b>${tenantSpiegelTag}</div>
           <div><label>Nebenkosten</label><b>${formatEuro(t.agreedNebenkosten ?? p.nebenkosten ?? 0)}/M</b></div>
           <div><label>Kaution</label><b>${formatEuro(t.deposit ?? 0)}</b></div>
           <div><label>Zuverlaessigkeit</label><b>${Math.round(t.reliability)}%</b></div>
@@ -352,7 +360,7 @@ export class DealSheet {
           </div>
         ` : ''}
         <div class="rent-hike-row">
-          <button class="ghost small" data-rent-hike>📈 Miete erhoehen (Mietspiegel ${DISTRICT_LABEL[p.district]}/${TYPE_LABEL[p.type]}: ${formatEuro(p.mietspiegelKalt ?? p.baseRent)})</button>
+          <button class="ghost small" data-rent-hike>📈 Miete erhoehen (Mietspiegel: ${formatEuro(tenantMietspiegel)})</button>
           ${canCooperativeQuit ? `<button class="ghost small" data-evict>Mietverhaeltnis kuendigen (-5 Reputation)</button>` : ''}
           ${!activeEviction && evictionEst && (t.personality === 'nomad' || t.monthsBehind >= 2) ? `
             <button class="danger small" data-start-eviction>🧑‍⚖️ Raeumungsklage einleiten (~${evictionEst.months} M, ${formatEuro(evictionEst.totalCost)}, ${Math.round(evictionEst.successChance * 100)}% Erfolg)</button>
@@ -748,10 +756,11 @@ export class DealSheet {
   private openRentHike(p: Property, unitId?: string) {
     const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => x.tenant)
     const t = u?.tenant
-    if (!t) return
+    if (!t || !u) return
+    const mietspiegelUnit = this.engine.mietspiegelKaltForUnit(p, u)
     const minNew = t.agreedKaltMiete + 10
-    const maxNew = Math.round(p.mietspiegelKalt * 1.5)
-    let value = Math.round((t.agreedKaltMiete + p.mietspiegelKalt * 1.10) / 2)
+    const maxNew = Math.round(mietspiegelUnit * 1.5)
+    let value = Math.round((t.agreedKaltMiete + mietspiegelUnit * 1.10) / 2)
     if (value < minNew) value = minNew
     if (value > maxNew) value = maxNew
 
@@ -760,7 +769,7 @@ export class DealSheet {
     overlay.innerHTML = `
       <div class="rent-hike-card">
         <div class="card-title">MIETE ERHOEHEN</div>
-        <div class="micro" style="margin-bottom:8px">${escape(t.name)} zahlt aktuell <b>${formatEuro(t.agreedKaltMiete)}</b> kalt. Mietspiegel: <b>${formatEuro(p.mietspiegelKalt)}</b>.</div>
+        <div class="micro" style="margin-bottom:8px">${escape(t.name)} zahlt aktuell <b>${formatEuro(t.agreedKaltMiete)}</b> kalt. Mietspiegel: <b>${formatEuro(mietspiegelUnit)}</b>.</div>
         <input type="range" id="hike-slider" min="${minNew}" max="${maxNew}" step="10" value="${value}">
         <div class="hike-summary">
           <b id="hike-value">${formatEuro(value)}</b>
@@ -781,9 +790,9 @@ export class DealSheet {
 
     const updateRisk = () => {
       const v = Number(slider.value)
-      const r = this.engine.rentHikeRisk(p.id, v)
+      const r = this.engine.rentHikeRisk(p.id, v, u.id)
       valueEl.textContent = formatEuro(v)
-      vsEl.textContent = ` (${(r.ratio * 100 - 100).toFixed(0)}% ueber Mietspiegel)`
+      vsEl.textContent = ` (${formatSpiegelDelta(Math.round((r.ratio - 1) * 100))})`
       const pct = Math.round(r.lawsuitChance * 100)
       const cls = r.lawsuitChance < 0.10 ? 'good' : r.lawsuitChance < 0.30 ? 'mid' : 'bad'
       riskEl.innerHTML = `<span class="${cls}">Klagerisiko: ${pct}%</span>`
@@ -792,12 +801,18 @@ export class DealSheet {
     updateRisk()
 
     overlay.querySelector('[data-confirm-hike]')!.addEventListener('click', () => {
-      this.engine.raiseRent(p.id, Number(slider.value), unitId)
+      this.engine.raiseRent(p.id, Number(slider.value), u.id)
       overlay.remove()
       this.refresh()
     })
     overlay.querySelector('[data-cancel-hike]')!.addEventListener('click', () => overlay.remove())
   }
+}
+
+function formatSpiegelDelta(deltaPct: number): string {
+  if (deltaPct === 0) return 'genau auf Mietspiegel'
+  if (deltaPct > 0) return `${deltaPct}% ueber Mietspiegel`
+  return `${Math.abs(deltaPct)}% unter Mietspiegel`
 }
 
 const HTML = `

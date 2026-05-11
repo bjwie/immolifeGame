@@ -1830,7 +1830,11 @@ export class Engine {
       }
     }
 
-    const ratio = newKalt / Math.max(1, p.mietspiegelKalt)
+    // Lawsuit risk compares newKalt to the PER-UNIT Mietspiegel — for MFH the
+    // property-level value is the sum across units, which is not comparable to
+    // a single unit's rent.
+    const mietspiegelRef = this.mietspiegelKaltForUnit(p, u)
+    const ratio = newKalt / Math.max(1, mietspiegelRef)
     const lawsuitChance = ratio <= 1.10 ? 0
       : ratio >= 1.30 ? 0.95
       : (ratio - 1.10) * 5
@@ -1872,12 +1876,14 @@ export class Engine {
   }
 
   /** UI helper: show the player the lawsuit risk before they commit */
-  rentHikeRisk(propertyId: string, newKalt: number): { ratio: number; lawsuitChance: number } {
+  rentHikeRisk(propertyId: string, newKalt: number, unitId?: string): { ratio: number; lawsuitChance: number; mietspiegelKalt: number } {
     const p = this.state.owned.find(pp => pp.id === propertyId)
-    if (!p) return { ratio: 1, lawsuitChance: 0 }
-    const ratio = newKalt / Math.max(1, p.mietspiegelKalt)
+    if (!p) return { ratio: 1, lawsuitChance: 0, mietspiegelKalt: 0 }
+    const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => x.tenant)
+    const mietspiegelRef = u ? this.mietspiegelKaltForUnit(p, u) : p.mietspiegelKalt
+    const ratio = newKalt / Math.max(1, mietspiegelRef)
     const lawsuitChance = ratio <= 1.10 ? 0 : ratio >= 1.30 ? 0.95 : Math.min(1, (ratio - 1.10) * 5)
-    return { ratio, lawsuitChance }
+    return { ratio, lawsuitChance, mietspiegelKalt: mietspiegelRef }
   }
 
   /**

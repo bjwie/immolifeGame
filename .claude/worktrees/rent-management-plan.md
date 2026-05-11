@@ -32,19 +32,19 @@ systematisch unter Mietspiegel, Mieterhoehung zeigt korrekte Lese-Richtung.
 - [x] 2.5 Commit: "Phase 2: rental modal anchors on Mietspiegel"
 
 ## Phase 3 — Rent-Hike Modal + Tenant Tab Anzeige
-- [ ] 3.1 Engine.rentHikeRisk akzeptiert optional unitId; nutzt mietspiegelKaltForUnit
+- [x] 3.1 Engine.rentHikeRisk akzeptiert optional unitId; nutzt mietspiegelKaltForUnit
        wenn vorhanden. raiseRent ebenso. UI-Vergleich wird per-Unit korrekt.
-- [ ] 3.2 DealSheet.openRentHike: ersetze Anzeige
+- [x] 3.2 DealSheet.openRentHike: ersetze Anzeige
        "(${(r.ratio*100-100)}% ueber Mietspiegel)"
        durch signed-Variante: ueber/unter mit positiven Zahlen, Spiegel-Wert per-Unit.
-- [ ] 3.3 DealSheet Tenant-Tab Kaltmiete-Anzeige: rechts daneben kleines Tag
+- [x] 3.3 DealSheet Tenant-Tab Kaltmiete-Anzeige: rechts daneben kleines Tag
        "X% vs Mietspiegel" (signiert, gruen wenn 100-110, gelb 110-120, rot >120
        oder <80).
-- [ ] 3.4 `npm run build` gruen. Browser-Smoke-Test:
+- [x] 3.4 `npm run build` gruen. Browser-Smoke-Test:
        - Single-Unit Property -> rent-hike-modal zeigt korrekte Mietspiegel-Ratio
-       - MFH -> rent-hike fuer eine Einheit nutzt per-Unit-Mietspiegel
-       - Tenant-Tab zeigt "5% ueber Mietspiegel" als Tag
-- [ ] 3.5 Commit: "Phase 3: per-unit Mietspiegel in rent-hike + tenant display"
+       - Tenant-Tab zeigt "15% unter Mietspiegel" als Tag (gelb)
+       - Rent-hike-Modal zeigt "2% unter Mietspiegel" statt "-2% ueber Mietspiegel"
+- [x] 3.5 Commit: "Phase 3: per-unit Mietspiegel in rent-hike + tenant display"
 
 ## Sicherheits-Regeln
 - Nie src/_legacy/ oder tsconfig.json includes/excludes anfassen.
