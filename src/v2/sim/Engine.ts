@@ -1557,6 +1557,17 @@ export class Engine {
 
     // 3. Auto-tenant: pick the best applicant once a unit has been vacant 1+ month.
     if (m.autoTenant) {
+      // Track ids picked this run so we don't sign the same person across units.
+      // getApplicants is deterministic per (rent, month) — without a per-unit
+      // salt, every vacant unit would see the same top applicant.
+      const usedIds = new Set<string>()
+      // Stable per-unit salt: derived from unit.id so re-runs produce the same
+      // assignments (no random churn across saves).
+      const saltFor = (uid: string) => {
+        let h = 0
+        for (let i = 0; i < uid.length; i++) h = (h * 31 + uid.charCodeAt(i)) >>> 0
+        return h
+      }
       for (const u of p.units) {
         if (u.tenant) continue
         if (u.vacantMonths < 1) continue  // give the player a month to react first
@@ -1568,16 +1579,18 @@ export class Engine {
             break
           case 'mietspiegel':
             // Top-of-market legal: Mietspiegel × 1.05 (just below the lawsuit threshold of 1.10)
-            askingKalt = Math.round(p.mietspiegelKalt * 1.05)
+            askingKalt = Math.round(this.mietspiegelKaltForUnit(p, u) * 1.05)
             break
           case 'max':
           default:
             askingKalt = u.baseKalt
         }
-        const apps = this.getApplicants(p.id, askingKalt, 5)
+        const apps = this.getApplicants(p.id, askingKalt, 5, saltFor(u.id))
+          .filter(a => !usedIds.has(a.id))
         if (apps.length === 0) continue
         apps.sort((a, b) => b.reliability - a.reliability)
         const pick = apps[0]
+        usedIds.add(pick.id)
         const leaseMonths = pick.preferredLeaseMonths
         const r = this.signLease(p.id, pick, askingKalt, leaseMonths, u.id)
         if (r.ok) this.emit('toast', { kind: 'info', text: `Verwaltung: ${pick.name} eingezogen in ${this.nameFor(p)} (${u.label}) fuer ${formatEuro(askingKalt)} kalt.` })
