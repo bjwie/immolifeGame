@@ -536,20 +536,25 @@ export class DealSheet {
     const vacantUnits = p.units.length - occupiedUnits
     const flow = this.engine.monthlyCashflow()
     void flow  // global cashflow, not per-property — but useful as a reference
-    // Per-property monthly cashflow — mirrors Engine.monthlyCashflow scope so
-    // the sum across owned properties (+ overhead) matches the HUD total.
-    // Renovation Mietminderung is applied; tenants in arrears still show
-    // their reliability-weighted expectation (long-term average view).
+    // Per-property monthly cashflow — uses the FULL agreed Kaltmiete (what the
+    // tenant owes), not a reliability-weighted average. Reliability risk and
+    // arrears are surfaced in the breakdown sub-text so the player can see why
+    // expected actual income may be lower.
     const renoActive = p.activeRenovation && p.activeRenovation.status === 'active'
     const rentReductionFactor = renoActive ? (1 - p.activeRenovation!.rentReductionPct) : 1
-    const propRentGross = p.units.reduce((s, u) => s + (u.tenant ? u.tenant.agreedKaltMiete * (u.tenant.reliability / 100) : 0), 0)
-    const propRent = propRentGross * rentReductionFactor
+    const propRentSoll = p.units.reduce((s, u) => s + (u.tenant ? u.tenant.agreedKaltMiete : 0), 0)
+    const propRent = propRentSoll * rentReductionFactor
     const propMaint = this['_maint'](p)
     const propLoan = loan ? loan.monthlyPayment : 0
     const propMgmt = p.management ? this.engine.managementFeeFor(p) : 0
     const propHausgeld = p.wegMembership ? p.wegMembership.hausgeldMonthly : 0
     const propNet = Math.round(propRent - propMaint - propLoan - propMgmt - propHausgeld)
     const propNetClass = propNet >= 0 ? 'good' : 'bad'
+    // Reliability-weighted (statistical) net for the sub-text
+    const propRentExpected = p.units.reduce((s, u) => s + (u.tenant ? u.tenant.agreedKaltMiete * (u.tenant.reliability / 100) : 0), 0) * rentReductionFactor
+    const propNetExpected = Math.round(propRentExpected - propMaint - propLoan - propMgmt - propHausgeld)
+    const lowestReliability = Math.min(100, ...p.units.filter(u => u.tenant).map(u => u.tenant!.reliability))
+    const anyBehind = p.units.some(u => u.tenant && (u.tenant.monthsBehind ?? 0) > 0)
     // Components for the breakdown shown under the KPI.
     const cfParts: string[] = []
     cfParts.push(`Miete +${formatEuro(Math.round(propRent))}`)
@@ -559,6 +564,13 @@ export class DealSheet {
     if (propMgmt > 0) cfParts.push(`Verwaltung -${formatEuro(propMgmt)}`)
     if (propHausgeld > 0) cfParts.push(`Hausgeld -${formatEuro(propHausgeld)}`)
     const cfBreakdown = cfParts.join(' &middot; ')
+    // Risk note — only shown if there's a reason for the expected to differ
+    let cfRiskNote = ''
+    if (anyBehind) {
+      cfRiskNote = `Mieter im Rueckstand &mdash; aktuell faellt Miete aus. Erwartet bei Zahlung: ${formatEuro(propNetExpected)}/M`
+    } else if (lowestReliability < 100) {
+      cfRiskNote = `Erwartet bei ${Math.round(lowestReliability)}% Zuverlaessigkeit: ${formatEuro(propNetExpected)}/M`
+    }
 
     const issues: string[] = []
     if (nomadRevealed) issues.push(`<span class="status-badge bad">🚨 Mietnomade</span>`)
@@ -595,7 +607,7 @@ export class DealSheet {
       const capClass = capRate >= 5 ? 'good' : capRate >= 3 ? 'mid' : 'bad'
       tabContentHtml = `
         <div class="kpi-grid">
-          <div class="kpi" title="${cfBreakdown.replace(/&middot;/g, '·').replace(/&nbsp;/g, ' ')}"><div class="kpi-label">Netto-Cashflow</div><div class="kpi-value ${propNetClass}">${formatEuro(propNet)}/M</div><div class="kpi-sub">${cfBreakdown}</div></div>
+          <div class="kpi" title="${cfBreakdown.replace(/&middot;/g, '·').replace(/&nbsp;/g, ' ')}"><div class="kpi-label">Netto-Cashflow</div><div class="kpi-value ${propNetClass}">${formatEuro(propNet)}/M</div><div class="kpi-sub">${cfBreakdown}</div>${cfRiskNote ? `<div class="kpi-sub mid">${cfRiskNote}</div>` : ''}</div>
           <div class="kpi"><div class="kpi-label">Cap Rate</div><div class="kpi-value ${capClass}">${capRate.toFixed(1)}%</div></div>
           <div class="kpi"><div class="kpi-label">Zustand</div><div class="kpi-value ${condClassA}">${Math.round(p.condition)}%</div></div>
           <div class="kpi"><div class="kpi-label">${isMulti ? 'Belegt' : 'Status'}</div><div class="kpi-value">${isMulti ? `${occupiedUnits}/${p.units.length}` : (p.units[0]?.tenant ? 'vermietet' : 'leer')}</div></div>
