@@ -18,18 +18,18 @@ systematisch unter Mietspiegel, Mieterhoehung zeigt korrekte Lese-Richtung.
 - [x] 1.5 Commit: "Phase 1: anchor Mietspiegel to baseRent"
 
 ## Phase 2 — RentalModal: korrekter Default + Mietspiegel-Hinweis
-- [ ] 2.1 RentalModal.open: default `askingRent = Math.max(u.baseKalt, Math.round(mietspiegelUnit * 1.05))`
+- [x] 2.1 RentalModal.open: default `askingRent = Math.max(u.baseKalt, Math.round(mietspiegelUnit * 1.05))`
        wobei mietspiegelUnit = Engine.mietspiegelKaltForUnit(p, u). Damit startet
        die Vermietung am legalen Top-of-Market.
-- [ ] 2.2 RentalModal Slider-Bereich: minRent bleibt 0.4x baseKalt, maxRent neu
+- [x] 2.2 RentalModal Slider-Bereich: minRent bleibt 0.4x baseKalt, maxRent neu
        max(0.4x..1.6x baseKalt, mietspiegelUnit * 1.30) — erlaubt Mietpreisbremse-
        Verstoss bewusst. Sonst kann der Spieler nie ueber Mietspiegel asken.
-- [ ] 2.3 RentalModal rent-display: zusaetzliche Zeile zeigt
+- [x] 2.3 RentalModal rent-display: zusaetzliche Zeile zeigt
        "Mietspiegel: <X> EUR — du verlangst Y% darueber/darunter" (signiert), updates
        live mit dem Slider.
-- [ ] 2.4 `npm run build` gruen. Browser: Vermietung oeffnen, slider startet bei +5%
+- [x] 2.4 `npm run build` gruen. Browser: Vermietung oeffnen, slider startet bei +5%
        ueber Mietspiegel, Hinweis live aktualisiert.
-- [ ] 2.5 Commit: "Phase 2: rental modal anchors on Mietspiegel"
+- [x] 2.5 Commit: "Phase 2: rental modal anchors on Mietspiegel"
 
 ## Phase 3 — Rent-Hike Modal + Tenant Tab Anzeige
 - [ ] 3.1 Engine.rentHikeRisk akzeptiert optional unitId; nutzt mietspiegelKaltForUnit

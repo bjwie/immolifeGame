@@ -50,7 +50,11 @@ export class RentalModal {
     this.onClosed = onClosed ?? null
     const u = unitId ? p.units.find(x => x.id === unitId) : (p.units.find(x => !x.tenant) ?? p.units[0])
     const refKalt = u?.baseKalt ?? p.baseRent
-    this.askingRent = Math.max(refKalt, Math.round(refKalt * (0.55 + (p.condition / 100) * 0.45)))
+    // Default ask: legal top-of-market (Mietspiegel x 1.05) so the player
+    // starts at the "natural" level. Player can slide down for faster rental
+    // or up to push the Mietpreisbremse limit.
+    const mietspiegelUnit = u ? this.engine.mietspiegelKaltForUnit(p, u) : p.mietspiegelKalt
+    this.askingRent = Math.max(refKalt, Math.round(mietspiegelUnit * 1.05))
     this.leaseMonths = 24
     this.refreshApplicants()
     this.render()
@@ -81,10 +85,20 @@ export class RentalModal {
   private render() {
     if (!this.property) return
     const p = this.property
-    const minRent = Math.round(p.baseRent * 0.4)
-    const maxRent = Math.round(p.baseRent * 1.6)
+    const u = this.unitId ? p.units.find(x => x.id === this.unitId) : (p.units.find(x => !x.tenant) ?? p.units[0])
+    const refKalt = u?.baseKalt ?? p.baseRent
+    const mietspiegelUnit = u ? this.engine.mietspiegelKaltForUnit(p, u) : p.mietspiegelKalt
+    const minRent = Math.round(refKalt * 0.4)
+    // Widen the upper bound so the slider can reach Mietspiegel x 1.30
+    // (legal-grey zone with high lawsuit risk). Without this, low-baseRent
+    // properties would be capped well below Mietspiegel.
+    const maxRent = Math.max(Math.round(refKalt * 1.6), Math.round(mietspiegelUnit * 1.30))
     const nk = p.nebenkosten ?? 0
     const warm = this.askingRent + nk
+    const spiegelRatio = this.askingRent / Math.max(1, mietspiegelUnit)
+    const spiegelDeltaPct = Math.round((spiegelRatio - 1) * 100)
+    const spiegelLabel = formatSpiegelDelta(spiegelDeltaPct)
+    const spiegelClass = spiegelRatio <= 1.10 ? 'good' : spiegelRatio <= 1.20 ? 'mid' : 'bad'
 
     const apps = this.applicants
     const hasNone = apps.length === 0
@@ -137,7 +151,8 @@ export class RentalModal {
                 <b id="rent-value">${formatEuro(this.askingRent)}</b> kalt
                 <span class="micro" style="margin-left:8px">+ <b id="nk-value">${formatEuro(nk)}</b> NK = <b id="warm-value">${formatEuro(warm)}</b> warm</span>
               </div>
-              <div class="micro">Bewerber vergleichen ihr Budget mit der Warmmiete. Nebenkosten zahlt der Mieter zusaetzlich, sie laufen durch.</div>
+              <div class="micro">Mietspiegel: <b>${formatEuro(mietspiegelUnit)}</b> kalt - <span id="spiegel-delta" class="${spiegelClass}">${spiegelLabel}</span></div>
+              <div class="micro">Bewerber vergleichen ihr Budget mit der Warmmiete. Nebenkosten zahlt der Mieter zusaetzlich, sie laufen durch. Ab 110% Mietspiegel Klagerisiko (Mietpreisbremse).</div>
             </div>
             <div class="rental-section">
               <div class="card-title">VERTRAGSDAUER</div>
@@ -157,10 +172,17 @@ export class RentalModal {
     const slider = this.root.querySelector<HTMLInputElement>('#rent-slider')
     const display = this.root.querySelector<HTMLElement>('#rent-value')
     const warmDisplay = this.root.querySelector<HTMLElement>('#warm-value')
+    const spiegelDelta = this.root.querySelector<HTMLElement>('#spiegel-delta')
     slider?.addEventListener('input', () => {
       this.askingRent = Number(slider.value)
       if (display) display.textContent = formatEuro(this.askingRent)
       if (warmDisplay) warmDisplay.textContent = formatEuro(this.askingRent + nk)
+      if (spiegelDelta) {
+        const r = this.askingRent / Math.max(1, mietspiegelUnit)
+        const pct = Math.round((r - 1) * 100)
+        spiegelDelta.textContent = formatSpiegelDelta(pct)
+        spiegelDelta.className = r <= 1.10 ? 'good' : r <= 1.20 ? 'mid' : 'bad'
+      }
     })
     slider?.addEventListener('change', () => {
       this.refreshApplicants()
@@ -199,4 +221,10 @@ export class RentalModal {
 
 function escape(s: string) {
   return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!))
+}
+
+function formatSpiegelDelta(deltaPct: number): string {
+  if (deltaPct === 0) return 'genau auf Mietspiegel'
+  if (deltaPct > 0) return `${deltaPct}% ueber Mietspiegel`
+  return `${Math.abs(deltaPct)}% unter Mietspiegel`
 }
