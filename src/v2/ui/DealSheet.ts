@@ -287,7 +287,33 @@ export class DealSheet {
     const isMulti = p.units.length > 1
     const t = p.tenant
     const personaLabels: Record<string, string> = { tidy: 'Ordentlich', partyer: 'Partyfreudig', quiet: 'Ruhig', demanding: 'Anspruchsvoll', family: 'Familie', student: 'Student:in', nomad: 'Mietnomade' }
-    // Display the disguise persona while it's still in effect (cover not yet blown).
+    const personaEmoji: Record<string, string> = { tidy: '🧹', partyer: '🎉', quiet: '🤫', demanding: '🧐', family: '👨‍👩‍👧', student: '🎓', nomad: '🏚' }
+
+    // Inline applicants helper: top 3 candidates for a vacant unit at default Kalt.
+    const applicantsBlock = (u: import('../sim/types').Unit) => {
+      const askingKalt = u.lastKaltMiete ?? Math.round(p.mietspiegelKalt * 1.05)
+      const apps = this.engine.getApplicants(p.id, askingKalt, 3)
+      if (apps.length === 0) return `<div class="micro" style="margin-top:6px">Keine passenden Bewerber bei ${formatEuro(askingKalt)} kalt. Anpassen ueber "↻ Mehr / Detailansicht".</div>`
+      return `
+        <div class="inline-apps">
+          <div class="inline-apps-head">Top-Bewerber bei ${formatEuro(askingKalt)} kalt:</div>
+          ${apps.slice(0, 3).map(a => {
+            const visible = a.personality
+            return `
+              <div class="inline-app">
+                <span class="inline-app-emoji">${personaEmoji[visible] ?? '👤'}</span>
+                <span class="inline-app-info">
+                  <b>${escape(a.name)}</b> · ${a.reliability}% Zuverl. · max ${formatEuro(a.maxRentBudget)} warm
+                  <div class="micro">${escape(a.occupation)}</div>
+                </span>
+                <button class="primary small" data-quick-sign="${u.id}|${a.id}|${askingKalt}|${a.preferredLeaseMonths}">Vertrag</button>
+              </div>
+            `
+          }).join('')}
+          <button class="ghost small" data-unit-show-applicants="${u.id}">↻ Mehr / Detailansicht</button>
+        </div>
+      `
+    }
     const displayedPersona = t?.disguisePersonality ?? t?.personality
     const personaTag = displayedPersona ? `<span class="persona-tag persona-${displayedPersona}">${personaLabels[displayedPersona] ?? displayedPersona}</span>` : ''
     // Eviction logic: which button to show
@@ -323,9 +349,8 @@ export class DealSheet {
                   ${!uActiveEv && (ut.personality === 'nomad' || ut.monthsBehind >= 2) ? `<button class="danger small" data-unit-start-eviction="${u.id}">🧑‍⚖️ Raeumung</button>` : ''}
                 </div>
               ` : `
-                <div class="unit-tenant-row vacant"><span class="micro">Leer (${u.vacantMonths} M)</span>
-                  <button class="primary small" data-unit-show-applicants="${u.id}">👥 Bewerber</button>
-                </div>
+                <div class="unit-tenant-row vacant"><span class="micro">Leer (${u.vacantMonths} M)</span></div>
+                ${applicantsBlock(u)}
               `}
             </div>
           `
@@ -366,11 +391,10 @@ export class DealSheet {
             <button class="danger small" data-start-eviction>🧑‍⚖️ Raeumungsklage einleiten (~${evictionEst.months} M, ${formatEuro(evictionEst.totalCost)}, ${Math.round(evictionEst.successChance * 100)}% Erfolg)</button>
           ` : ''}
         </div>
-      </div>` : (!isMulti ? `
+      </div>` : (!isMulti && p.units[0] ? `
       <div class="tenant-card vacant">
         <div><b>Wohnung leer (${p.vacantMonths} Monate)</b></div>
-        <div class="micro">Veroeffentliche eine Anzeige und waehle aus den Bewerbern.</div>
-        <button class="primary" data-show-applicants>👥 Bewerber ansehen</button>
+        ${applicantsBlock(p.units[0])}
       </div>` : '')
 
     const sellPrice = Math.round(p.marketValue * 0.96)
@@ -753,6 +777,27 @@ export class DealSheet {
     this.root.querySelectorAll<HTMLElement>('[data-unit-show-applicants]').forEach(b => {
       b.addEventListener('click', () => {
         if (this.rentalModal) this.rentalModal.open(p, () => this.refresh(), b.dataset.unitShowApplicants)
+      })
+    })
+    // UX-3: Inline quick-sign — click "Vertrag" on a top applicant to sign at default rent.
+    this.root.querySelectorAll<HTMLElement>('[data-quick-sign]').forEach(b => {
+      b.addEventListener('click', () => {
+        const [unitId, appId, kaltStr, leaseStr] = (b.dataset.quickSign ?? '').split('|')
+        const kaltMiete = parseInt(kaltStr, 10)
+        const leaseMonths = parseInt(leaseStr, 10)
+        const u = p.units.find(x => x.id === unitId)
+        if (!u) return
+        const askingKalt = u.lastKaltMiete ?? Math.round(p.mietspiegelKalt * 1.05)
+        const apps = this.engine.getApplicants(p.id, askingKalt, 3)
+        const app = apps.find(a => a.id === appId)
+        if (!app) {
+          ;(this.engine as any).emit?.('toast', { kind: 'error', text: 'Bewerber nicht mehr verfuegbar — Liste aktualisiert' })
+          this.refresh()
+          return
+        }
+        const r = this.engine.signLease(p.id, app, kaltMiete, leaseMonths, unitId)
+        if (!r.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: r.reason ?? 'Vertrag fehlgeschlagen' })
+        this.refresh()
       })
     })
     this.root.querySelectorAll<HTMLElement>('[data-sell-broker]').forEach(el => {

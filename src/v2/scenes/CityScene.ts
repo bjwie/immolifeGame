@@ -10,6 +10,7 @@ import { NegotiationModal } from '../ui/NegotiationModal'
 import { RentalModal } from '../ui/RentalModal'
 import { RenovationModal } from '../ui/RenovationModal'
 import { WEGModal } from '../ui/WEGModal'
+import { ActivityLog } from '../ui/ActivityLog'
 import { ModalManager } from '../ui/ModalManager'
 
 const TILE = 48
@@ -27,6 +28,7 @@ export class CityScene extends Phaser.Scene {
   private rentalModal!: RentalModal
   private renovationModal!: RenovationModal
   private wegModal!: WEGModal
+  private activityLog!: ActivityLog
   private hoverDiv!: HTMLDivElement
   private hoveredPropertyId: string | null = null
 
@@ -85,6 +87,8 @@ export class CityScene extends Phaser.Scene {
     this.rentalModal = new RentalModal(this.engine, overlay)
     this.renovationModal = new RenovationModal(this.engine, overlay)
     this.wegModal = new WEGModal(this.engine, overlay)
+    this.activityLog = new ActivityLog(this.engine, overlay)
+    this.activityLog.onFocusProperty = (id) => this.focusProperty(id)
     this.deal.setNegotiationModal(this.negModal)
     this.deal.setRentalModal(this.rentalModal)
     this.deal.setRenovationModal(this.renovationModal)
@@ -129,6 +133,7 @@ export class CityScene extends Phaser.Scene {
     this.events.on(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.engine.stop()
       this.hud?.destroy()
+      this.activityLog?.destroy()
       this.deal && (this.deal as any).root?.remove?.()
       this.menu && (this.menu as any).root?.remove?.()
       this.hoverDiv?.remove()
@@ -426,6 +431,20 @@ export class CityScene extends Phaser.Scene {
     const screenY = (sprite.y - cam.scrollY) * cam.zoom
     this.hoverDiv.style.left = screenX + 'px'
     this.hoverDiv.style.top = screenY + 'px'
+  }
+
+  /** Activity-Log helper: pan camera to a property and open its DealSheet. */
+  focusProperty(propertyId: string) {
+    const sprite = this.buildingByPropertyId.get(propertyId)
+    if (!sprite) return
+    const cam = this.cameras.main
+    cam.pan(sprite.x, sprite.y, 350, 'Sine.easeInOut')
+    // Find property to open the sheet
+    const all = [...this.engine.state.listings, ...this.engine.state.owned]
+    const p = all.find(pp => pp.id === propertyId)
+    if (!p) return
+    const isOwned = p.state === 'owned'
+    setTimeout(() => this.deal.open(p, isOwned), 200)
   }
 
   private spawnCoinBurst(p: Property) {

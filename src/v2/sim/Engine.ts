@@ -582,6 +582,15 @@ export class Engine {
     if (added) this.emit('toast', { kind: 'info', text: `${added} neue Angebote auf dem Markt` })
 
     this.emit('financial', { income, expenses, net: income - expenses })
+    // Monthly digest — UX Pass 2: snapshot of the month for the activity log.
+    this.emit('digest', {
+      month: this.state.time.month,
+      year: this.state.time.year,
+      income, expenses, net: income - expenses,
+      cash: this.state.player.cash,
+      netWorth: this.netWorth(),
+      ownedCount: this.state.owned.length,
+    })
     this.checkAchievements()
     this.autoSave()
   }
