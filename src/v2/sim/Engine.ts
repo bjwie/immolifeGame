@@ -1,6 +1,7 @@
-import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, GameState, GameTime, Loan, MarketEvent, Player, Property, PropertyType, SellerNegotiationState, Speed } from './types'
+import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, CapexEvent, CapexKind, ContractorOffer, ContractorTier, GameState, GameTime, GewerkKind, GewerkStep, Lawsuit, Loan, MarketEvent, Player, Property, PropertyType, RenovationContract, RenovationScope, SellerNegotiationState, Speed, Tenant, Unit, WEGProposal } from './types'
 import type { CityLayout, DistrictDef, DistrictId } from '../render/CityRenderer'
 import { generateApplicants, pickPropertyName, pickSeller } from './names'
+import { UNLOCK_CONDITIONS, type UnlockCondition } from './UnlockConditions'
 
 type Listener = (data?: any) => void
 
@@ -14,19 +15,39 @@ export class Engine {
   private speed: Speed = 1
   private dayDurationMs = 1200       // base ms per game day at 1x
 
-  constructor(layout: CityLayout, opts: { freshStart?: boolean } = {}) {
+  constructor(layout: CityLayout, opts: { freshStart?: boolean; difficulty?: import('./types').Difficulty } = {}) {
     this.layout = layout
     if (!opts.freshStart && this.tryLoad()) {
       // loaded
     } else {
-      this.state = this.freshState()
+      this.state = this.freshState(opts.difficulty ?? 'standard')
       this.seedListings(18)
     }
   }
 
   // ============ INITIALIZATION ============
 
-  private freshState(): GameState {
+  /** Difficulty tuning — single source of truth for the rebalance dampeners (M7). */
+  private static DIFFICULTY: Record<import('./types').Difficulty, {
+    startingCash: number
+    capexRiskMult: number       // multiplier on capex roll probability
+    capexImpactMult: number     // multiplier on conditionImpactIfIgnored
+    capexHoneymoonMonths: number  // skip capex rolls for the first N months of game time
+    capexMinAgeBonus: number    // years added to min-age threshold (delays first capex)
+    lawsuitMonthlyMult: number  // multiplier on Anwaltskosten
+    satisfactionLeaveThreshold: number  // tenants below this leave
+    overheadMonthly: number     // base monthly overhead per portfolio
+  }> = {
+    easy:     { startingCash: 400_000, capexRiskMult: 0.40, capexImpactMult: 0.65, capexHoneymoonMonths: 6, capexMinAgeBonus: 5, lawsuitMonthlyMult: 0.65, satisfactionLeaveThreshold: 15, overheadMonthly: 1100 },
+    standard: { startingCash: 320_000, capexRiskMult: 0.70, capexImpactMult: 0.85, capexHoneymoonMonths: 3, capexMinAgeBonus: 2, lawsuitMonthlyMult: 0.85, satisfactionLeaveThreshold: 20, overheadMonthly: 1300 },
+    hardcore: { startingCash: 250_000, capexRiskMult: 1.00, capexImpactMult: 1.00, capexHoneymoonMonths: 0, capexMinAgeBonus: 0, lawsuitMonthlyMult: 1.00, satisfactionLeaveThreshold: 25, overheadMonthly: 1500 },
+  }
+
+  private diffConfig() {
+    return Engine.DIFFICULTY[this.state.difficulty ?? 'standard']
+  }
+
+  private freshState(difficulty: import('./types').Difficulty = 'standard'): GameState {
     const banks: Bank[] = [
       { id: 'sparkasse', name: 'Sparkasse Berlin', annualRate: 4.2, maxLTV: 0.7, minCreditScore: 600, origination: 0.015, blurb: 'Lokal & verlaesslich. Konservative Konditionen.', color: 0xc0392b, personality: 'conservative', advisorName: 'Herr Becker' },
       { id: 'deutsche', name: 'Deutsche Bank', annualRate: 3.6, maxLTV: 0.8, minCreditScore: 700, origination: 0.012, blurb: 'Premium-Bank, gute Konditionen ab 700 Score.', color: 0x2980b9, personality: 'aggressive', advisorName: 'Frau Dr. Roth' },
@@ -35,7 +56,7 @@ export class Engine {
     ]
 
     const player: Player = {
-      cash: 250_000,
+      cash: Engine.DIFFICULTY[difficulty].startingCash,
       creditScore: 720,
       reputation: 50,
       netWorthHistory: [],
@@ -43,6 +64,10 @@ export class Engine {
       negotiationSkill: 25,
       bankRelations: { sparkasse: 10, deutsche: 10, volksbank: 10, online: 10 },
       brokerId: null,
+      contractorRelations: [],
+      schwarzJobsThisYear: 0,
+      totalSchwarzJobs: 0,
+      taxAuditsExperienced: 0,
     }
 
     const time: GameTime = { day: 1, month: 1, year: 2026, total: 0 }
@@ -64,7 +89,15 @@ export class Engine {
       listings: [],
       owned: [],
       loans: [],
+      lawsuits: [],
+      capexHistory: [],
+      pfuschPending: [],
+      kfwPending: [],
+      contractorPool: this.generateContractorPool(),
+      wegAssemblies: [],
+      difficulty,
       rngSeed: Math.floor(Math.random() * 1_000_000),
+      unlockedDistricts: this.layout.districts.filter(d => !d.locked).map(d => d.id),
     }
   }
 
@@ -84,32 +117,117 @@ export class Engine {
     return this.layout.districts.find(d => d.id === id)!
   }
 
+  /** True if the district is currently buildable for the player. Combines the
+   *  static layout flag with the player's runtime unlock progress. */
+  isDistrictUnlocked(id: DistrictId): boolean {
+    return this.state.unlockedDistricts.includes(id)
+  }
+
+  /** Buildable spots restricted to currently-unlocked districts.
+   *  Use this instead of layout.buildableSpots whenever the engine spawns or
+   *  filters listings, so newly-unlocked districts immediately become usable. */
+  private availableBuildableSpots() {
+    return this.layout.buildableSpots.filter(s => this.isDistrictUnlocked(s.district))
+  }
+
+  /** Current value of the unlock metric for a given district's condition.
+   *  Pure read on state — no mutation. */
+  private unlockMetric(cond: UnlockCondition): number {
+    switch (cond.type) {
+      case 'ownedCount': return this.state.owned.length
+      case 'netWorth': return this.netWorth()
+      case 'reputation': return this.state.player.reputation
+    }
+  }
+
+  /** Progress for a locked district's unlock condition.
+   *  Returns null for already-unlocked districts or districts without a
+   *  registered condition. UI calls this for the banner sub-text. */
+  unlockProgress(id: DistrictId): { current: number; threshold: number; ratio: number; label: string } | null {
+    if (this.isDistrictUnlocked(id)) return null
+    const cond = UNLOCK_CONDITIONS[id]
+    if (!cond) return null
+    const current = this.unlockMetric(cond)
+    const ratio = Math.min(1, current / cond.threshold)
+    return { current, threshold: cond.threshold, ratio, label: cond.label }
+  }
+
+  /** Walk all locked districts; if their condition is met, push onto
+   *  state.unlockedDistricts and emit 'districtUnlocked'. Called from
+   *  processMonth so unlocks happen on month boundaries. */
+  private checkDistrictUnlocks() {
+    for (const d of this.layout.districts) {
+      if (this.isDistrictUnlocked(d.id)) continue
+      const cond = UNLOCK_CONDITIONS[d.id]
+      if (!cond) continue
+      if (this.unlockMetric(cond) < cond.threshold) continue
+      this.state.unlockedDistricts.push(d.id)
+      this.emit('districtUnlocked', { id: d.id, name: d.name, label: cond.label })
+      this.seedListingsFor(d.id)
+    }
+  }
+
+  /** Spawn 2-3 initial listings for a freshly-unlocked district so the player
+   *  sees inventory there immediately — no need to wait for the next month
+   *  refill cycle. */
+  private seedListingsFor(district: DistrictId) {
+    const rng = this.rng(district.length * 31 + this.gameMonth())
+    const target = 2 + Math.floor(rng() * 2) // 2 or 3
+    let added = 0
+    for (let i = 0; i < target * 6 && added < target; i++) {
+      const np = this.genListing(rng, district)
+      if (np) { this.state.listings.push(np); added++ }
+    }
+  }
+
+  /**
+   * Per-unit Mietspiegel-Referenz. For single-unit properties this just returns
+   * p.mietspiegelKalt; for MFH it distributes the property-level Mietspiegel
+   * proportional to the unit's share of total base rent, so per-unit ratios
+   * displayed in the UI (and computed in raiseRent) stay meaningful.
+   */
+  mietspiegelKaltForUnit(p: Property, u: Unit): number {
+    if (p.units.length <= 1) return p.mietspiegelKalt
+    const totalBase = p.units.reduce((s, x) => s + (x.baseKalt || 0), 0)
+    if (totalBase <= 0) return p.mietspiegelKalt
+    return Math.round(p.mietspiegelKalt * (u.baseKalt / totalBase))
+  }
+
   private propertyTypeForDistrict(rng: () => number, district: DistrictId): PropertyType {
-    // Mitte/Charlottenburg: more office/tower; outer: more residential
+    // Distribution flatter than the old defaults: apartments stay common in
+    // residential districts but other types appear regularly so the player
+    // sees variety in any given snapshot of 16 listings.
     const r = rng()
     if (district === 'mitte') {
       if (r < 0.18) return 'tower'
-      if (r < 0.42) return 'office'
-      if (r < 0.58) return 'shop'
-      if (r < 0.85) return 'apartment'
-      return 'villa'
+      if (r < 0.34) return 'office'
+      if (r < 0.50) return 'shop'
+      if (r < 0.70) return 'apartment'
+      if (r < 0.85) return 'villa'
+      return 'house'
     }
     if (district === 'charlottenburg') {
       if (r < 0.10) return 'tower'
-      if (r < 0.25) return 'villa'
-      if (r < 0.42) return 'office'
-      return 'apartment'
+      if (r < 0.28) return 'villa'
+      if (r < 0.45) return 'office'
+      if (r < 0.55) return 'shop'
+      if (r < 0.85) return 'apartment'
+      return 'house'
     }
     if (district === 'kreuzberg' || district === 'prenzlauer') {
-      if (r < 0.55) return 'apartment'
-      if (r < 0.75) return 'shop'
-      if (r < 0.88) return 'house'
-      return 'office'
+      if (r < 0.38) return 'apartment'
+      if (r < 0.58) return 'shop'
+      if (r < 0.75) return 'house'
+      if (r < 0.88) return 'office'
+      if (r < 0.95) return 'villa'
+      return 'tower'
     }
     if (district === 'neukoelln' || district === 'wedding') {
-      if (r < 0.6) return 'apartment'
-      if (r < 0.85) return 'house'
-      return 'shop'
+      if (r < 0.40) return 'apartment'
+      if (r < 0.65) return 'house'
+      if (r < 0.85) return 'shop'
+      if (r < 0.95) return 'office'
+      return 'villa'
     }
     return 'apartment'
   }
@@ -131,11 +249,13 @@ export class Engine {
   }
 
   private genListing(rng: () => number, district?: DistrictId): Property | null {
-    // pick a random district biased towards diversity
-    const d = district ?? this.layout.districts[Math.floor(rng() * this.layout.districts.length)].id
+    // pick a district from unlocked ones (locked districts produce no listings)
+    const unlocked = this.state.unlockedDistricts
+    const d = district ?? unlocked[Math.floor(rng() * unlocked.length)]
+    if (!d || !this.isDistrictUnlocked(d)) return null
     const districtDef = this.districtById(d)
     // find a free buildable spot in this district
-    const candidates = this.layout.buildableSpots.filter(s => s.district === d && !this.occupiedSpot(s.tileX, s.tileY))
+    const candidates = this.availableBuildableSpots().filter(s => s.district === d && !this.occupiedSpot(s.tileX, s.tileY))
     if (candidates.length === 0) return null
     const spot = candidates[Math.floor(rng() * candidates.length)]
 
@@ -147,6 +267,54 @@ export class Engine {
     const variance = 0.75 + rng() * 0.5
     const price = Math.round(base * districtDef.priceMultiplier * variance * (0.6 + condition / 200))
     const baseRent = Math.round(price * 0.0048 * districtDef.rentMultiplier)
+    const nebenkosten = Math.round(baseRent * (0.22 + rng() * 0.10))
+
+    // M5: ~30% of apartment/tower listings are MFH (whole building, multiple units).
+    // Everything else is single-unit. House/villa/shop/office stay 1-unit.
+    const canBeMfh = type === 'apartment' || type === 'tower'
+    const isMfh = canBeMfh && rng() < 0.30
+    const buildingForm: 'single' | 'mfh' | 'wg' = isMfh ? 'mfh' : 'single'
+    const unitCount = isMfh ? (3 + Math.floor(rng() * 8)) : 1  // 3-10 units for MFH
+    const totalKalt = isMfh ? Math.round(baseRent * (0.85 + (unitCount - 4) * 0.08)) * unitCount / 4 : baseRent
+    // For an MFH listing the asking price scales with total Kaltmiete (yield-based)
+    const mfhPrice = isMfh ? Math.round(totalKalt * 12 * (16 + rng() * 6)) : price
+    const finalPrice = isMfh ? mfhPrice : price
+    const finalBaseRent = isMfh ? Math.round(totalKalt) : baseRent
+
+    const units: Unit[] = []
+    if (isMfh) {
+      // Distribute total Kaltmiete across the units with some variance — top floor a bit
+      // pricier, ground floor a bit less, etc.
+      let remaining = Math.round(totalKalt)
+      for (let i = 0; i < unitCount; i++) {
+        const isLast = i === unitCount - 1
+        const sqm = 38 + Math.floor(rng() * 60)
+        const share = isLast ? remaining : Math.round(remaining / (unitCount - i) * (0.85 + rng() * 0.3))
+        const uKalt = Math.max(280, share)
+        const uNk = Math.round(uKalt * (0.20 + rng() * 0.10))
+        const floor = Math.floor(i / 2)
+        const side = i % 2 === 0 ? 'links' : 'rechts'
+        const label = floor === 0 ? `EG ${side}` : `${floor}. OG ${side}`
+        units.push({
+          id: 'u_' + Math.random().toString(36).slice(2, 6),
+          label,
+          sqm,
+          baseKalt: uKalt,
+          nebenkosten: uNk,
+          vacantMonths: 0,
+        })
+        remaining -= uKalt
+      }
+    } else {
+      units.push({
+        id: 'u_' + Math.random().toString(36).slice(2, 6),
+        label: 'Einheit',
+        sqm: 50 + Math.floor(rng() * 70),
+        baseKalt: baseRent,
+        nebenkosten,
+        vacantMonths: 0,
+      })
+    }
 
     return {
       id: 'p_' + Math.random().toString(36).slice(2, 10),
@@ -155,10 +323,15 @@ export class Engine {
       tileX: spot.tileX,
       tileY: spot.tileY,
       styleSeed: Math.floor(rng() * 1e6),
-      price,
-      marketValue: price,
-      basePrice: price,
-      baseRent,
+      price: finalPrice,
+      marketValue: finalPrice,
+      basePrice: finalPrice,
+      baseRent: finalBaseRent,
+      nebenkosten,
+      // Mietspiegel = baseRent / 1.05 so the property's natural rent sits 5%
+      // above Mietspiegel — legal under Mietpreisbremse (threshold 1.10x).
+      // Annual maybeAdjustMietspiegel keeps drifting this upward.
+      mietspiegelKalt: Math.round(finalBaseRent / 1.05),
       condition,
       yearBuilt,
       monthsOnMarket: 0,
@@ -166,6 +339,8 @@ export class Engine {
       state: 'forSale',
       vacantMonths: 0,
       seller: pickSeller(rng),
+      units,
+      buildingForm,
     }
   }
 
@@ -182,7 +357,7 @@ export class Engine {
   /** generate a custom name on demand (cheap, not stored) */
   nameFor(p: Property): string {
     const r = mulb(p.styleSeed)
-    return pickPropertyName(p.type, r)
+    return pickPropertyName(p.type, r, p.buildingForm)
   }
 
   // ============ TIME ============
@@ -231,6 +406,9 @@ export class Engine {
     let income = 0
     let expenses = 0
 
+    // District unlocks fire at month boundaries; emits 'districtUnlocked'
+    this.checkDistrictUnlocks()
+
     // age listings off market & age stale lifetime
     const remaining: Property[] = []
     let removed = 0
@@ -257,51 +435,41 @@ export class Engine {
       this.degradeProperty(p)
       this.appreciate(p)
 
-      if (p.tenant) {
-        const t = p.tenant
-        // migration safety
-        if (typeof t.agreedRent !== 'number') t.agreedRent = Math.round(this.effectiveRent(p))
-        if (typeof t.deposit !== 'number') t.deposit = t.agreedRent * 2
-        // partyer slowly damages condition
-        if (t.personality === 'partyer') p.condition = Math.max(0, p.condition - 0.6)
-        // tidy slightly improves
-        if (t.personality === 'tidy') p.condition = Math.min(100, p.condition + 0.2)
-
-        const willPay = rng() < (t.reliability / 100) * (0.6 + t.satisfaction / 250)
-        if (willPay) {
-          income += t.agreedRent
-          t.monthsBehind = Math.max(0, t.monthsBehind - 1)
-        } else {
-          t.monthsBehind++
-        }
-        // satisfaction shifts with condition; demanding tenants are pickier
-        const condTarget = t.personality === 'demanding' ? p.condition - 10 : p.condition + 10
-        const targetSat = Math.min(100, condTarget)
-        t.satisfaction += (targetSat - t.satisfaction) * 0.4
-        t.satisfaction = Math.max(0, Math.min(100, t.satisfaction))
-        t.monthsRemaining--
-        // leave if very dissatisfied or lease ended or 3 months behind
-        if (t.satisfaction < 25 || t.monthsRemaining <= 0 || t.monthsBehind >= 3) {
-          // refund deposit (minus damage if partyer trashed the place)
-          const refund = t.personality === 'partyer' && p.condition < 50 ? t.deposit * 0.4 : t.deposit
-          this.state.player.cash -= refund
-          this.emit('toast', { kind: t.monthsBehind >= 3 ? 'warning' : 'info', text: `${t.name} zog aus (${this.nameFor(p)}). Kaution -${Math.round(refund)} EUR.` })
-          p.tenant = undefined
-          p.vacantMonths = 0
-        }
-      } else {
-        // vacant — applicants must be reviewed by player.
-        // monthly: notify if there are good applicants waiting
-        p.vacantMonths++
-        if (p.vacantMonths === 1 || p.vacantMonths % 3 === 0) {
-          this.emit('toast', { kind: 'info', text: `${this.nameFor(p)} ist leer (${p.vacantMonths} Mon.) — Bewerber pruefen.` })
-        }
+      // M5: iterate over each unit. Single-unit properties have units.length === 1.
+      for (const u of p.units) {
+        const collected = this.processUnitTenancy(p, u, rng)
+        income += collected
       }
+      this.syncHeadlineFromUnits(p)
 
-      // maintenance always due
+      // maintenance always due — scales with unit count for MFH
       const m = this.maintenanceCost(p)
       expenses += m
+
+      // Hausgeld for WEG members (when player only owns part of the building)
+      if (p.wegMembership) expenses += p.wegMembership.hausgeldMonthly
+
+      // Hausverwaltung (M8): fee + auto-tasks (capex / tenant / eviction)
+      if (p.management) expenses += this.runManagement(p, rng)
+
+      // capex roll — major repairs based on age + condition
+      this.tickCapex(p, rng)
+
+      // active renovation — advance current step, complete steps, roll risks
+      this.tickRenovation(p, rng)
+
+      // WEG assemblies for properties where the player is just one of many owners
+      this.maybeScheduleWegAssembly(p, rng)
     }
+
+    // Pfusch maturing → convert to capex
+    this.tickPfusch()
+    // KfW refunds
+    this.tickKfw()
+    // Annual Schwarz audit (only triggers in January)
+    this.maybeRollTaxAudit()
+    // Annual Mietspiegel adjustment — once per year tracking inflation + district trend
+    this.maybeAdjustMietspiegel()
 
     // loans
     for (const ln of this.state.loans) {
@@ -336,21 +504,68 @@ export class Engine {
       }
     }
 
+    // lawsuits — Anwaltskosten laufen monatlich, Outcome am Ende
+    for (const ls of this.state.lawsuits) {
+      if (ls.outcome !== 'pending') continue
+      expenses += ls.monthlyCost
+      ls.totalSpent += ls.monthlyCost
+      ls.monthsRemaining--
+      if (ls.monthsRemaining <= 0) {
+        const won = rng() < ls.successChance
+        ls.outcome = won ? 'won' : 'lost'
+        const p = this.state.owned.find(pp => pp.id === ls.propertyId)
+        if (ls.reason === 'rent-hike') {
+          if (won) {
+            this.emit('toast', { kind: 'success', text: `Klage gewonnen — Mieterhoehung haelt. Kosten ${formatEuro(ls.totalSpent)}.` })
+          } else {
+            if (p && typeof ls.revertToKalt === 'number') {
+              const targetUnit = p.units.find(u => u.tenant?.id === ls.tenantId) ?? p.units.find(u => u.tenant)
+              if (targetUnit?.tenant) targetUnit.tenant.agreedKaltMiete = ls.revertToKalt
+              this.syncHeadlineFromUnits(p)
+            }
+            this.state.player.reputation = Math.max(0, this.state.player.reputation - 10)
+            this.emit('toast', { kind: 'error', text: `Klage verloren — Miete zurueckgesetzt, Reputation -10. Kosten ${formatEuro(ls.totalSpent)}.` })
+          }
+        } else if (ls.reason === 'eviction') {
+          // Locate the tenant by id across this property's units.
+          const targetUnit = p?.units.find(u => u.tenant?.id === ls.tenantId)
+          if (won) {
+            if (targetUnit?.tenant && p) {
+              const tenantName = targetUnit.tenant.name
+              targetUnit.lastKaltMiete = targetUnit.tenant.agreedKaltMiete
+              targetUnit.tenant = undefined
+              targetUnit.vacantMonths = 0
+              this.syncHeadlineFromUnits(p)
+              this.state.player.reputation = Math.max(0, this.state.player.reputation - 5)
+              this.emit('toast', { kind: 'success', text: `Raeumung erfolgreich — ${tenantName} ist raus. Gesamtkosten ${formatEuro(ls.totalSpent)}.` })
+            } else {
+              this.emit('toast', { kind: 'success', text: `Raeumungsklage gewonnen — Mieter war bereits weg. Kosten ${formatEuro(ls.totalSpent)}.` })
+            }
+          } else {
+            this.state.player.reputation = Math.max(0, this.state.player.reputation - 10)
+            this.emit('toast', { kind: 'error', text: `Raeumungsklage verloren — Mieter bleibt. Kosten ${formatEuro(ls.totalSpent)}, Reputation -10.` })
+          }
+        }
+      }
+    }
+    this.state.lawsuits = this.state.lawsuits.filter(l => l.outcome === 'pending')
+
     // taxes & overhead
-    const overhead = 1500 + Math.round(this.state.owned.length * 80)
+    const overhead = this.diffConfig().overheadMonthly + Math.round(this.state.owned.length * 80)
     expenses += overhead
 
     // apply to cash
     this.state.player.cash += income - expenses
 
     // credit score gentle recovery if not behind
-    const anyBehind = this.state.owned.some(o => o.tenant && o.tenant.monthsBehind > 0) || this.state.loans.some(l => l.paymentsMissed > 0)
+    const allTenants = this.state.owned.flatMap(o => o.units.map(u => u.tenant).filter(Boolean) as Tenant[])
+    const anyBehind = allTenants.some(t => t.monthsBehind > 0) || this.state.loans.some(l => l.paymentsMissed > 0)
     if (!anyBehind && this.state.player.creditScore < 850) this.state.player.creditScore = Math.min(850, this.state.player.creditScore + 2)
 
     // reputation: depends on average condition and tenant satisfaction
     if (this.state.owned.length > 0) {
       const avgCond = this.state.owned.reduce((s, p) => s + p.condition, 0) / this.state.owned.length
-      const avgSat = this.state.owned.filter(o => o.tenant).reduce((s, p) => s + (p.tenant?.satisfaction ?? 0), 0) / Math.max(1, this.state.owned.filter(o => o.tenant).length)
+      const avgSat = allTenants.length > 0 ? allTenants.reduce((s, t) => s + t.satisfaction, 0) / allTenants.length : 50
       const target = (avgCond * 0.4 + avgSat * 0.6)
       this.state.player.reputation += (target - this.state.player.reputation) * 0.15
       this.state.player.reputation = Math.max(0, Math.min(100, this.state.player.reputation))
@@ -367,8 +582,107 @@ export class Engine {
     if (added) this.emit('toast', { kind: 'info', text: `${added} neue Angebote auf dem Markt` })
 
     this.emit('financial', { income, expenses, net: income - expenses })
+    // Monthly digest — UX Pass 2: snapshot of the month for the activity log.
+    this.emit('digest', {
+      month: this.state.time.month,
+      year: this.state.time.year,
+      income, expenses, net: income - expenses,
+      cash: this.state.player.cash,
+      netWorth: this.netWorth(),
+      ownedCount: this.state.owned.length,
+    })
     this.checkAchievements()
     this.autoSave()
+  }
+
+  /**
+   * Run a single unit through one month: legacy migration on the tenant, partyer/tidy
+   * condition deltas (capped per building), willPay roll, monthsBehind tracking,
+   * disguise reveal, satisfaction drift, lease end / cooperative auto-eviction.
+   * Returns rent collected (for the player's books).
+   */
+  private processUnitTenancy(p: Property, u: Unit, rng: () => number): number {
+    if (!u.tenant) {
+      u.vacantMonths++
+      if (u.vacantMonths === 1 || u.vacantMonths % 3 === 0) {
+        const where = p.units.length > 1 ? `${this.nameFor(p)} (${u.label})` : this.nameFor(p)
+        this.emit('toast', { kind: 'info', text: `${where} ist leer (${u.vacantMonths} Mon.) — Bewerber pruefen.` })
+      }
+      return 0
+    }
+    const t = u.tenant
+    // Migration safety on legacy tenants without Kalt/NK split
+    const legacy = t as Tenant & { agreedRent?: number }
+    if (typeof t.agreedKaltMiete !== 'number') {
+      t.agreedKaltMiete = typeof legacy.agreedRent === 'number' ? legacy.agreedRent : u.baseKalt
+    }
+    if (typeof t.agreedNebenkosten !== 'number') {
+      t.agreedNebenkosten = u.nebenkosten
+    }
+    if (typeof t.deposit !== 'number') t.deposit = t.agreedKaltMiete * 2
+
+    if (t.personality === 'partyer') p.condition = Math.max(0, p.condition - 0.6 / Math.max(1, p.units.length))
+    if (t.personality === 'tidy') p.condition = Math.min(100, p.condition + 0.2 / Math.max(1, p.units.length))
+
+    const isNomad = t.personality === 'nomad'
+    const willPay = !isNomad && rng() < (t.reliability / 100)
+    let income = 0
+    if (willPay) {
+      const reductionFactor = p.activeRenovation ? (1 - p.activeRenovation.rentReductionPct) : 1
+      income = Math.round(t.agreedKaltMiete * reductionFactor)
+      t.monthsBehind = Math.max(0, t.monthsBehind - 1)
+    } else {
+      t.monthsBehind++
+      if (isNomad && t.disguisePersonality && t.monthsBehind >= 3) {
+        t.disguisePersonality = undefined
+        const where = p.units.length > 1 ? `${this.nameFor(p)} (${u.label})` : this.nameFor(p)
+        this.emit('toast', { kind: 'error', text: `${t.name} in ${where} ist ein Mietnomade! Nur per Raeumungsklage entfernbar.` })
+      }
+    }
+
+    const condTarget = t.personality === 'demanding' ? p.condition - 10 : p.condition + 10
+    const targetSat = Math.min(100, condTarget)
+    t.satisfaction += (targetSat - t.satisfaction) * 0.4
+    t.satisfaction = Math.max(0, Math.min(100, t.satisfaction))
+    t.monthsRemaining--
+
+    const cooperativeLeave = !isNomad && (t.satisfaction < this.diffConfig().satisfactionLeaveThreshold || t.monthsRemaining <= 0 || t.monthsBehind >= 3)
+    if (cooperativeLeave) {
+      const refund = t.personality === 'partyer' && p.condition < 50 ? t.deposit * 0.4 : t.deposit
+      this.state.player.cash -= refund
+      const where = p.units.length > 1 ? `${this.nameFor(p)} (${u.label})` : this.nameFor(p)
+      this.emit('toast', { kind: t.monthsBehind >= 3 ? 'warning' : 'info', text: `${t.name} zog aus (${where}). Kaution -${Math.round(refund)} EUR.` })
+      u.lastKaltMiete = t.agreedKaltMiete
+      u.tenant = undefined
+      u.vacantMonths = 0
+    }
+    return income
+  }
+
+  /** Keep the headline `tenant`/`baseRent`/`nebenkosten`/`vacantMonths` in sync with
+   *  units[0] for single-unit properties so existing UI keeps working. For MFH the
+   *  headline becomes a building-level summary. */
+  private syncHeadlineFromUnits(p: Property) {
+    if (p.units.length === 0) return
+    if (p.units.length === 1) {
+      const u = p.units[0]
+      p.tenant = u.tenant
+      p.baseRent = u.baseKalt
+      p.nebenkosten = u.nebenkosten
+      p.vacantMonths = u.vacantMonths
+      p.applicantSearches = u.applicantSearches
+    } else {
+      // Aggregate for MFH/WG: total Kaltmiete + sum NK; pretend the first occupied
+      // unit is the "headline" tenant for any UI still reading p.tenant.
+      const totalKalt = p.units.reduce((s, x) => s + x.baseKalt, 0)
+      const totalNk = p.units.reduce((s, x) => s + x.nebenkosten, 0)
+      p.baseRent = totalKalt
+      p.nebenkosten = totalNk
+      const firstWithTenant = p.units.find(x => x.tenant)
+      p.tenant = firstWithTenant?.tenant
+      const allVacant = p.units.every(x => !x.tenant)
+      p.vacantMonths = allVacant ? Math.max(...p.units.map(x => x.vacantMonths)) : 0
+    }
   }
 
   private maybeRollEvent(rng: () => number) {
@@ -381,7 +695,11 @@ export class Engine {
 
     const r = rng()
     let event: MarketEvent | null = null
-    const districts: DistrictId[] = ['mitte', 'prenzlauer', 'kreuzberg', 'charlottenburg', 'wedding', 'neukoelln']
+    // Market events only roll for districts the player can interact with.
+    // Newly-unlocked districts join the pool automatically; locked districts
+    // stay out of the headlines until they unlock.
+    const districts = this.state.unlockedDistricts
+    if (districts.length === 0) return
     const target = districts[Math.floor(rng() * districts.length)]
     const targetName = this.districtById(target).name
     const expires = this.gameMonth() + 4 + Math.floor(rng() * 5)
@@ -390,11 +708,15 @@ export class Engine {
       event = {
         id: 'gentrify_' + this.gameMonth(),
         title: `Gentrifizierungs-Welle: ${targetName}`,
-        body: `Junge Kreative entdecken ${targetName}. Mieten und Preise steigen.`,
+        body: `Junge Kreative entdecken ${targetName}. Mieten und Preise steigen leicht.`,
         expiresMonth: expires,
         affects: target,
         apply: (p) => {
-          if (p.district === target) { p.marketValue *= 1.04; p.baseRent = Math.round(p.baseRent * 1.05); p.price = Math.round(p.price * 1.04) }
+          if (p.district !== target) return
+          // Mutate per-unit baseKalt so the boost actually persists (the headline
+          // p.baseRent is overwritten by syncHeadlineFromUnits each month).
+          for (const u of p.units) u.baseKalt = Math.round(u.baseKalt * 1.02)
+          p.marketValue *= 1.03; p.price = Math.round(p.price * 1.03)
         },
       }
     } else if (r < 0.32) {
@@ -430,10 +752,14 @@ export class Engine {
       event = {
         id: 'boom_' + this.gameMonth(),
         title: `Tech-Boom in ${targetName}`,
-        body: `Konzern siedelt sich an — Mietnachfrage steigt deutlich.`,
+        body: `Konzern siedelt sich an — Mietnachfrage steigt.`,
         expiresMonth: expires,
         affects: target,
-        apply: (p) => { if (p.district === target) { p.baseRent = Math.round(p.baseRent * 1.08); p.marketValue *= 1.06; p.price = Math.round(p.price * 1.06) } },
+        apply: (p) => {
+          if (p.district !== target) return
+          for (const u of p.units) u.baseKalt = Math.round(u.baseKalt * 1.035)
+          p.marketValue *= 1.04; p.price = Math.round(p.price * 1.04)
+        },
       }
     } else {
       // no event this round
@@ -487,43 +813,90 @@ export class Engine {
    * Generate a fresh pool of applicants for an owned, vacant property
    * given the asking rent the player wants to set.
    */
-  getApplicants(propertyId: string, askingRent: number, count: number = 5): Applicant[] {
+  /**
+   * Initial pool of applicants for a vacant property, deterministic per (rent, month).
+   * Use `tryRefreshApplicants` to roll a fresh pool (consumes the monthly search budget).
+   */
+  getApplicants(propertyId: string, askingRent: number, count: number = 5, salt: number = 0): Applicant[] {
     const p = this.state.owned.find(pp => pp.id === propertyId)
     if (!p) return []
     const districtPull = this.districtById(p.district).desirability / 100   // 0.5..0.95
     const reputationPull = 0.6 + this.state.player.reputation / 200          // 0.6..1.1
     const conditionPull = 0.5 + p.condition / 200                            // 0.5..1.0
     const baseCount = Math.max(1, Math.round(count * districtPull * reputationPull * conditionPull))
-    const rng = this.rng(askingRent + this.gameMonth() * 31)
-    return generateApplicants(rng, p.baseRent, p.condition, askingRent, baseCount * 2)  // generate 2x then filter happens by budget
+    const nk = typeof p.nebenkosten === 'number' ? p.nebenkosten : Math.round(p.baseRent * 0.25)
+    const rng = this.rng(askingRent + this.gameMonth() * 31 + salt * 1009)
+    return generateApplicants(rng, p.baseRent, p.condition, askingRent, nk, baseCount * 2, p.district)
   }
 
-  /** Sign a lease: applicant becomes tenant. */
-  signLease(propertyId: string, applicant: Applicant, monthlyRent: number, leaseMonths: number): { ok: boolean; reason?: string } {
+  /** UI helper: how many manual refreshes are still available this month? */
+  applicantRefreshesLeft(propertyId: string): number {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return 0
+    const m = this.gameMonth()
+    if (!p.applicantSearches || p.applicantSearches.month !== m) return 3
+    return p.applicantSearches.remaining
+  }
+
+  /** Consume one refresh and return a freshly-rolled applicant list with a unique salt. */
+  tryRefreshApplicants(propertyId: string, askingRent: number, count: number = 5): { ok: boolean; remaining: number; applicants: Applicant[] } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ok: false, remaining: 0, applicants: [] }
+    const m = this.gameMonth()
+    if (!p.applicantSearches || p.applicantSearches.month !== m) {
+      p.applicantSearches = { month: m, remaining: 3 }
+    }
+    if (p.applicantSearches.remaining <= 0) {
+      return { ok: false, remaining: 0, applicants: this.getApplicants(propertyId, askingRent, count) }
+    }
+    p.applicantSearches.remaining--
+    // salt = how many refreshes used so far (1..3), so each pool is distinct
+    const salt = 3 - p.applicantSearches.remaining
+    const apps = this.getApplicants(propertyId, askingRent, count, salt)
+    return { ok: true, remaining: p.applicantSearches.remaining, applicants: apps }
+  }
+
+  /** Sign a lease: applicant becomes tenant. `kaltMiete` is the negotiated Kaltmiete;
+   *  Nebenkosten are taken from the unit and added on top (the tenant pays warm,
+   *  but only Kaltmiete enters the player's books).
+   *  For multi-unit properties pass the `unitId`; otherwise the first vacant unit is used. */
+  signLease(propertyId: string, applicant: Applicant, kaltMiete: number, leaseMonths: number, unitId?: string): { ok: boolean; reason?: string } {
     const p = this.state.owned.find(pp => pp.id === propertyId)
     if (!p) return { ok: false, reason: 'Nicht im Besitz' }
-    if (p.tenant) return { ok: false, reason: 'Wohnung bereits vermietet' }
-    if (monthlyRent > applicant.maxRentBudget * 1.05) return { ok: false, reason: 'Bewerber kann sich diese Miete nicht leisten' }
+    const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => !x.tenant)
+    if (!u) return { ok: false, reason: 'Keine freie Wohneinheit' }
+    if (u.tenant) return { ok: false, reason: 'Wohnung bereits vermietet' }
+    const nk = u.nebenkosten
+    const warm = kaltMiete + nk
+    if (warm > applicant.maxRentBudget * 1.05) return { ok: false, reason: 'Bewerber kann sich diese Warmmiete nicht leisten' }
 
-    const deposit = monthlyRent * 2
-    p.tenant = {
+    const deposit = kaltMiete * 2
+    // Secret persona (e.g. nomad masquerading as quiet) overrides the visible one,
+    // and zero-out reliability so they will never pay.
+    const truePersonality = applicant.secretPersonality ?? applicant.personality
+    const trueReliability = truePersonality === 'nomad' ? 0 : applicant.reliability
+    u.tenant = {
       id: applicant.id,
       name: applicant.name,
       occupation: applicant.occupation,
-      personality: applicant.personality,
-      reliability: applicant.reliability,
+      personality: truePersonality,
+      // disguise is what the UI shows until the cover blows
+      ...(applicant.secretPersonality ? { disguisePersonality: applicant.personality } : {}),
+      reliability: trueReliability,
       income: applicant.income,
       satisfaction: 75,
       monthsRemaining: leaseMonths,
       monthsBehind: 0,
-      agreedRent: monthlyRent,
+      agreedKaltMiete: kaltMiete,
+      agreedNebenkosten: nk,
       deposit,
     }
-    p.vacantMonths = 0
+    u.vacantMonths = 0
+    this.syncHeadlineFromUnits(p)
     // deposit goes into player's cash (held for tenant — simplified)
     this.state.player.cash += deposit
-    this.emit('leaseSigned', { property: p, tenant: p.tenant })
-    this.emit('toast', { kind: 'success', text: `Vertrag mit ${applicant.name} (${monthlyRent} EUR/M, ${leaseMonths} M, Kaution ${deposit} EUR)` })
+    this.emit('leaseSigned', { property: p, tenant: u.tenant, unit: u })
+    this.emit('toast', { kind: 'success', text: `Vertrag mit ${applicant.name} (Kalt ${kaltMiete} + NK ${nk} EUR/M, ${leaseMonths} M, Kaution ${deposit} EUR)` })
     this.autoSave()
     return { ok: true }
   }
@@ -584,7 +957,10 @@ export class Engine {
     return { ok: true }
   }
 
-  sell(propertyId: string): { ok: boolean; reason?: string; net?: number } {
+  /** Sell an owned property. Optionally engage a sell-broker per transaction —
+   *  their commission is deducted from the sale price (M4: seller pays, not buyer).
+   *  `sellBrokerId` is one of the broker IDs in `state.brokers` or null/undefined for DIY. */
+  sell(propertyId: string, sellBrokerId?: string | null): { ok: boolean; reason?: string; net?: number; commission?: number } {
     const idx = this.state.owned.findIndex(p => p.id === propertyId)
     if (idx < 0) return { ok: false, reason: 'Nicht im Besitz' }
     const p = this.state.owned[idx]
@@ -597,44 +973,1149 @@ export class Engine {
         this.state.loans = this.state.loans.filter(l => l.id !== p.loanId)
       }
     }
-    const net = sellPrice - payoff
+    let commission = 0
+    if (sellBrokerId) {
+      const broker = this.state.brokers.find(b => b.id === sellBrokerId)
+      if (broker && broker.id !== 'do_it_yourself') {
+        commission = Math.round(sellPrice * broker.commissionPct)
+      }
+    }
+    const net = sellPrice - payoff - commission
     this.state.player.cash += net
     this.state.owned.splice(idx, 1)
-    this.emit('sold', { property: p, sellPrice, payoff, net })
-    this.emit('toast', { kind: 'success', text: `${this.nameFor(p)} verkauft (Netto ${formatEuro(net)})` })
+    this.emit('sold', { property: p, sellPrice, payoff, net, commission })
+    const commTag = commission > 0 ? `, Provision -${formatEuro(commission)}` : ''
+    this.emit('toast', { kind: 'success', text: `${this.nameFor(p)} verkauft (Netto ${formatEuro(net)}${commTag})` })
     this.autoSave()
-    return { ok: true, net }
+    return { ok: true, net, commission }
   }
 
-  renovate(propertyId: string, level: 'basic' | 'modern' | 'luxury'): { ok: boolean; reason?: string } {
+  // ============ RENOVATION (M2.5) ============
+
+  /** Per-Gewerk baseline cost (pre-property-multiplier) and base duration in days. */
+  private static GEWERK_SPEC: Record<GewerkKind, { label: string; baseCost: number; baseDays: number; rentBoost: number; conditionGain: number; finishing: boolean; capexLink?: CapexKind }> = {
+    abbruch:         { label: 'Abbruch & Entkernung',  baseCost: 4500,  baseDays: 12, rentBoost: 0,    conditionGain: 0,  finishing: false },
+    rohbau:          { label: 'Rohbau / Wanddurchbrueche', baseCost: 9000, baseDays: 18, rentBoost: 0.01, conditionGain: 4, finishing: false },
+    sanitaer:        { label: 'Sanitaer-Rohinstallation', baseCost: 8500,  baseDays: 14, rentBoost: 0.02, conditionGain: 6,  finishing: false, capexLink: 'steigstrang' },
+    elektrik:        { label: 'Elektrik-Rohinstallation', baseCost: 7500,  baseDays: 12, rentBoost: 0.02, conditionGain: 6,  finishing: false, capexLink: 'elektrik' },
+    heizung_install: { label: 'Heizung einbauen',         baseCost: 14000, baseDays: 16, rentBoost: 0.03, conditionGain: 8,  finishing: false, capexLink: 'heizung' },
+    fenster_install: { label: 'Fenster tauschen',         baseCost: 8000,  baseDays: 10, rentBoost: 0.03, conditionGain: 6,  finishing: false, capexLink: 'fenster' },
+    dach_decken:     { label: 'Dach decken',              baseCost: 22000, baseDays: 22, rentBoost: 0.02, conditionGain: 8,  finishing: false, capexLink: 'dach' },
+    fassade_putz:    { label: 'Fassade verputzen',        baseCost: 18000, baseDays: 20, rentBoost: 0.03, conditionGain: 7,  finishing: false, capexLink: 'fassade' },
+    estrich:         { label: 'Estrich legen',            baseCost: 6000,  baseDays: 10, rentBoost: 0.01, conditionGain: 4,  finishing: false },
+    trockenbau:      { label: 'Trockenbau / Putz',        baseCost: 5500,  baseDays: 12, rentBoost: 0.01, conditionGain: 3,  finishing: false },
+    fliesen:         { label: 'Fliesen (Bad/Kueche)',     baseCost: 7000,  baseDays: 14, rentBoost: 0.04, conditionGain: 5,  finishing: true },
+    maler:           { label: 'Maler',                     baseCost: 3500,  baseDays: 8,  rentBoost: 0.02, conditionGain: 4,  finishing: true },
+    boden:           { label: 'Boden verlegen',           baseCost: 5500,  baseDays: 9,  rentBoost: 0.03, conditionGain: 5,  finishing: true },
+    endmontage:      { label: 'Endmontage & Uebergabe',   baseCost: 2500,  baseDays: 6,  rentBoost: 0.01, conditionGain: 2,  finishing: true },
+  }
+
+  /** Default Gewerk sequence per scope. Player can re-order at their own risk. */
+  private static SCOPE_PLAN: Record<RenovationScope, GewerkKind[]> = {
+    capex: [],  // capex sequences are derived from CapexEvent.kind
+    basic: ['maler', 'boden'],
+    modern: ['abbruch', 'rohbau', 'sanitaer', 'elektrik', 'estrich', 'trockenbau', 'maler', 'boden', 'endmontage'],
+    luxury: ['abbruch', 'rohbau', 'sanitaer', 'elektrik', 'heizung_install', 'fenster_install', 'estrich', 'trockenbau', 'fliesen', 'maler', 'boden', 'endmontage'],
+  }
+
+  /** Map a Capex kind to the single Gewerk that fixes it. */
+  private static CAPEX_TO_GEWERK: Record<CapexKind, GewerkKind> = {
+    elektrik: 'elektrik', fenster: 'fenster_install', steigstrang: 'sanitaer',
+    fassade: 'fassade_putz', heizung: 'heizung_install', dach: 'dach_decken',
+  }
+
+  /** Tier multipliers — premium is more expensive but quality+lower risk. */
+  private static TIER_PROFILE: Record<ContractorTier, { costMult: number; durMult: number; overrun: number; pfusch: number; insolv: number; quality: number }> = {
+    cheap:    { costMult: 0.78, durMult: 1.30, overrun: 0.30, pfusch: 0.20, insolv: 0.020, quality: -2 },
+    standard: { costMult: 1.00, durMult: 1.00, overrun: 0.10, pfusch: 0.08, insolv: 0.003, quality: 0  },
+    premium:  { costMult: 1.30, durMult: 0.85, overrun: 0.04, pfusch: 0.02, insolv: 0.000, quality: 4  },
+    gu:       { costMult: 1.20, durMult: 0.90, overrun: 0.00, pfusch: 0.05, insolv: 0.000, quality: 2  },
+  }
+
+  private static CONTRACTOR_FIRST_NAMES = ['Klaus', 'Heinz', 'Murat', 'Bogdan', 'Stefan', 'Goran', 'Ali', 'Jens', 'Mario', 'Andrzej', 'Dimitri', 'Hassan', 'Frank', 'Werner', 'Thomas', 'Dragan']
+  private static CONTRACTOR_LAST_NAMES = ['Werk', 'Schmidt', 'Yilmaz', 'Kowalski', 'Maier', 'Petrovic', 'Hassan', 'Mueller', 'Ricci', 'Novak', 'Becker', 'Aydin', 'Vogel', 'Krause', 'Lehmann', 'Stojanovic']
+  private static CONTRACTOR_BLURBS: Record<ContractorTier, string[]> = {
+    cheap: ['kommt mit Sprinter und 2 Mann', 'macht alles in cash, fragt nicht viel', 'hat nicht viel zu sagen, kommt aber morgens'],
+    standard: ['solides Mittelstands-Buero', 'redet wenig, arbeitet ordentlich', 'Meisterbetrieb mit Innungs-Schein'],
+    premium: ['Fachbetrieb mit Architekten-Empfehlung', 'arbeitet auch fuer Denkmalschutz', 'jeden Tag Bauleiter vor Ort'],
+    gu: ['kompletter Generalunternehmer-Service', 'einer fuer alles, garantiert Pauschalpreis', 'koordiniert alle Gewerke selbst'],
+  }
+
+  /** Generate ~30 contractors at game init — persistent so loyalty across jobs works. */
+  private generateContractorPool(): import('./types').ContractorPoolEntry[] {
+    const out: import('./types').ContractorPoolEntry[] = []
+    const tiers: ContractorTier[] = ['cheap', 'cheap', 'standard', 'standard', 'standard', 'premium', 'gu']
+    const gewerke = Object.keys(Engine.GEWERK_SPEC) as GewerkKind[]
+    let seed = (Math.random() * 1_000_000) | 0
+    const rnd = () => { seed = (seed + 0x9e3779b9) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296 }
+    for (let i = 0; i < 32; i++) {
+      const tier = tiers[Math.floor(rnd() * tiers.length)]
+      const fn = Engine.CONTRACTOR_FIRST_NAMES[Math.floor(rnd() * Engine.CONTRACTOR_FIRST_NAMES.length)]
+      const ln = Engine.CONTRACTOR_LAST_NAMES[Math.floor(rnd() * Engine.CONTRACTOR_LAST_NAMES.length)]
+      const specialty: GewerkKind | 'gu' = tier === 'gu' ? 'gu' : gewerke[Math.floor(rnd() * gewerke.length)]
+      const profile = Engine.TIER_PROFILE[tier]
+      const blurbs = Engine.CONTRACTOR_BLURBS[tier]
+      out.push({
+        id: 'c_' + i.toString(36) + '_' + (seed >>> 0).toString(36).slice(-3),
+        name: `${fn} ${ln}`,
+        tier,
+        specialty,
+        // small per-contractor jitter on top of tier baseline
+        baseOverrunChance: Math.max(0, profile.overrun + (rnd() - 0.5) * 0.05),
+        basePfuschChance: Math.max(0, profile.pfusch + (rnd() - 0.5) * 0.04),
+        baseInsolvencyChance: Math.max(0, profile.insolv + (rnd() - 0.5) * 0.005),
+        baseQualityBonus: profile.quality + Math.round((rnd() - 0.5) * 2),
+        blurb: blurbs[Math.floor(rnd() * blurbs.length)],
+      })
+    }
+    return out
+  }
+
+  /** Compute the player's loyalty discount for a contractor (0..0.15). */
+  private loyaltyDiscount(contractorId: string): number {
+    const rel = this.state.player.contractorRelations.find(r => r.contractorId === contractorId)
+    if (!rel) return 0
+    return Math.min(0.15, rel.jobsCompleted * 0.05)
+  }
+
+  /** Default plan for a scope OR the single-Gewerk plan for a capex. */
+  plansForScope(p: Property, scope: RenovationScope): GewerkKind[] {
+    if (scope === 'capex') {
+      const cap = p.pendingCapex
+      if (!cap) return []
+      return [Engine.CAPEX_TO_GEWERK[cap.kind]]
+    }
+    return Engine.SCOPE_PLAN[scope].slice()
+  }
+
+  /** Generate 3 contractor offers for one Gewerk on one property. Includes the player's
+   *  loyal contractors first when they fit. Use `costForOffer` to derive the actual €. */
+  generateOffersForGewerk(propertyId: string, gewerk: GewerkKind): ContractorOffer[] {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return []
+    const pool = this.state.contractorPool.filter(c => c.tier !== 'gu')
+    // Sort: loyal contractors first (they "make time" for repeat customers)
+    pool.sort((a, b) => (this.loyaltyDiscount(b.id) - this.loyaltyDiscount(a.id)))
+    // Pick 3 — one per non-gu tier ideally
+    const byTier = new Map<ContractorTier, typeof pool[0]>()
+    for (const c of pool) {
+      if (!byTier.has(c.tier)) byTier.set(c.tier, c)
+      if (byTier.size === 3) break
+    }
+    const picks = Array.from(byTier.values()).slice(0, 3)
+    while (picks.length < 3 && pool[picks.length]) picks.push(pool[picks.length])
+
+    return picks.map((c, i) => {
+      const tierProfile = Engine.TIER_PROFILE[c.tier]
+      const loyalty = this.loyaltyDiscount(c.id)
+      const loyaltyTag = loyalty > 0 ? ` -${Math.round(loyalty * 100)}% Loyalitaet` : ''
+      return {
+        id: 'o_' + propertyId + '_' + gewerk + '_' + i,
+        contractorId: c.id,
+        contractorName: c.name + loyaltyTag,
+        tier: c.tier,
+        specialty: c.specialty === 'gu' ? gewerk : c.specialty,
+        costMultiplier: tierProfile.costMult * (1 - loyalty),
+        durationMultiplier: tierProfile.durMult,
+        overrunChance: c.baseOverrunChance,
+        pfuschChance: c.basePfuschChance,
+        insolvencyChance: c.baseInsolvencyChance,
+        qualityBonus: c.baseQualityBonus,
+        blurb: c.blurb,
+      } as ContractorOffer
+    })
+  }
+
+  /** Single GU offer: covers the entire scope as one contract. */
+  generateGUOffer(propertyId: string, scope: RenovationScope): ContractorOffer | null {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return null
+    const plan = this.plansForScope(p, scope)
+    if (plan.length === 0) return null
+    const sizeFactor = 0.85 + (p.baseRent / 2500)
+    const totalBase = plan.reduce((s, g) => s + Engine.GEWERK_SPEC[g].baseCost * sizeFactor, 0)
+    const totalDays = plan.reduce((s, g) => s + Engine.GEWERK_SPEC[g].baseDays, 0)
+    // Pick the best loyalty-relevant GU from pool, otherwise generate a stable one
+    const guPool = this.state.contractorPool.filter(c => c.tier === 'gu')
+    guPool.sort((a, b) => this.loyaltyDiscount(b.id) - this.loyaltyDiscount(a.id))
+    const c = guPool[0]
+    if (!c) return null
+    const profile = Engine.TIER_PROFILE.gu
+    const loyalty = this.loyaltyDiscount(c.id)
+    const markup = 0.20  // fixed GU markup
+    const loyaltyTag = loyalty > 0 ? ` -${Math.round(loyalty * 100)}% Loyalitaet` : ''
+    void totalBase; void totalDays
+    return {
+      id: 'gu_' + propertyId + '_' + scope,
+      contractorId: c.id,
+      contractorName: c.name + loyaltyTag,
+      tier: 'gu' as ContractorTier,
+      specialty: 'gu' as 'gu',
+      costMultiplier: (1 + markup) * (1 - loyalty),
+      durationMultiplier: profile.durMult,
+      overrunChance: 0,
+      pfuschChance: c.basePfuschChance,
+      insolvencyChance: 0,
+      qualityBonus: c.baseQualityBonus,
+      blurb: c.blurb,
+    } as ContractorOffer
+  }
+
+  /** Compute an offer's actual euros and duration for UI / startRenovation use. */
+  costForOffer(offer: ContractorOffer, gewerk: GewerkKind, p: Property, isSchwarz: boolean, material: 'standard' | 'premium'): { cost: number; duration: number } {
+    const spec = Engine.GEWERK_SPEC[gewerk]
+    const sizeFactor = 0.85 + (p.baseRent / 2500)
+    const baseCost = spec.baseCost * sizeFactor
+    let cost = baseCost * offer.costMultiplier
+    if (material === 'premium' && spec.finishing) cost *= 1.30
+    if (isSchwarz) cost *= 0.65  // -35% for off-the-books
+    return { cost: Math.round(cost), duration: Math.round(spec.baseDays * offer.durationMultiplier) }
+  }
+
+  /**
+   * Plan for the player to commit. Each item names a Gewerk + chosen offer + flags.
+   * For GU mode pass `gu: true` and a single offer; the engine will derive steps.
+   */
+  startRenovation(
+    propertyId: string,
+    scope: RenovationScope,
+    plan: { gewerk: GewerkKind; offer: ContractorOffer; isSchwarz: boolean; material: 'standard' | 'premium' }[],
+    isGU: boolean,
+  ): { ok: boolean; reason?: string; contract?: RenovationContract } {
     const p = this.state.owned.find(pp => pp.id === propertyId)
     if (!p) return { ok: false, reason: 'Nicht im Besitz' }
-    const cost = level === 'basic' ? 8000 : level === 'modern' ? 22000 : 55000
-    const condGain = level === 'basic' ? 18 : level === 'modern' ? 38 : 60
-    const rentMult = level === 'basic' ? 1.04 : level === 'modern' ? 1.12 : 1.25
-    const valueMult = level === 'basic' ? 1.02 : level === 'modern' ? 1.08 : 1.18
-    const scaledCost = Math.round(cost * (1 + (p.baseRent / 5000)))
-    if (this.state.player.cash < scaledCost) return { ok: false, reason: `Brauchst ${formatEuro(scaledCost)}` }
-    this.state.player.cash -= scaledCost
-    p.condition = Math.min(100, p.condition + condGain)
-    p.baseRent = Math.round(p.baseRent * rentMult)
-    p.marketValue *= valueMult
-    p.lastRenovationMonth = this.gameMonth()
-    this.emit('renovated', { property: p, level, cost: scaledCost })
-    this.emit('toast', { kind: 'success', text: `Renovierung ${level} abgeschlossen (-${formatEuro(scaledCost)})` })
+    if (p.activeRenovation) return { ok: false, reason: 'Bereits eine Renovierung aktiv' }
+    if (plan.length === 0) return { ok: false, reason: 'Kein Plan' }
+    const steps: GewerkStep[] = plan.map((row, i) => {
+      const { cost, duration } = this.costForOffer(row.offer, row.gewerk, p, row.isSchwarz, row.material)
+      return {
+        id: 's_' + i + '_' + row.gewerk,
+        gewerk: row.gewerk,
+        contractorId: row.offer.contractorId,
+        contractorName: row.offer.contractorName.split(' -')[0],  // strip the loyalty tag
+        contractorTier: row.offer.tier,
+        baseCost: cost,
+        agreedCost: cost,
+        paidSoFar: 0,
+        durationDays: duration,
+        daysRemaining: duration,
+        status: i === 0 ? 'active' : 'pending',
+        isSchwarz: row.isSchwarz,
+        material: row.material,
+        warrantyMonths: row.isSchwarz ? 0 : 60,
+      }
+    })
+    const totalCost = steps.reduce((s, st) => s + st.agreedCost, 0)
+    if (this.state.player.cash < totalCost * 0.3) return { ok: false, reason: `Mindestens 30% Anzahlung (${formatEuro(Math.round(totalCost * 0.3))}) benoetigt.` }
+
+    // KfW eligibility: must include heizung+fenster+fassade in the same project (energetic combo)
+    const gewerkSet = new Set(plan.map(r => r.gewerk))
+    const kfwEligible = gewerkSet.has('heizung_install') && gewerkSet.has('fenster_install') && gewerkSet.has('fassade_putz')
+    const kfwSubsidyPct = kfwEligible ? 0.30 : 0
+
+    // Modernisierung eligibility — at least one occupied unit must benefit
+    const modernizationEligible = (scope === 'modern' || scope === 'luxury') && p.units.some(u => u.tenant)
+
+    // Effects on completion (sum of gewerk contributions)
+    const conditionGain = plan.reduce((s, r) => s + Engine.GEWERK_SPEC[r.gewerk].conditionGain + (r.material === 'premium' ? 2 : 0), 0)
+    const rentMult = 1 + plan.reduce((s, r) => s + Engine.GEWERK_SPEC[r.gewerk].rentBoost + (r.material === 'premium' ? 0.01 : 0), 0)
+    const valueMult = 1 + (rentMult - 1) * 0.6  // value follows rent boost dampened
+
+    const contract: RenovationContract = {
+      id: 'r_' + Math.random().toString(36).slice(2, 9),
+      propertyId,
+      scope,
+      isGU,
+      guMarkup: isGU ? 0.20 : 0,
+      steps,
+      currentStepIndex: 0,
+      startMonth: this.gameMonth(),
+      totalAgreedCost: totalCost,
+      totalPaidSoFar: 0,
+      rentReductionPct: scope === 'capex' || scope === 'basic' ? 0.05 : 0.15,
+      conditionGainOnComplete: conditionGain,
+      rentMultOnComplete: rentMult,
+      valueMultOnComplete: valueMult,
+      modernizationEligible,
+      kfwSubsidyPct,
+      status: 'active',
+    }
+    p.activeRenovation = contract
+
+    // Anzahlung — 30% upfront, the rest accrues per step completion
+    const downPayment = Math.round(totalCost * 0.3)
+    this.state.player.cash -= downPayment
+    contract.totalPaidSoFar = downPayment
+
+    // Track Schwarz jobs immediately (regardless of completion — the work is happening)
+    const schwarzCount = plan.filter(r => r.isSchwarz).length
+    if (schwarzCount > 0) {
+      this.state.player.schwarzJobsThisYear += schwarzCount
+      this.state.player.totalSchwarzJobs += schwarzCount
+    }
+
+    this.emit('renovationStart', { contract })
+    this.emit('toast', { kind: 'success', text: `Renovierung gestartet — Anzahlung ${formatEuro(downPayment)}, ${steps.length} Gewerke, ~${Math.round(steps.reduce((s, st) => s + st.durationDays, 0) / 30)} Monate.` })
+    this.autoSave()
+    return { ok: true, contract }
+  }
+
+  cancelRenovation(propertyId: string): { ok: boolean; refund?: number; reason?: string } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p?.activeRenovation) return { ok: false, reason: 'Keine aktive Renovierung' }
+    const c = p.activeRenovation
+    // Refund: 50% of unpaid, lose the rest as Vertragsstrafe
+    const unpaid = c.totalAgreedCost - c.totalPaidSoFar
+    const refund = Math.round(unpaid * 0.5)
+    this.state.player.cash += refund
+    c.status = 'cancelled'
+    p.activeRenovation = undefined
+    this.emit('toast', { kind: 'warning', text: `Renovierung abgebrochen — Restzahlung halbiert zurueck (${formatEuro(refund)}). Restkosten verloren.` })
+    this.autoSave()
+    return { ok: true, refund }
+  }
+
+  /** §559 BGB Modernisierungsumlage — 11% of agreedKaltMiete legally added once per modernization,
+   *  no Mietspiegel-related lawsuit risk. Only after a 'modern' or 'luxury' renovation completed
+   *  with a tenant in place. */
+  applyModernisierungUmlage(propertyId: string): { ok: boolean; reason?: string; newKalt?: number } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    if (!p.modernizationUmlageAvailable) return { ok: false, reason: 'Keine Umlage verfuegbar — erst nach Modernisierung mit Mieter' }
+    const occupied = p.units.filter(u => u.tenant)
+    if (occupied.length === 0) return { ok: false, reason: 'Kein Mieter' }
+    let totalNewKalt = 0
+    for (const u of occupied) {
+      const newKalt = Math.round(u.tenant!.agreedKaltMiete * 1.11)
+      u.tenant!.agreedKaltMiete = newKalt
+      totalNewKalt += newKalt
+    }
+    p.modernizationUmlageAvailable = false
+    this.syncHeadlineFromUnits(p)
+    this.emit('toast', { kind: 'success', text: `Modernisierungsumlage angewandt — alle Mieten +11% (Summe ${formatEuro(totalNewKalt)} kalt), ohne Klagerisiko.` })
+    this.autoSave()
+    return { ok: true, newKalt: totalNewKalt }
+  }
+
+  // ============ WG / MFH / WEG (M5) ============
+
+  /** Convert a single-family property to a WG (Wohngemeinschaft) — splits the unit
+   *  into 3-5 small rooms with shared kitchen, ~30% higher total Kalt potential. */
+  convertToWG(propertyId: string): { ok: boolean; reason?: string; cost?: number } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    if (p.buildingForm !== 'single') return { ok: false, reason: 'Nur Einzelwohnungen koennen zur WG umgebaut werden' }
+    if (p.units.some(u => u.tenant)) return { ok: false, reason: 'Wohnung muss leer sein' }
+    if (p.condition < 60) return { ok: false, reason: 'Zustand muss mindestens 60% sein (sonst Umbau riskant)' }
+    const oldUnit = p.units[0]
+    const totalSqm = oldUnit.sqm
+    const totalKalt = oldUnit.baseKalt
+    const cost = Math.round(30000 * (totalSqm / 60))
+    if (this.state.player.cash < cost) return { ok: false, reason: `Brauchst ${formatEuro(cost)}` }
+
+    const roomCount = Math.max(3, Math.min(5, Math.floor(totalSqm / 18)))
+    const newKaltTotal = Math.round(totalKalt * 1.30)
+    const perRoomKalt = Math.round(newKaltTotal / roomCount)
+    const perRoomNk = Math.round(perRoomKalt * 0.30)  // shared utilities a touch higher per head
+    const perRoomSqm = Math.round(totalSqm / roomCount)
+
+    p.units = []
+    for (let i = 0; i < roomCount; i++) {
+      p.units.push({
+        id: 'u_' + Math.random().toString(36).slice(2, 6),
+        label: `Zimmer ${i + 1}`,
+        sqm: perRoomSqm,
+        baseKalt: perRoomKalt,
+        nebenkosten: perRoomNk,
+        vacantMonths: 0,
+      })
+    }
+    p.buildingForm = 'wg'
+    p.condition = Math.min(100, p.condition + 8)  // small condition bump from rebuild
+    this.state.player.cash -= cost
+    this.syncHeadlineFromUnits(p)
+    this.emit('renovated', { property: p, level: 'wg-conversion', cost })
+    this.emit('toast', { kind: 'success', text: `${this.nameFor(p)} zur WG umgebaut — ${roomCount} Zimmer (-${formatEuro(cost)}, +30% Mietpotenzial).` })
+    this.autoSave()
+    return { ok: true, cost }
+  }
+
+  // ----- WEG: Eigentuemerversammlung -----
+
+  private static WEG_PROPOSALS: Array<Omit<WEGProposal, 'id'>> = [
+    {
+      topic: 'fassade-sanierung',
+      title: 'Fassaden-Sanierung beschliessen',
+      body: 'Die Fassade broeckelt. Verwaltung schlaegt energetische Sanierung vor.',
+      totalCost: 80000,
+      conditionImpactIfYes: +12,
+      conditionImpactIfNo: -8,
+      consequenceIfYes: 'Sonderumlage anteilig, Zustand +12, langfristig weniger Capex',
+      consequenceIfNo: 'Zustand -8 in 12 Monaten, Capex-Risiko steigt',
+    },
+    {
+      topic: 'dach-sanierung',
+      title: 'Dach erneuern',
+      body: 'Bei Starkregen tropft es ins Treppenhaus. Komplette Eindeckung empfohlen.',
+      totalCost: 120000,
+      conditionImpactIfYes: +15,
+      conditionImpactIfNo: -10,
+      consequenceIfYes: 'Sonderumlage, Zustand +15, kein Dach-Capex 20 Jahre',
+      consequenceIfNo: 'Risiko Dach-Capex in 12 Monaten',
+    },
+    {
+      topic: 'heizung-tausch',
+      title: 'Heizungstausch (Gas → Waermepumpe)',
+      body: 'Die alte Heizung muss raus. Waermepumpe ist KfW-foerderbar.',
+      totalCost: 95000,
+      conditionImpactIfYes: +10,
+      conditionImpactIfNo: -6,
+      consequenceIfYes: 'Sonderumlage, Zustand +10, langfristig billiger',
+      consequenceIfNo: 'Heizungs-Capex bleibt latent',
+    },
+    {
+      topic: 'aufzug-modernisierung',
+      title: 'Aufzug modernisieren',
+      body: 'Steckenbleiben haeuft sich. Neuer Antrieb + Steuerung.',
+      totalCost: 60000,
+      conditionImpactIfYes: +6,
+      conditionImpactIfNo: -3,
+      consequenceIfYes: 'Sonderumlage, kleine Wertsteigerung',
+      consequenceIfNo: 'Komfort sinkt — Mieter beschweren sich',
+    },
+    {
+      topic: 'fahrradraum',
+      title: 'Fahrradraum + Lastenrad-Stellplaetze',
+      body: 'Nachfrage gross, Investition niedrig.',
+      totalCost: 12000,
+      conditionImpactIfYes: +2,
+      conditionImpactIfNo: 0,
+      consequenceIfYes: 'Kleine Sonderumlage, Mieter zufriedener',
+      consequenceIfNo: 'Status quo',
+    },
+    {
+      topic: 'hausordnung',
+      title: 'Hausordnung verschaerfen (Ruhezeiten)',
+      body: 'Beschwerden ueber Laerm. Strengere Regeln vorgeschlagen.',
+      totalCost: 0,
+      conditionImpactIfYes: +1,
+      conditionImpactIfNo: 0,
+      consequenceIfYes: 'Ruhigere Mieter ziehen ein, partyer ziehen weg',
+      consequenceIfNo: 'Status quo',
+    },
+    {
+      topic: 'hausverwaltung-wechsel',
+      title: 'Hausverwaltung wechseln',
+      body: 'Aktuelle Verwaltung schlampt mit Abrechnungen.',
+      totalCost: 0,
+      conditionImpactIfYes: +1,
+      conditionImpactIfNo: -1,
+      consequenceIfYes: 'Mehr Transparenz, kein Cash-Effekt',
+      consequenceIfNo: 'Status quo, weiter Frustration',
+    },
+  ]
+
+  /** Each month, check if any WEG-property of the player is due for an assembly.
+   *  Frequency: every 12 game-months from `wegMembership.nextAssemblyMonth`. */
+  private maybeScheduleWegAssembly(p: Property, rng: () => number) {
+    if (!p.wegMembership) return
+    if (this.gameMonth() < p.wegMembership.nextAssemblyMonth) return
+    if (this.state.wegAssemblies.some(a => a.propertyId === p.id && !a.decided)) return  // one at a time
+
+    const proposalCount = 2 + Math.floor(rng() * 3)
+    const pool = Engine.WEG_PROPOSALS.slice()
+    const proposals: WEGProposal[] = []
+    for (let i = 0; i < proposalCount && pool.length > 0; i++) {
+      const idx = Math.floor(rng() * pool.length)
+      const tpl = pool.splice(idx, 1)[0]
+      proposals.push({ ...tpl, id: 'pr_' + Math.random().toString(36).slice(2, 6) })
+    }
+    const playerShare = p.wegMembership.unitsOwned / p.wegMembership.totalUnits
+    this.state.wegAssemblies.push({
+      id: 'a_' + Math.random().toString(36).slice(2, 9),
+      propertyId: p.id,
+      scheduledMonth: this.gameMonth(),
+      proposals,
+      playerShare,
+      playerVotes: {},
+      decided: false,
+      outcomes: {},
+    })
+    p.wegMembership.nextAssemblyMonth = this.gameMonth() + 12
+    this.emit('wegAssembly', { propertyId: p.id })
+    this.emit('toast', { kind: 'info', text: `📋 Eigentuemerversammlung in ${this.nameFor(p)} — ${proposals.length} Tagesordnungspunkte. Stimmenanteil ${(playerShare * 100).toFixed(0)}%.` })
+  }
+
+  castWegVote(assemblyId: string, proposalId: string, vote: 'yes' | 'no' | 'abstain') {
+    const a = this.state.wegAssemblies.find(x => x.id === assemblyId)
+    if (!a || a.decided) return
+    a.playerVotes[proposalId] = vote
+  }
+
+  /** Apply the outcome of a finalized WEG assembly to the player's property. */
+  finalizeWegAssembly(assemblyId: string): { ok: boolean; reason?: string } {
+    const a = this.state.wegAssemblies.find(x => x.id === assemblyId)
+    if (!a) return { ok: false, reason: 'Versammlung nicht gefunden' }
+    if (a.decided) return { ok: false, reason: 'Bereits entschieden' }
+    const p = this.state.owned.find(pp => pp.id === a.propertyId)
+    if (!p) return { ok: false, reason: 'Property nicht mehr im Besitz' }
+
+    for (const prop of a.proposals) {
+      const playerVote = a.playerVotes[prop.id] ?? 'abstain'
+      // Other owners vote based on the proposal's economic appeal — energetic/required
+      // upgrades pass at 60-70% support, optional comfort items at 40-50%.
+      const baselineSupport = (prop.topic === 'dach-sanierung' || prop.topic === 'fassade-sanierung' || prop.topic === 'heizung-tausch') ? 0.65
+        : (prop.topic === 'aufzug-modernisierung' || prop.topic === 'fahrradraum') ? 0.45
+        : 0.50
+      const otherShare = 1 - a.playerShare
+      const yesFromOthers = baselineSupport * otherShare
+      const yesFromPlayer = playerVote === 'yes' ? a.playerShare : (playerVote === 'no' ? 0 : a.playerShare * 0.5)
+      const totalYes = yesFromOthers + yesFromPlayer
+      const passed = totalYes >= 0.5
+      a.outcomes[prop.id] = passed ? 'passed' : 'rejected'
+
+      if (passed) {
+        const playerCost = Math.round(prop.totalCost * a.playerShare)
+        if (playerCost > 0) this.state.player.cash -= playerCost
+        p.condition = Math.max(0, Math.min(100, p.condition + prop.conditionImpactIfYes))
+        if (playerCost > 0) {
+          this.emit('toast', { kind: 'info', text: `WEG: "${prop.title}" beschlossen — Sonderumlage ${formatEuro(playerCost)}.` })
+        } else {
+          this.emit('toast', { kind: 'info', text: `WEG: "${prop.title}" beschlossen.` })
+        }
+      } else {
+        p.condition = Math.max(0, Math.min(100, p.condition + prop.conditionImpactIfNo))
+      }
+    }
+    a.decided = true
     this.autoSave()
     return { ok: true }
   }
 
-  evictTenant(propertyId: string) {
+  // ============ HAUSVERWALTUNG (M8) ============
+
+  /** Compute the monthly Hausverwaltung fee for a property: 5% of total Kaltmiete,
+   *  with an 80€/Monat minimum so even tiny rentals cost something. */
+  managementFeeFor(p: Property): number {
+    const totalKalt = p.units.reduce((s, u) => s + u.baseKalt, 0)
+    return Math.max(80, Math.round(totalKalt * 0.05))
+  }
+
+  hireManagement(propertyId: string): { ok: boolean; reason?: string; fee?: number } {
     const p = this.state.owned.find(pp => pp.id === propertyId)
-    if (!p?.tenant) return
-    const tenantName = p.tenant.name
-    p.tenant = undefined
-    p.vacantMonths = 0
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    if (p.management) return { ok: false, reason: 'Verwaltung bereits beauftragt' }
+    p.management = {
+      hiredMonth: this.gameMonth(),
+      autoCapex: true,
+      autoTenant: true,
+      autoEviction: true,
+      rentStrategy: 'mietspiegel',
+    }
+    const fee = this.managementFeeFor(p)
+    this.emit('toast', { kind: 'success', text: `Hausverwaltung fuer ${this.nameFor(p)} beauftragt — ${formatEuro(fee)}/M.` })
+    this.autoSave()
+    return { ok: true, fee }
+  }
+
+  /** Update an existing management's settings (toggles + rent strategy). */
+  updateManagementSettings(propertyId: string, patch: Partial<import('./types').PropertyManagement>): { ok: boolean; reason?: string } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p?.management) return { ok: false, reason: 'Keine Verwaltung beauftragt' }
+    Object.assign(p.management, patch)
+    this.autoSave()
+    return { ok: true }
+  }
+
+  cancelManagement(propertyId: string): { ok: boolean; reason?: string } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    if (!p.management) return { ok: false, reason: 'Keine Verwaltung beauftragt' }
+    p.management = undefined
+    this.emit('toast', { kind: 'info', text: `Hausverwaltung fuer ${this.nameFor(p)} gekuendigt.` })
+    this.autoSave()
+    return { ok: true }
+  }
+
+  /** Run the Hausverwaltung's automations once per property per month. Returns the
+   *  monthly fee (already deducted from cash by the caller). */
+  private runManagement(p: Property, rng: () => number): number {
+    const m = p.management
+    if (!m) return 0
+    const fee = this.managementFeeFor(p)
+
+    // 1. Auto-pay capex if affordable. Skip if it'd push us under 5k cash buffer.
+    if (m.autoCapex && p.pendingCapex && this.state.player.cash >= p.pendingCapex.cost + 5000) {
+      const capName = p.pendingCapex.title
+      const r = this.payCapex(p.id)
+      if (r.ok) this.emit('toast', { kind: 'info', text: `Verwaltung: ${capName} bezahlt (${this.nameFor(p)}).` })
+    }
+
+    // 2. Auto-eviction on chronic non-payers / outed nomads.
+    if (m.autoEviction) {
+      for (const u of p.units) {
+        const t = u.tenant
+        if (!t) continue
+        const isOutedNomad = t.personality === 'nomad' && !t.disguisePersonality
+        if ((t.monthsBehind >= 3 || isOutedNomad) && !this.state.lawsuits.some(l => l.propertyId === p.id && l.tenantId === t.id && l.outcome === 'pending')) {
+          const r = this.startEviction(p.id, u.id)
+          if (r.ok) this.emit('toast', { kind: 'info', text: `Verwaltung: Raeumungsklage gegen ${t.name} eingeleitet.` })
+        }
+      }
+    }
+
+    // 3. Auto-tenant: pick the best applicant once a unit has been vacant 1+ month.
+    if (m.autoTenant) {
+      // Track ids picked this run so we don't sign the same person across units.
+      // getApplicants is deterministic per (rent, month) — without a per-unit
+      // salt, every vacant unit would see the same top applicant.
+      const usedIds = new Set<string>()
+      // Stable per-unit salt: derived from unit.id so re-runs produce the same
+      // assignments (no random churn across saves).
+      const saltFor = (uid: string) => {
+        let h = 0
+        for (let i = 0; i < uid.length; i++) h = (h * 31 + uid.charCodeAt(i)) >>> 0
+        return h
+      }
+      for (const u of p.units) {
+        if (u.tenant) continue
+        if (u.vacantMonths < 1) continue  // give the player a month to react first
+        // Resolve asking-Kaltmiete from the strategy
+        let askingKalt: number
+        switch (m.rentStrategy) {
+          case 'last':
+            askingKalt = u.lastKaltMiete ?? u.baseKalt
+            break
+          case 'mietspiegel':
+            // Top-of-market legal: Mietspiegel × 1.05 (just below the lawsuit threshold of 1.10)
+            askingKalt = Math.round(this.mietspiegelKaltForUnit(p, u) * 1.05)
+            break
+          case 'max':
+          default:
+            askingKalt = u.baseKalt
+        }
+        const apps = this.getApplicants(p.id, askingKalt, 5, saltFor(u.id))
+          .filter(a => !usedIds.has(a.id))
+        if (apps.length === 0) continue
+        apps.sort((a, b) => b.reliability - a.reliability)
+        const pick = apps[0]
+        usedIds.add(pick.id)
+        const leaseMonths = pick.preferredLeaseMonths
+        const r = this.signLease(p.id, pick, askingKalt, leaseMonths, u.id)
+        if (r.ok) this.emit('toast', { kind: 'info', text: `Verwaltung: ${pick.name} eingezogen in ${this.nameFor(p)} (${u.label}) fuer ${formatEuro(askingKalt)} kalt.` })
+      }
+    }
+    void rng
+    return fee
+  }
+
+  /** Tick the active renovation: advance current step, complete steps, roll risks. */
+  private tickRenovation(p: Property, rng: () => number) {
+    if (!p.activeRenovation) return
+    const c = p.activeRenovation
+    if (c.status !== 'active') return
+    const step = c.steps[c.currentStepIndex]
+    if (!step) return
+    // 1 month = 30 days of work
+    step.daysRemaining -= 30
+
+    // Insolvency roll mid-step (cheap only, very rare)
+    if (step.status === 'active' && step.contractorTier === 'cheap') {
+      const insolveProb = Engine.TIER_PROFILE.cheap.insolv
+      if (rng() < insolveProb) {
+        const lost = step.paidSoFar
+        this.emit('toast', { kind: 'error', text: `${step.contractorName} ist pleite! Anzahlung ${formatEuro(lost)} verloren — Auftrag fuer ${Engine.GEWERK_SPEC[step.gewerk].label} wird neu vergeben.` })
+        // Replace with a standard-tier emergency contractor at +20% cost
+        const replacement = this.state.contractorPool.find(c2 => c2.tier === 'standard') || this.state.contractorPool[0]
+        if (replacement) {
+          step.contractorId = replacement.id
+          step.contractorName = replacement.name + ' (Notfall +20%)'
+          step.contractorTier = 'standard'
+          const extra = Math.round(step.agreedCost * 0.2)
+          step.agreedCost += extra
+          c.totalAgreedCost += extra
+          step.daysRemaining = step.durationDays  // restart duration
+        }
+      }
+    }
+
+    // Mid-project Nachforderung roll (once per step, after ~50% done)
+    if (step.status === 'active' && !step.overrunTriggered && step.daysRemaining < step.durationDays * 0.5) {
+      const profile = Engine.TIER_PROFILE[step.contractorTier]
+      if (rng() < profile.overrun) {
+        step.overrunTriggered = true
+        const factor = 0.20 + rng() * 0.20  // +20-40%
+        const extra = Math.round(step.agreedCost * factor)
+        step.agreedCost += extra
+        c.totalAgreedCost += extra
+        // Auto-approved but visible — could become a player-decision modal later
+        this.emit('toast', { kind: 'warning', text: `Nachforderung von ${step.contractorName}: +${formatEuro(extra)} fuer ${Engine.GEWERK_SPEC[step.gewerk].label}.` })
+      }
+    }
+
+    // Completion?
+    if (step.daysRemaining <= 0) {
+      // Final payment for this step (remaining unpaid portion, proportional)
+      const stepShare = step.agreedCost - step.paidSoFar
+      this.state.player.cash -= stepShare
+      step.paidSoFar = step.agreedCost
+      c.totalPaidSoFar += stepShare
+      step.status = 'done'
+
+      // Pfusch roll on completion (delayed capex 6-18 months out)
+      if (!step.isSchwarz && step.warrantyMonths > 0) {
+        // official work — pfusch chance reduced by warranty
+        const profile = Engine.TIER_PROFILE[step.contractorTier]
+        if (rng() < profile.pfusch * 0.5) {
+          step.pfuschTriggered = true
+          this.schedulePfusch(p, step.gewerk, rng)
+        }
+      } else {
+        // Schwarz — full pfusch chance
+        const profile = Engine.TIER_PROFILE[step.contractorTier]
+        if (rng() < profile.pfusch * 1.5) {
+          step.pfuschTriggered = true
+          this.schedulePfusch(p, step.gewerk, rng)
+        }
+      }
+
+      // Update loyalty — completed jobs count
+      this.bumpLoyalty(step.contractorId, step.contractorName, step.agreedCost)
+
+      this.emit('toast', { kind: 'info', text: `${Engine.GEWERK_SPEC[step.gewerk].label} fertig (${step.contractorName}).` })
+
+      // Advance to next step or finish
+      c.currentStepIndex++
+      if (c.currentStepIndex >= c.steps.length) {
+        this.completeRenovation(p)
+      } else {
+        c.steps[c.currentStepIndex].status = 'active'
+      }
+    }
+  }
+
+  private completeRenovation(p: Property) {
+    if (!p.activeRenovation) return
+    const c = p.activeRenovation
+    p.condition = Math.min(100, p.condition + c.conditionGainOnComplete)
+    p.baseRent = Math.round(p.baseRent * c.rentMultOnComplete)
+    p.marketValue = Math.round(p.marketValue * c.valueMultOnComplete)
+    p.lastRenovationMonth = this.gameMonth()
+    if (c.modernizationEligible) p.modernizationUmlageAvailable = true
+    if (c.kfwSubsidyPct > 0) {
+      const refund = Math.round(c.totalAgreedCost * c.kfwSubsidyPct)
+      this.state.kfwPending.push({ id: 'kfw_' + Math.random().toString(36).slice(2, 9), triggerMonth: this.gameMonth() + 2, amount: refund })
+      this.emit('toast', { kind: 'success', text: `Renovierung abgeschlossen. KfW-Foerderung ${formatEuro(refund)} kommt in 2 Monaten.` })
+    } else {
+      this.emit('toast', { kind: 'success', text: `Renovierung abgeschlossen — Zustand +${c.conditionGainOnComplete}, Miete +${Math.round((c.rentMultOnComplete - 1) * 100)}%.` })
+    }
+    c.status = 'done'
+    p.activeRenovation = undefined
+    this.emit('renovationDone', { property: p, contract: c })
+  }
+
+  private schedulePfusch(p: Property, gewerk: GewerkKind, rng: () => number) {
+    const spec = Engine.GEWERK_SPEC[gewerk]
+    const capexKind: CapexKind = spec.capexLink ?? 'elektrik'
+    const trigger = this.gameMonth() + 6 + Math.floor(rng() * 12)
+    this.state.pfuschPending.push({
+      id: 'pf_' + Math.random().toString(36).slice(2, 9),
+      propertyId: p.id,
+      triggerMonth: trigger,
+      capexKind,
+      costEstimate: spec.baseCost * 1.5,
+    })
+  }
+
+  private bumpLoyalty(contractorId: string, contractorName: string, jobAmount: number) {
+    let rel = this.state.player.contractorRelations.find(r => r.contractorId === contractorId)
+    if (!rel) {
+      rel = { contractorId, contractorName, jobsCompleted: 0, totalSpent: 0, lastJobMonth: this.gameMonth() }
+      this.state.player.contractorRelations.push(rel)
+    }
+    rel.jobsCompleted++
+    rel.totalSpent += jobAmount
+    rel.lastJobMonth = this.gameMonth()
+  }
+
+  /** Tick scheduled pfusch — convert to a proper CapexEvent when its month arrives. */
+  private tickPfusch() {
+    const m = this.gameMonth()
+    const due = this.state.pfuschPending.filter(pf => pf.triggerMonth <= m)
+    for (const pf of due) {
+      const p = this.state.owned.find(pp => pp.id === pf.propertyId)
+      if (!p || p.pendingCapex) continue  // skip if property already has a pending capex
+      const cost = Math.round(pf.costEstimate * (0.8 + Math.random() * 0.4))
+      p.pendingCapex = {
+        id: 'cx_' + Math.random().toString(36).slice(2, 9),
+        propertyId: p.id,
+        kind: pf.capexKind,
+        title: `Pfusch-Folgeschaden: ${pf.capexKind}`,
+        body: 'Frueherer Pfusch eines Handwerkers macht sich jetzt bemerkbar. Alles muss nochmal saniert werden.',
+        cost,
+        conditionImpactIfIgnored: 25,
+        conditionGainIfPaid: 12,
+        appearedMonth: m,
+        deadlineMonth: m + 5,
+        state: 'pending',
+      }
+      this.emit('toast', { kind: 'error', text: `Pfusch-Folgeschaden in ${this.nameFor(p)}: ${formatEuro(cost)} faellig.` })
+    }
+    this.state.pfuschPending = this.state.pfuschPending.filter(pf => pf.triggerMonth > m)
+  }
+
+  /** Tick scheduled KfW refunds — pay out when bureaucracy completes. */
+  private tickKfw() {
+    const m = this.gameMonth()
+    const due = this.state.kfwPending.filter(k => k.triggerMonth <= m)
+    for (const k of due) {
+      this.state.player.cash += k.amount
+      this.emit('toast', { kind: 'success', text: `KfW-Foerderung eingegangen: ${formatEuro(k.amount)}.` })
+    }
+    this.state.kfwPending = this.state.kfwPending.filter(k => k.triggerMonth > m)
+  }
+
+  /**
+   * Annual Mietspiegel update — runs in January. Each district's reference
+   * Kaltmiete drifts up by `district.trend% + market.cycle * 0.5` per year so
+   * the legal rent baseline tracks inflation and district demand.
+   *
+   * Without this, the player's rents (which they hike opportunistically) outpace
+   * the Mietspiegel forever, locking them into Mietpreisbremse jail. With it,
+   * after holding a property for a few years the Mietspiegel rises enough to
+   * unlock another legal hike round.
+   */
+  private maybeAdjustMietspiegel() {
+    if (this.state.time.month !== 1) return
+    const cycleBoost = this.state.market.cycle * 0.005  // 0.4 cycle → +0.2pp
+    const all = [...this.state.listings, ...this.state.owned]
+    for (const p of all) {
+      const districtDef = this.districtById(p.district)
+      const annual = (districtDef.trend / 100) + cycleBoost  // e.g. mitte 1.5% + cycle ~ 1.7%/yr
+      p.mietspiegelKalt = Math.round(p.mietspiegelKalt * (1 + annual))
+    }
+    this.emit('toast', { kind: 'info', text: `Neuer Mietspiegel veroeffentlicht — Referenzmieten leicht angehoben.` })
+  }
+
+  /** Once a year (January), roll for a tax audit. Probability depends on Schwarz job count,
+   *  property portfolio size (more visibility), and district mix (Mitte = high enforcement). */
+  private maybeRollTaxAudit() {
+    if (this.state.time.month !== 1) return
+    if (this.state.player.schwarzJobsThisYear === 0) {
+      this.state.player.schwarzJobsThisYear = 0
+      return
+    }
+    // base risk: 4% per Schwarz job this year, modulated by district enforcement
+    const properties = this.state.owned
+    const enforcement = properties.length === 0 ? 1 : properties.reduce((s, p) => {
+      const factor = p.district === 'mitte' ? 1.5 : p.district === 'charlottenburg' ? 1.2
+        : p.district === 'wedding' ? 0.5 : p.district === 'neukoelln' ? 0.7 : 1.0
+      return s + factor
+    }, 0) / properties.length
+    const auditProb = Math.min(0.85, 0.04 * this.state.player.schwarzJobsThisYear * enforcement)
+    if (Math.random() < auditProb) {
+      // Rough penalty: 3x what you "saved" by going Schwarz this year
+      // We approximate the saved amount as ~35% of an average Gewerk cost (~6000) per job
+      const savedEstimate = this.state.player.schwarzJobsThisYear * 0.35 * 6000
+      const fine = Math.round(savedEstimate * 3)
+      this.state.player.cash -= fine
+      this.state.player.reputation = Math.max(0, this.state.player.reputation - 15)
+      this.state.player.creditScore = Math.max(300, this.state.player.creditScore - 50)
+      this.state.player.taxAuditsExperienced++
+      this.emit('toast', { kind: 'error', text: `🚨 Zoll-Pruefung! ${this.state.player.schwarzJobsThisYear} Schwarz-Jobs entdeckt. Strafe ${formatEuro(fine)}, Reputation -15, Score -50.` })
+    }
+    this.state.player.schwarzJobsThisYear = 0
+  }
+
+  /**
+   * Raise the Kaltmiete on an existing tenant.
+   * Returns lawsuit risk so the UI can warn before committing.
+   * Above Mietspiegel × 1.10 ("Mietpreisbremse"), the tenant may sue:
+   *   1.10 → ~0% risk; 1.20 → ~50%; 1.30+ → ~95%.
+   * If a suit is filed, raise still applies immediately, but a Lawsuit
+   * runs for 4-6 months. Won → keep new rent; lost → revert + Reputation -10.
+   */
+  raiseRent(propertyId: string, newKalt: number, unitId?: string): { ok: boolean; reason?: string; lawsuitFiled?: boolean; lawsuitChance?: number } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => x.tenant)
+    if (!u || !u.tenant) return { ok: false, reason: 'Kein Mieter — Miete im naechsten Vertrag setzen' }
+    const t = u.tenant
+    if (newKalt <= t.agreedKaltMiete) return { ok: false, reason: 'Neue Miete muss hoeher sein' }
+    // Kappungsgrenze: 12-month cooldown per tenant (BGB §558: max 20% in 3y; we
+    // approximate with one hike per 12 months which is the practical equivalent).
+    const COOLDOWN_MONTHS = 12
+    if (typeof t.lastRentHikeMonth === 'number') {
+      const elapsed = this.gameMonth() - t.lastRentHikeMonth
+      if (elapsed < COOLDOWN_MONTHS) {
+        return { ok: false, reason: `Mieterhoehungs-Sperre noch ${COOLDOWN_MONTHS - elapsed} Monate (Kappungsgrenze).` }
+      }
+    }
+
+    // Lawsuit risk compares newKalt to the PER-UNIT Mietspiegel — for MFH the
+    // property-level value is the sum across units, which is not comparable to
+    // a single unit's rent.
+    const mietspiegelRef = this.mietspiegelKaltForUnit(p, u)
+    const ratio = newKalt / Math.max(1, mietspiegelRef)
+    const lawsuitChance = ratio <= 1.10 ? 0
+      : ratio >= 1.30 ? 0.95
+      : (ratio - 1.10) * 5
+
+    const hikePct = (newKalt - t.agreedKaltMiete) / Math.max(1, t.agreedKaltMiete)
+    t.satisfaction = Math.max(0, t.satisfaction - hikePct * 60)
+
+    const oldKalt = t.agreedKaltMiete
+    t.agreedKaltMiete = newKalt
+    t.lastRentHikeMonth = this.gameMonth()
+    u.baseKalt = Math.max(u.baseKalt, newKalt)
+    this.syncHeadlineFromUnits(p)
+
+    let lawsuitFiled = false
+    if (lawsuitChance > 0 && Math.random() < lawsuitChance) {
+      lawsuitFiled = true
+      const months = 4 + Math.floor(Math.random() * 3)
+      const monthlyCost = Math.round((800 + Math.floor(Math.random() * 700)) * this.diffConfig().lawsuitMonthlyMult)
+      const successChance = Math.max(0.05, 1 - lawsuitChance)
+      this.state.lawsuits.push({
+        id: 'ls_' + Math.random().toString(36).slice(2, 9),
+        propertyId: p.id,
+        reason: 'rent-hike',
+        monthsRemaining: months,
+        totalMonths: months,
+        monthlyCost,
+        totalSpent: 0,
+        successChance,
+        revertToKalt: oldKalt,
+        tenantId: t.id,
+        outcome: 'pending',
+      })
+      this.emit('toast', { kind: 'warning', text: `${t.name} reicht Klage gegen Mieterhoehung ein. Anwaltskosten ${formatEuro(monthlyCost)}/M, ${months} Monate.` })
+    } else {
+      this.emit('toast', { kind: 'success', text: `Miete bei ${this.nameFor(p)} auf ${formatEuro(newKalt)} kalt erhoeht.` })
+    }
+    this.autoSave()
+    return { ok: true, lawsuitFiled, lawsuitChance }
+  }
+
+  /** UI helper: show the player the lawsuit risk before they commit */
+  rentHikeRisk(propertyId: string, newKalt: number, unitId?: string): { ratio: number; lawsuitChance: number; mietspiegelKalt: number } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ratio: 1, lawsuitChance: 0, mietspiegelKalt: 0 }
+    const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => x.tenant)
+    const mietspiegelRef = u ? this.mietspiegelKaltForUnit(p, u) : p.mietspiegelKalt
+    const ratio = newKalt / Math.max(1, mietspiegelRef)
+    const lawsuitChance = ratio <= 1.10 ? 0 : ratio >= 1.30 ? 0.95 : Math.min(1, (ratio - 1.10) * 5)
+    return { ratio, lawsuitChance, mietspiegelKalt: mietspiegelRef }
+  }
+
+  /**
+   * Cooperative termination — works only for tenants who'll actually leave when asked
+   * (i.e. not Mietnomaden, not deeply in arrears). Costs -5 Reputation.
+   * Suggest startEviction() for problem tenants.
+   */
+  evictTenant(propertyId: string, unitId?: string): { ok: boolean; reason?: string } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => x.tenant)
+    if (!u || !u.tenant) return { ok: false, reason: 'Kein Mieter' }
+    const t = u.tenant
+    if (t.personality === 'nomad') {
+      this.emit('toast', { kind: 'error', text: `${t.name} ignoriert die Kuendigung — nur Raeumungsklage hilft.` })
+      return { ok: false, reason: 'Mieter ignoriert Kuendigung — Raeumungsklage einleiten' }
+    }
+    if (t.monthsBehind >= 2) {
+      this.emit('toast', { kind: 'error', text: `${t.name} verweigert Auszug bei Mietrueckstand. Raeumungsklage erforderlich.` })
+      return { ok: false, reason: 'Mieter im Rueckstand zieht nicht freiwillig aus' }
+    }
+    const tenantName = t.name
+    u.lastKaltMiete = t.agreedKaltMiete
+    u.tenant = undefined
+    u.vacantMonths = 0
+    this.syncHeadlineFromUnits(p)
     this.state.player.reputation = Math.max(0, this.state.player.reputation - 5)
     this.emit('toast', { kind: 'warning', text: `${tenantName} gekuendigt — Reputation -5` })
     this.autoSave()
+    return { ok: true }
+  }
+
+  /** UI helper: how good is the eviction case before the player commits? */
+  evictionEstimate(propertyId: string, unitId?: string): { months: number; monthlyCost: number; totalCost: number; successChance: number } | null {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return null
+    const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => x.tenant)
+    if (!u?.tenant) return null
+    const t = u.tenant
+    const months = 4 + Math.floor(Math.random() * 3)
+    const monthlyCost = Math.round((1000 + Math.floor(Math.random() * 500)) * this.diffConfig().lawsuitMonthlyMult)
+    const isNomad = t.personality === 'nomad' && !t.disguisePersonality
+    const grounds =
+      (isNomad ? 0.5 : 0) +
+      Math.min(0.4, t.monthsBehind * 0.1) +
+      (t.satisfaction < 25 ? 0.05 : 0)
+    const successChance = Math.min(0.95, 0.45 + grounds)
+    return { months, monthlyCost, totalCost: months * monthlyCost, successChance }
+  }
+
+  /** Start a Raeumungsklage. Tenant remains in the property until the suit ends. */
+  startEviction(propertyId: string, unitId?: string): { ok: boolean; reason?: string; lawsuit?: Lawsuit } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p) return { ok: false, reason: 'Nicht im Besitz' }
+    const u = unitId ? p.units.find(x => x.id === unitId) : p.units.find(x => x.tenant)
+    if (!u?.tenant) return { ok: false, reason: 'Kein Mieter' }
+    const tenantId = u.tenant.id
+    if (this.state.lawsuits.some(l => l.propertyId === propertyId && l.reason === 'eviction' && l.tenantId === tenantId && l.outcome === 'pending')) {
+      return { ok: false, reason: 'Klage laeuft bereits' }
+    }
+    const est = this.evictionEstimate(propertyId, u.id)!
+    const months = 4 + Math.floor(Math.random() * 3)
+    const monthlyCost = Math.round((1000 + Math.floor(Math.random() * 500)) * this.diffConfig().lawsuitMonthlyMult)
+    const lawsuit: Lawsuit = {
+      id: 'ev_' + Math.random().toString(36).slice(2, 9),
+      propertyId,
+      reason: 'eviction',
+      monthsRemaining: months,
+      totalMonths: months,
+      monthlyCost,
+      totalSpent: 0,
+      successChance: est.successChance,
+      tenantId,
+      outcome: 'pending',
+    }
+    this.state.lawsuits.push(lawsuit)
+    this.emit('toast', { kind: 'warning', text: `Raeumungsklage gegen ${u.tenant.name} eingereicht — ${months} M, ${formatEuro(monthlyCost)}/M, Erfolg ${(est.successChance * 100).toFixed(0)}%.` })
+    this.autoSave()
+    return { ok: true, lawsuit }
+  }
+
+  // ============ CAPEX ============
+
+  /**
+   * Major repair roll — building parts wear out by age, accelerated by poor
+   * condition. Each property holds at most one pending capex at a time, so we
+   * also handle the "deadline reached without payment" branch here.
+   */
+  private tickCapex(p: Property, rng: () => number) {
+    if (p.pendingCapex) {
+      // expired?
+      if (this.gameMonth() >= p.pendingCapex.deadlineMonth) {
+        const cap = p.pendingCapex
+        cap.state = 'expired'
+        p.condition = Math.max(0, p.condition - cap.conditionImpactIfIgnored)
+        for (const u of p.units) if (u.tenant) u.tenant.satisfaction = Math.max(0, u.tenant.satisfaction - 20)
+        this.state.capexHistory.push(cap)
+        p.pendingCapex = undefined
+        this.emit('toast', { kind: 'error', text: `${cap.title} bei ${this.nameFor(p)} ignoriert — Zustand -${cap.conditionImpactIfIgnored}, Mieter sauer.` })
+      }
+      return
+    }
+    // Honeymoon: skip capex rolls during the player's first N months.
+    if (this.gameMonth() < this.diffConfig().capexHoneymoonMonths) return
+    const ev = this.rollCapex(p, rng)
+    if (ev) {
+      p.pendingCapex = ev
+      this.emit('capex', ev)
+      this.emit('toast', { kind: 'warning', text: `⚠ ${ev.title} in ${this.nameFor(p)} — ${formatEuro(ev.cost)} binnen ${ev.deadlineMonth - this.gameMonth()} Monaten` })
+    }
+  }
+
+  /** Tuned probabilities and cost ranges per capex kind. */
+  private static CAPEX_TABLE: Record<CapexKind, {
+    minAgeYears: number
+    baseRiskAtCond50: number    // monthly probability when condition = 50
+    minCost: number
+    maxCost: number
+    impact: number              // condition drop if ignored
+    gain: number                // condition rise if paid
+    title: string
+    body: string
+    deadlineMonths: [number, number]  // [min, max] grace period
+  }> = {
+    elektrik: {
+      minAgeYears: 30, baseRiskAtCond50: 0.005, minCost: 4000, maxCost: 9000,
+      impact: 22, gain: 12, title: 'Elektrik defekt',
+      body: 'Sicherungen fliegen regelmaessig. Stromleitungen muessen erneuert werden.',
+      deadlineMonths: [4, 8],
+    },
+    fenster: {
+      minAgeYears: 30, baseRiskAtCond50: 0.006, minCost: 5000, maxCost: 12000,
+      impact: 18, gain: 12, title: 'Fenster undicht',
+      body: 'Holzfenster aus dem Bestand sind zugig. Mieter beschweren sich ueber Heizkosten.',
+      deadlineMonths: [6, 10],
+    },
+    steigstrang: {
+      minAgeYears: 40, baseRiskAtCond50: 0.008, minCost: 8000, maxCost: 15000,
+      impact: 25, gain: 15, title: 'Steigstrang muss saniert werden',
+      body: 'Das Wassersteigrohr ist marode. Wenn es bricht, gibt es einen Wasserschaden.',
+      deadlineMonths: [4, 7],
+    },
+    fassade: {
+      minAgeYears: 40, baseRiskAtCond50: 0.005, minCost: 15000, maxCost: 30000,
+      impact: 22, gain: 14, title: 'Fassade broeckelt',
+      body: 'Putz fault ab, Fugen gehen auf. Spaetestens jetzt teure Sanierung faellig.',
+      deadlineMonths: [8, 14],
+    },
+    heizung: {
+      minAgeYears: 25, baseRiskAtCond50: 0.010, minCost: 12000, maxCost: 25000,
+      impact: 28, gain: 16, title: 'Heizung ausgefallen',
+      body: 'Der Brenner gibt auf. Im Winter ohne Heizung droht Mietminderung.',
+      deadlineMonths: [3, 6],
+    },
+    dach: {
+      minAgeYears: 50, baseRiskAtCond50: 0.004, minCost: 20000, maxCost: 40000,
+      impact: 35, gain: 18, title: 'Dach undicht',
+      body: 'Bei Starkregen tropft es ins Treppenhaus. Komplette Eindeckung empfohlen.',
+      deadlineMonths: [6, 12],
+    },
+  }
+
+  private rollCapex(p: Property, rng: () => number): CapexEvent | null {
+    const cfg = this.diffConfig()
+    const ageYears = this.state.time.year - p.yearBuilt
+    if (ageYears < 25 + cfg.capexMinAgeBonus) return null
+    // condition multiplier — bad shape doubles the risk, top shape halves it
+    const condMult = Math.max(0.4, 1.5 - p.condition / 100)
+    const candidates: CapexKind[] = []
+    for (const kind of Object.keys(Engine.CAPEX_TABLE) as CapexKind[]) {
+      const e = Engine.CAPEX_TABLE[kind]
+      if (ageYears < e.minAgeYears + cfg.capexMinAgeBonus) continue
+      const risk = e.baseRiskAtCond50 * condMult * cfg.capexRiskMult
+      if (rng() < risk) candidates.push(kind)
+    }
+    if (candidates.length === 0) return null
+    candidates.sort((a, b) => Engine.CAPEX_TABLE[b].minCost - Engine.CAPEX_TABLE[a].minCost)
+    const kind = candidates[0]
+    const e = Engine.CAPEX_TABLE[kind]
+    const cost = Math.round(e.minCost + rng() * (e.maxCost - e.minCost))
+    const grace = e.deadlineMonths[0] + Math.floor(rng() * (e.deadlineMonths[1] - e.deadlineMonths[0] + 1))
+    return {
+      id: 'cx_' + Math.random().toString(36).slice(2, 9),
+      propertyId: p.id,
+      kind,
+      title: e.title,
+      body: e.body,
+      cost,
+      conditionImpactIfIgnored: Math.round(e.impact * cfg.capexImpactMult),
+      conditionGainIfPaid: e.gain,
+      appearedMonth: this.gameMonth(),
+      deadlineMonth: this.gameMonth() + grace,
+      state: 'pending',
+    }
+  }
+
+  payCapex(propertyId: string): { ok: boolean; reason?: string } {
+    const p = this.state.owned.find(pp => pp.id === propertyId)
+    if (!p?.pendingCapex) return { ok: false, reason: 'Keine offene Reparatur' }
+    const cap = p.pendingCapex
+    if (this.state.player.cash < cap.cost) return { ok: false, reason: `Brauchst ${formatEuro(cap.cost)}` }
+    this.state.player.cash -= cap.cost
+    cap.state = 'paid'
+    p.condition = Math.min(100, p.condition + cap.conditionGainIfPaid)
+    this.state.capexHistory.push(cap)
+    p.pendingCapex = undefined
+    this.emit('capexPaid', { property: p, capex: cap })
+    this.emit('toast', { kind: 'success', text: `${cap.title} repariert (-${formatEuro(cap.cost)}, +${cap.conditionGainIfPaid} Zustand).` })
+    this.autoSave()
+    return { ok: true }
   }
 
   // ============ DERIVED ============
@@ -649,15 +2130,29 @@ export class Engine {
     return Math.round(this.state.player.cash + propValue - debt)
   }
 
-  monthlyCashflow(): { rent: number; maintenance: number; loanPayments: number; overhead: number; net: number } {
-    let rent = 0, maintenance = 0, loanPayments = 0
+  monthlyCashflow(): { rent: number; maintenance: number; loanPayments: number; management: number; overhead: number; net: number } {
+    let rent = 0, maintenance = 0, loanPayments = 0, management = 0
     for (const p of this.state.owned) {
-      if (p.tenant) rent += this.effectiveRent(p) * (p.tenant.reliability / 100)
+      const reductionFactor = p.activeRenovation && p.activeRenovation.status === 'active'
+        ? (1 - p.activeRenovation.rentReductionPct)
+        : 1
+      for (const u of p.units) {
+        if (u.tenant) rent += u.tenant.agreedKaltMiete * (u.tenant.reliability / 100) * reductionFactor
+      }
       maintenance += this.maintenanceCost(p)
+      if (p.wegMembership) maintenance += p.wegMembership.hausgeldMonthly
+      if (p.management) management += this.managementFeeFor(p)
     }
     for (const l of this.state.loans) loanPayments += l.monthlyPayment
-    const overhead = 1500 + Math.round(this.state.owned.length * 80)
-    return { rent: Math.round(rent), maintenance, loanPayments, overhead, net: Math.round(rent - maintenance - loanPayments - overhead) }
+    const overhead = this.diffConfig().overheadMonthly + Math.round(this.state.owned.length * 80)
+    return {
+      rent: Math.round(rent),
+      maintenance,
+      loanPayments,
+      management,
+      overhead,
+      net: Math.round(rent - maintenance - loanPayments - management - overhead),
+    }
   }
 
   capRate(p: Property): number {
@@ -735,7 +2230,7 @@ export class Engine {
     try {
       const slim = {
         state: this.state,
-        v: 2,
+        v: 4,
         ts: Date.now(),
       }
       localStorage.setItem(SAVE_KEY, JSON.stringify(slim))
@@ -746,8 +2241,21 @@ export class Engine {
       const raw = localStorage.getItem(SAVE_KEY)
       if (!raw) return false
       const data = JSON.parse(raw)
-      if (data.v !== 2 || !data.state) return false
+      // Accept v=2 (pre-locked-districts world, 36 tiles wide), v=3 (60-tile
+      // world with locked districts) and v=4 (adds player.unlockedDistricts).
+      // v=2 saves get property tile coords shifted +12; v<4 saves get
+      // unlockedDistricts seeded from the layout.
+      if ((data.v !== 2 && data.v !== 3 && data.v !== 4) || !data.state) return false
       this.state = data.state as GameState
+      const fromV2 = data.v === 2
+      if (fromV2) {
+        const shift = (p: Property) => { p.tileX = p.tileX + 12 }
+        this.state.listings.forEach(shift)
+        this.state.owned.forEach(shift)
+      }
+      if (!Array.isArray(this.state.unlockedDistricts) || this.state.unlockedDistricts.length === 0) {
+        this.state.unlockedDistricts = this.layout.districts.filter(d => !d.locked).map(d => d.id)
+      }
       // sanity defaults
       if (!Array.isArray(this.state.player.netWorthHistory)) this.state.player.netWorthHistory = []
       if (!Array.isArray(this.state.player.achievements)) this.state.player.achievements = []
@@ -762,6 +2270,69 @@ export class Engine {
         // re-seed brokers from fresh state
         const fresh = this.freshState()
         this.state.brokers = fresh.brokers
+      }
+      // M1: Kalt/Warm split — give every Property a nebenkosten + mietspiegel value,
+      // and split legacy Tenant.agreedRent into agreedKaltMiete / agreedNebenkosten.
+      const migrateProperty = (p: Property) => {
+        if (typeof p.nebenkosten !== 'number') p.nebenkosten = Math.round(p.baseRent * 0.25)
+        // Re-derive mietspiegelKalt from baseRent for ALL saved properties.
+        // Earlier versions stored a (district, type) table value that drifted
+        // far from the actual baseRent and made the rent UI misleading
+        // (signed below or above by 50%+). Anchoring to baseRent / 1.05 keeps
+        // the legal threshold meaningful and the displayed ratios accurate.
+        p.mietspiegelKalt = Math.round(p.baseRent / 1.05)
+        if (p.tenant) {
+          const t = p.tenant as Tenant & { agreedRent?: number }
+          if (typeof t.agreedKaltMiete !== 'number') {
+            t.agreedKaltMiete = typeof t.agreedRent === 'number' ? t.agreedRent : p.baseRent
+          }
+          if (typeof t.agreedNebenkosten !== 'number') {
+            t.agreedNebenkosten = p.nebenkosten
+          }
+          delete t.agreedRent
+        }
+      }
+      this.state.listings.forEach(migrateProperty)
+      this.state.owned.forEach(migrateProperty)
+      // M1: lawsuits array
+      if (!Array.isArray(this.state.lawsuits)) this.state.lawsuits = []
+      // M2: capex history (pendingCapex on individual properties is fine as undef)
+      if (!Array.isArray(this.state.capexHistory)) this.state.capexHistory = []
+      // M2.5: renovation/contractor state
+      if (!Array.isArray(this.state.player.contractorRelations)) this.state.player.contractorRelations = []
+      if (typeof this.state.player.schwarzJobsThisYear !== 'number') this.state.player.schwarzJobsThisYear = 0
+      if (typeof this.state.player.totalSchwarzJobs !== 'number') this.state.player.totalSchwarzJobs = 0
+      if (typeof this.state.player.taxAuditsExperienced !== 'number') this.state.player.taxAuditsExperienced = 0
+      if (!Array.isArray(this.state.pfuschPending)) this.state.pfuschPending = []
+      if (!Array.isArray(this.state.kfwPending)) this.state.kfwPending = []
+      if (!Array.isArray(this.state.contractorPool) || this.state.contractorPool.length === 0) {
+        this.state.contractorPool = this.generateContractorPool()
+      }
+      // M5: multi-unit support — every Property must have `units` and `buildingForm`.
+      // Old saves get a single synthetic unit synthesised from the legacy headline fields.
+      const ensureUnits = (p: Property) => {
+        if (!Array.isArray(p.units) || p.units.length === 0) {
+          p.units = [{
+            id: 'u_' + Math.random().toString(36).slice(2, 6),
+            label: 'Einheit',
+            sqm: 60,
+            baseKalt: p.baseRent,
+            nebenkosten: typeof p.nebenkosten === 'number' ? p.nebenkosten : Math.round(p.baseRent * 0.25),
+            tenant: p.tenant,
+            vacantMonths: p.vacantMonths,
+            applicantSearches: p.applicantSearches,
+          }]
+        }
+        if (!p.buildingForm) p.buildingForm = 'single'
+      }
+      this.state.listings.forEach(ensureUnits)
+      this.state.owned.forEach(ensureUnits)
+      if (!Array.isArray(this.state.wegAssemblies)) this.state.wegAssemblies = []
+      // M7: difficulty default for old saves
+      if (!this.state.difficulty) this.state.difficulty = 'standard'
+      // M8.1: management.rentStrategy default for old saves where it might be missing
+      for (const p of this.state.owned) {
+        if (p.management && !p.management.rentStrategy) p.management.rentStrategy = 'mietspiegel'
       }
       return true
     } catch { return false }
@@ -790,27 +2361,14 @@ export class Engine {
     return this.state.brokers.find(b => b.id === id) ?? null
   }
 
-  /** Strength = how much the player can push the seller down. Higher = better deals. 0..100 */
-  negotiationStrength(p?: Property): number {
+  /** Strength = how much the player can push the seller down. Higher = better deals. 0..100
+   *  Buy-side has no player broker any more (M4 refactor) — only player skill + reputation
+   *  count, plus the listing-agent (if `Property.seller.channel === 'agent'`) influences
+   *  the seller's floor inside the negotiation flow elsewhere. */
+  negotiationStrength(_p?: Property): number {
     const player = this.state.player
     let s = player.negotiationSkill
     s += player.reputation * 0.15
-    const broker = this.currentBroker()
-    if (broker) {
-      let bonus = broker.negotiationBonus
-      if (p) {
-        const isLuxury = p.type === 'villa' || p.type === 'tower'
-        const isCommercial = p.type === 'shop' || p.type === 'office'
-        const isBudget = p.price < 200_000
-        if ((isLuxury && broker.specialty === 'luxury') ||
-            (isCommercial && broker.specialty === 'commercial') ||
-            (isBudget && broker.specialty === 'budget') ||
-            (!isLuxury && !isCommercial && broker.specialty === 'residential')) {
-          bonus += 5
-        }
-      }
-      s += bonus
-    }
     return Math.max(0, Math.min(100, s))
   }
 
@@ -829,11 +2387,8 @@ export class Engine {
     const personaMod = personaFloorMod(seller.ownerPersona)
     // listing agent (if any) tightens or loosens floor
     const agentFloorMod = seller.channel === 'agent' ? listingAgentFloorMod(seller.agentPersonality!) : 0
-    // buyer's broker synergy with owner persona
-    const buyerBroker = this.currentBroker()
-    const personaBrokerSynergy = buyerBroker ? sellerBrokerSynergy(seller.ownerPersona, buyerBroker.personality) : 0
 
-    const baseMin = p.marketValue * (personaMod + agentFloorMod - stalenessDiscount + personaBrokerSynergy)
+    const baseMin = p.marketValue * (personaMod + agentFloorMod - stalenessDiscount)
     const minMargin = baseMin * (1 - (strength / 100) * 0.10)
     const sellerMin = Math.max(p.marketValue * 0.65, Math.round(minMargin))
 
@@ -841,7 +2396,7 @@ export class Engine {
     const maxRounds = seller.channel === 'agent' ? (seller.agentPersonality === 'pushy' ? 3 : 4)
                       : persona === 'rushed' ? 3
                       : persona === 'stubborn' ? 5
-                      : (buyerBroker ? 5 : 4)
+                      : 4
 
     const intro: SellerNegotiationState['messages'] = []
     if (seller.channel === 'private') {
@@ -851,7 +2406,6 @@ export class Engine {
       intro.push({ from: 'system', text: `Vermittelt von ${seller.agentName!} — ${escapeFlavor(seller.agentBlurb!)}. Eigentuemer: ${seller.ownerName} (${escapeFlavor(seller.flavor)}). Grund: ${escapeFlavor(seller.reason)}.` })
       intro.push({ from: 'seller', text: `${seller.agentName}: "${listingAgentOpening(seller.agentPersonality!, p.price, p.marketValue)}"` })
     }
-    if (buyerBroker) intro.push({ from: 'broker', text: `${buyerBroker.name}: ${buyerBroker.catchphrase || '"Lass uns das anpacken."'}` })
 
     return {
       propertyId,
@@ -860,7 +2414,7 @@ export class Engine {
       currentSellerOffer: p.price,
       rounds: 0,
       maxRounds,
-      brokerHired: this.state.player.brokerId,
+      brokerHired: null,
       done: false,
       outcome: 'pending',
       messages: intro,
@@ -874,11 +2428,10 @@ export class Engine {
     if (!p || !p.seller) { neg.done = true; neg.outcome = 'rejected'; neg.messages.push({ from: 'system', text: 'Inserat nicht mehr verfuegbar.' }); return neg }
     const seller = p.seller
     const persona = seller.ownerPersona
-    const buyerBroker = this.currentBroker()
     const speaker = seller.channel === 'agent' ? seller.agentName! : seller.ownerName
 
     neg.rounds++
-    neg.messages.push({ from: 'player', text: `Du${buyerBroker ? ' (via ' + buyerBroker.name + ')' : ''} bietest ${formatEuro(offerPrice)}.` })
+    neg.messages.push({ from: 'player', text: `Du bietest ${formatEuro(offerPrice)}.` })
 
     // Persona-tuned thresholds (modified slightly when via agent — agents more by-the-book)
     const acceptShift = seller.channel === 'agent' ? 0.005 : 0
@@ -887,7 +2440,7 @@ export class Engine {
     const insultBase = (persona === 'sentimental' ? 0.95 : persona === 'stubborn' ? 0.92 : persona === 'desperate' ? 0.7 : 0.82)
     const insultThreshold = seller.channel === 'agent' ? insultBase * 0.85 : insultBase
 
-    const walkRiskMult = buyerBroker?.personality === 'pushy' && seller.channel === 'private' ? 1.15 : 1.0
+    const walkRiskMult = 1.0
 
     if (offerPrice >= neg.currentSellerOffer * acceptThreshold) {
       neg.done = true; neg.outcome = 'accepted'
@@ -902,7 +2455,7 @@ export class Engine {
       neg.done = true; neg.outcome = 'rejected'
       const line = seller.channel === 'agent'
         ? listingAgentInsult(seller.agentPersonality!)
-        : insultLine(persona, buyerBroker?.personality)
+        : insultLine(persona, undefined)
       neg.messages.push({ from: 'seller', text: `${speaker}: "${line}"` })
       return neg
     }
@@ -938,22 +2491,21 @@ export class Engine {
   acceptSellerOffer(neg: SellerNegotiationState, withLoanFromBank?: string, ltv?: number, bankTermsOverride?: BankOfferTerms): { ok: boolean; reason?: string } {
     const p = this.state.listings.find(pp => pp.id === neg.propertyId)
     if (!p) return { ok: false, reason: 'Inserat nicht mehr verfuegbar' }
-    // Mutate the listing's price to the negotiated value, then buy
+    // Mutate the listing's price to the negotiated value, then buy.
+    // M4: no buyer-side broker commission any more.
     const negotiatedPrice = neg.currentSellerOffer
-    const broker = this.currentBroker()
-    const commission = broker ? Math.round(negotiatedPrice * broker.commissionPct) : 0
 
     const oldPrice = p.price
     p.price = negotiatedPrice
-    const res = this.buy(p.id, withLoanFromBank, ltv, { extraCashCost: commission, bankTermsOverride })
+    const res = this.buy(p.id, withLoanFromBank, ltv, { bankTermsOverride })
     if (!res.ok) {
       p.price = oldPrice  // rollback
       return res
     }
 
-    // Successful negotiation grows skill + bank/broker relations
+    // Successful negotiation grows skill
     this.state.player.negotiationSkill = Math.min(100, this.state.player.negotiationSkill + 1)
-    this.emit('toast', { kind: 'success', text: `Verhandelt: ${formatEuro(oldPrice - negotiatedPrice)} gespart!${broker ? ` (Provision ${formatEuro(commission)})` : ''}` })
+    this.emit('toast', { kind: 'success', text: `Verhandelt: ${formatEuro(oldPrice - negotiatedPrice)} gespart!` })
     return { ok: true }
   }
 
@@ -1061,17 +2613,6 @@ function personaFloorMod(p: SellerPersona): number {
     case 'stubborn': return 0.95
     case 'greedy': return 0.97
   }
-}
-
-function sellerBrokerSynergy(s: SellerPersona, b: BrokerPersonality): number {
-  // negative = lowers floor (good for player)
-  if (b === 'charming' && (s === 'sentimental' || s === 'pragmatic')) return -0.04
-  if (b === 'enthusiastic' && (s === 'desperate' || s === 'rushed')) return -0.03
-  if (b === 'analytical' && (s === 'pragmatic' || s === 'greedy')) return -0.03
-  if (b === 'discreet' && (s === 'sentimental' || s === 'greedy')) return -0.03
-  if (b === 'pushy' && (s === 'sentimental')) return +0.05  // pushy clashes with sentimental
-  if (b === 'pushy' && (s === 'desperate' || s === 'rushed')) return -0.05  // pushy works on the weak
-  return 0
 }
 
 function openingLine(p: SellerPersona, asking: number): string {

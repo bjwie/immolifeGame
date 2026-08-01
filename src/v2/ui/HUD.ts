@@ -32,6 +32,11 @@ export class HUD {
     engine.on('event', (e: any) => this.toast(e.title, 'info'))
     engine.on('toast', (t: any) => this.toast(t.text, t.kind))
     engine.on('achievement', (a: any) => this.celebrate(a.title, a.desc))
+    engine.on('capex', () => this.refresh())
+    engine.on('capexPaid', () => this.refresh())
+    engine.on('renovationStart', () => this.refresh())
+    engine.on('renovationDone', () => this.refresh())
+    engine.on('wegAssembly', () => this.refresh())
   }
 
   private bindControls() {
@@ -71,7 +76,63 @@ export class HUD {
       chip.title = e.body
       events.appendChild(chip)
     }
-    if (s.market.events.length === 0) {
+    for (const ls of s.lawsuits) {
+      const chip = document.createElement('div')
+      chip.className = 'event-chip lawsuit'
+      const label = ls.reason === 'eviction' ? 'Raeumung' : 'Mieterhoehung'
+      chip.textContent = `⚖ ${label} (${ls.monthsRemaining} M, ${formatEuro(ls.monthlyCost)}/M)`
+      chip.title = `${label}-Klage. Gesamtkosten bisher ${formatEuro(ls.totalSpent)}. Erfolgschance ${(ls.successChance * 100).toFixed(0)}%.`
+      events.appendChild(chip)
+    }
+    const pendingCapex = s.owned.filter(p => p.pendingCapex)
+    if (pendingCapex.length > 0) {
+      const chip = document.createElement('div')
+      chip.className = 'event-chip capex'
+      const totalCost = pendingCapex.reduce((sum, p) => sum + (p.pendingCapex?.cost ?? 0), 0)
+      chip.textContent = `⚠ ${pendingCapex.length} Reparatur${pendingCapex.length === 1 ? '' : 'en'} faellig (${formatEuro(totalCost)})`
+      chip.title = pendingCapex.map(p => `${p.pendingCapex!.title} — Frist ${p.pendingCapex!.deadlineMonth - this.engine.gameMonth()} M`).join('\n')
+      events.appendChild(chip)
+    }
+    const activeRenos = s.owned.filter(p => p.activeRenovation)
+    if (activeRenos.length > 0) {
+      const chip = document.createElement('div')
+      chip.className = 'event-chip reno'
+      chip.textContent = `🔨 ${activeRenos.length} Renovierung${activeRenos.length === 1 ? '' : 'en'} laeuft`
+      chip.title = activeRenos.map(p => {
+        const c = p.activeRenovation!
+        const step = c.steps[c.currentStepIndex]
+        return `${this.engine.nameFor(p)}: Schritt ${c.currentStepIndex + 1}/${c.steps.length}${step ? ` (${step.contractorName})` : ''}`
+      }).join('\n')
+      events.appendChild(chip)
+    }
+    if (s.player.schwarzJobsThisYear > 0) {
+      const chip = document.createElement('div')
+      chip.className = 'event-chip schwarz'
+      chip.textContent = `🚫 Schwarz: ${s.player.schwarzJobsThisYear} Jobs YTD`
+      chip.title = `${s.player.schwarzJobsThisYear} Schwarzarbeit-Jobs in diesem Jahr — Audit-Risiko steigt mit jedem. Reset im Januar.\nGesamt: ${s.player.totalSchwarzJobs} · Audits erlebt: ${s.player.taxAuditsExperienced}`
+      events.appendChild(chip)
+    }
+    const managed = s.owned.filter(p => p.management)
+    if (managed.length > 0) {
+      const chip = document.createElement('div')
+      chip.className = 'event-chip mgmt'
+      const totalFee = managed.reduce((sum, p) => sum + this.engine.managementFeeFor(p), 0)
+      chip.textContent = `🏢 ${managed.length} Verwaltung (${formatEuro(totalFee)}/M)`
+      chip.title = managed.map(p => `${this.engine.nameFor(p)} — ${formatEuro(this.engine.managementFeeFor(p))}/M`).join('\n')
+      events.appendChild(chip)
+    }
+    const pendingWeg = s.wegAssemblies.filter(a => !a.decided)
+    if (pendingWeg.length > 0) {
+      const chip = document.createElement('div')
+      chip.className = 'event-chip weg'
+      chip.textContent = `📋 ${pendingWeg.length} WEG-Versammlung${pendingWeg.length === 1 ? '' : 'en'}`
+      chip.title = pendingWeg.map(a => {
+        const p = s.owned.find(pp => pp.id === a.propertyId)
+        return `${p ? this.engine.nameFor(p) : 'Property'}: ${a.proposals.length} TOPs, ${(a.playerShare * 100).toFixed(0)}% Stimmenanteil`
+      }).join('\n')
+      events.appendChild(chip)
+    }
+    if (s.market.events.length === 0 && s.lawsuits.length === 0 && pendingCapex.length === 0 && activeRenos.length === 0 && pendingWeg.length === 0) {
       const chip = document.createElement('div')
       chip.className = 'event-chip muted'
       chip.textContent = 'Markt ruhig'

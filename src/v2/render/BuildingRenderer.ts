@@ -1,6 +1,20 @@
 import Phaser from 'phaser'
+import { BakedLayer, RuntimeLayer, PaintContext, mulberry32 } from './layers/Layer'
+import { HouseBase } from './layers/base/HouseBase'
+import { VillaBase } from './layers/base/VillaBase'
+import { ApartmentBase } from './layers/base/ApartmentBase'
+import { ShopBase } from './layers/base/ShopBase'
+import { OfficeBase } from './layers/base/OfficeBase'
+import { TowerBase } from './layers/base/TowerBase'
+import { ConditionPatinaLayer } from './layers/ConditionPatinaLayer'
+import { OwnedBadgeLayer } from './layers/OwnedBadgeLayer'
+import { DistrictSkinLayer } from './layers/DistrictSkinLayer'
+import { RenovationScaffoldLayer } from './layers/RenovationScaffoldLayer'
+import { OccupancyMarkerLayer } from './layers/OccupancyMarkerLayer'
+import type { Property } from '../sim/types'
 
 export type BuildingKind = 'house' | 'apartment' | 'office' | 'shop' | 'tower' | 'villa'
+export type ApartmentSubtype = 'altbau' | 'plattenbau' | 'neubau'
 
 export interface BuildingStyle {
   kind: BuildingKind
@@ -16,6 +30,7 @@ export interface BuildingStyle {
   litWindows: boolean
   hasSign: boolean
   signColor?: number
+  subtype?: ApartmentSubtype
 }
 
 const PALETTES: Record<BuildingKind, Array<Omit<BuildingStyle, 'kind' | 'width' | 'height' | 'floors' | 'condition' | 'litWindows' | 'hasSign' | 'signColor'>>> = {
@@ -48,16 +63,63 @@ const PALETTES: Record<BuildingKind, Array<Omit<BuildingStyle, 'kind' | 'width' 
   ],
 }
 
-const DAMAGE_TINT = 0x3a2820
+const BAKED_PIPELINE: BakedLayer[] = [
+  HouseBase, VillaBase, ApartmentBase, ShopBase, OfficeBase, TowerBase,
+  DistrictSkinLayer,
+]
+
+const RUNTIME_LAYERS: RuntimeLayer[] = [
+  ConditionPatinaLayer,
+  RenovationScaffoldLayer,
+  OccupancyMarkerLayer,
+  OwnedBadgeLayer,
+]
+
+const RUNTIME_LAYER_TAG = '_layerId'
 
 export class BuildingRenderer {
   private static textureCache = new Map<string, true>()
+  /** Realistic upper bound: 6 kinds × ~3 paletteVariants × 6 districts × (apartment also × 3 subtypes)
+   *  ≈ 200 unique base textures. Cap covers it with headroom for sign variants. */
+  private static MAX_CACHE = 200
 
-  static rollStyle(kind: BuildingKind, seed: number, condition: number = 100): BuildingStyle {
+  static preloadAssets(scene: Phaser.Scene) {
+    scene.load.on('loaderror', (file: any) => {
+      if (typeof file?.key === 'string' && file.key.startsWith('asset_')) {
+        // silently skip; the procedural fallback handles missing assets
+      }
+    })
+    const kinds: BuildingKind[] = ['house', 'villa', 'apartment', 'shop', 'office', 'tower']
+    for (const kind of kinds) {
+      for (let i = 1; i <= 4; i++) {
+        const num = String(i).padStart(2, '0')
+        const key = `asset_${kind}_${i - 1}`
+        if (!scene.textures.exists(key)) {
+          scene.load.image(key, `assets/v2/buildings/${kind}_${num}.png`)
+        }
+      }
+    }
+  }
+
+  /** Returns an asset PNG texture key if one is loaded for this kind, else null.
+   *  When a PNG asset is used, the BAKED_PIPELINE (base + districtSkin) is bypassed —
+   *  the asset replaces both. Runtime overlays (badge, patina, scaffold, occupancy)
+   *  still mount on top via applyRuntimeOverlays, so state-driven visuals remain. */
+  private static externalAssetKey(scene: Phaser.Scene, kind: BuildingKind, seed: number): string | null {
+    for (let i = 0; i < 4; i++) {
+      const idx = (seed + i) & 3
+      const key = `asset_${kind}_${idx}`
+      if (scene.textures.exists(key)) return key
+    }
+    return null
+  }
+
+  static rollStyle(kind: BuildingKind, seed: number, condition: number = 100, district?: string): BuildingStyle {
     const rng = mulberry32(seed)
     const palette = PALETTES[kind]
     const p = palette[Math.floor(rng() * palette.length)]
     const sizeProfile = this.sizeFor(kind, rng)
+    const subtype = kind === 'apartment' ? this.rollApartmentSubtype(rng, district) : undefined
     return {
       kind,
       ...p,
@@ -66,7 +128,28 @@ export class BuildingRenderer {
       litWindows: rng() > 0.4,
       hasSign: kind === 'shop' || (kind === 'office' && rng() > 0.6),
       signColor: kind === 'shop' ? [0xc02040, 0x208844, 0x2050a8, 0xc06820][Math.floor(rng() * 4)] : 0xc02040,
+      subtype,
     }
+  }
+
+  private static rollApartmentSubtype(rng: () => number, district?: string): ApartmentSubtype {
+    // District weighting: Plattenbau more likely in wedding/neukoelln,
+    // Altbau more likely in prenzlauer/charlottenburg, Neubau in mitte.
+    const weights: { altbau: number; plattenbau: number; neubau: number } = (() => {
+      switch (district) {
+        case 'prenzlauer': return { altbau: 0.65, plattenbau: 0.10, neubau: 0.25 }
+        case 'charlottenburg': return { altbau: 0.55, plattenbau: 0.10, neubau: 0.35 }
+        case 'mitte': return { altbau: 0.20, plattenbau: 0.10, neubau: 0.70 }
+        case 'wedding': return { altbau: 0.20, plattenbau: 0.55, neubau: 0.25 }
+        case 'neukoelln': return { altbau: 0.30, plattenbau: 0.45, neubau: 0.25 }
+        case 'kreuzberg': return { altbau: 0.45, plattenbau: 0.25, neubau: 0.30 }
+        default: return { altbau: 0.40, plattenbau: 0.30, neubau: 0.30 }
+      }
+    })()
+    const r = rng()
+    if (r < weights.altbau) return 'altbau'
+    if (r < weights.altbau + weights.plattenbau) return 'plattenbau'
+    return 'neubau'
   }
 
   private static sizeFor(kind: BuildingKind, rng: () => number) {
@@ -80,341 +163,105 @@ export class BuildingRenderer {
     }
   }
 
-  static textureKey(style: BuildingStyle, ownedBadge: boolean = false): string {
-    return [
-      'b', style.kind, style.width, style.height, style.floors,
-      style.wallColor.toString(16), style.roofColor.toString(16),
-      style.windowColor.toString(16), style.trimColor.toString(16),
-      style.accentColor.toString(16),
-      Math.round(style.condition / 10),
-      style.litWindows ? 'L' : 'D',
-      style.hasSign ? 'S' + (style.signColor?.toString(16) ?? '') : 'N',
-      ownedBadge ? 'O' : '',
-    ].join(':')
+  private static textureKey(style: BuildingStyle, district?: string): string {
+    const ctx: PaintContext = {
+      kind: style.kind,
+      style,
+      condition: style.condition,
+      ownedBadge: false,
+      seed: 0,
+      district,
+    }
+    const parts: string[] = []
+    for (const layer of BAKED_PIPELINE) {
+      if (layer.applies(ctx)) parts.push(layer.key(ctx))
+    }
+    return parts.join('|')
   }
 
-  static ensureTexture(scene: Phaser.Scene, style: BuildingStyle, ownedBadge: boolean = false): string {
-    const key = this.textureKey(style, ownedBadge)
-    if (this.textureCache.has(key) && scene.textures.exists(key)) return key
+  static ensureTexture(scene: Phaser.Scene, style: BuildingStyle, seed?: number, district?: string): string {
+    if (typeof seed === 'number') {
+      const assetKey = this.externalAssetKey(scene, style.kind, seed)
+      if (assetKey) return assetKey
+    }
+
+    const key = this.textureKey(style, district)
+    if (this.textureCache.has(key) && scene.textures.exists(key)) {
+      this.textureCache.delete(key)
+      this.textureCache.set(key, true)
+      return key
+    }
 
     const padding = 6
     const totalW = style.width + padding * 2
-    const totalH = style.height + padding * 2 + 14 // extra for ground shadow
+    const totalH = style.height + padding * 2 + 14
     const g = scene.add.graphics({ x: 0, y: 0 })
 
     this.drawShadow(g, padding + style.width / 2, padding + style.height + 6, style.width * 0.55)
-    this.drawBuilding(g, padding, padding, style)
-    if (ownedBadge) this.drawOwnedBadge(g, totalW - 16, padding + 4)
+
+    const ctx: PaintContext = {
+      kind: style.kind,
+      style,
+      condition: style.condition,
+      ownedBadge: false,
+      seed: seed ?? 0,
+      district,
+    }
+    for (const layer of BAKED_PIPELINE) {
+      if (layer.applies(ctx)) layer.paint(g, ctx, padding, padding)
+    }
 
     g.generateTexture(key, totalW, totalH)
     g.destroy()
     this.textureCache.set(key, true)
+
+    while (this.textureCache.size > this.MAX_CACHE) {
+      const oldest = this.textureCache.keys().next().value
+      if (!oldest) break
+      this.textureCache.delete(oldest)
+      if (scene.textures.exists(oldest)) scene.textures.remove(oldest)
+    }
     return key
+  }
+
+  /** Mount runtime overlay sprites (badge, patina, etc.) into the property container.
+   *  Idempotent — always clears existing runtime overlays before re-mounting.
+   *  Insert position: index 1 (just above the base sprite). */
+  static applyRuntimeOverlays(
+    scene: Phaser.Scene,
+    container: Phaser.GameObjects.Container,
+    style: BuildingStyle,
+    isOwned: boolean,
+    seed?: number,
+    district?: string,
+    property?: Property,
+  ): void {
+    const existing = container.list.filter(
+      (o: any) => o[RUNTIME_LAYER_TAG] !== undefined,
+    )
+    for (const o of existing) o.destroy()
+
+    const ctx: PaintContext = {
+      kind: style.kind,
+      style,
+      condition: style.condition,
+      ownedBadge: isOwned,
+      seed: seed ?? 0,
+      district,
+      property,
+    }
+    let insertAt = 1
+    for (const layer of RUNTIME_LAYERS) {
+      if (!layer.applies(ctx)) continue
+      const obj = layer.mount(scene, ctx)
+      ;(obj as any)[RUNTIME_LAYER_TAG] = layer.id
+      container.addAt(obj, insertAt)
+      insertAt++
+    }
   }
 
   private static drawShadow(g: Phaser.GameObjects.Graphics, cx: number, cy: number, radius: number) {
     g.fillStyle(0x000000, 0.25)
     g.fillEllipse(cx, cy, radius * 2, radius * 0.55)
   }
-
-  private static drawBuilding(g: Phaser.GameObjects.Graphics, ox: number, oy: number, s: BuildingStyle) {
-    const condFactor = Math.max(0.4, s.condition / 100)
-    const wall = mixColor(s.wallColor, DAMAGE_TINT, 1 - condFactor)
-    const roof = mixColor(s.roofColor, DAMAGE_TINT, 1 - condFactor)
-    const trim = mixColor(s.trimColor, DAMAGE_TINT, 1 - condFactor)
-    const accent = mixColor(s.accentColor, DAMAGE_TINT, 1 - condFactor)
-    const window = s.condition < 30 ? mixColor(s.windowColor, 0x102030, 0.6) : s.windowColor
-
-    switch (s.kind) {
-      case 'house': return this.drawHouse(g, ox, oy, s, wall, roof, trim, accent, window)
-      case 'villa': return this.drawVilla(g, ox, oy, s, wall, roof, trim, accent, window)
-      case 'apartment': return this.drawApartment(g, ox, oy, s, wall, roof, trim, accent, window)
-      case 'shop': return this.drawShop(g, ox, oy, s, wall, roof, trim, accent, window)
-      case 'office': return this.drawOffice(g, ox, oy, s, wall, roof, trim, accent, window)
-      case 'tower': return this.drawTower(g, ox, oy, s, wall, roof, trim, accent, window)
-    }
-  }
-
-  private static drawHouse(g: Phaser.GameObjects.Graphics, ox: number, oy: number, s: BuildingStyle, wall: number, roof: number, trim: number, accent: number, win: number) {
-    const w = s.width, h = s.height
-    const roofH = 18
-    // body
-    g.fillStyle(wall, 1)
-    g.fillRect(ox, oy + roofH, w, h - roofH)
-    // roof - triangular
-    g.fillStyle(roof, 1)
-    g.fillTriangle(ox - 2, oy + roofH + 2, ox + w + 2, oy + roofH + 2, ox + w / 2, oy)
-    g.fillStyle(mixColor(roof, 0x000000, 0.3), 1)
-    g.fillRect(ox - 3, oy + roofH, w + 6, 3)
-    // door
-    const doorW = 12, doorH = 18
-    g.fillStyle(accent, 1)
-    g.fillRect(ox + w / 2 - doorW / 2, oy + h - doorH, doorW, doorH)
-    g.fillStyle(0xf1c40f, 0.9)
-    g.fillRect(ox + w / 2 + doorW / 2 - 3, oy + h - doorH / 2, 1, 1)
-    // windows
-    const winY = oy + roofH + 8
-    this.drawWindow(g, ox + 8, winY, 12, 10, win, trim, s.litWindows)
-    this.drawWindow(g, ox + w - 20, winY, 12, 10, win, trim, s.litWindows)
-    // upper floor windows if 2 floors
-    if (s.floors > 1) {
-      this.drawWindow(g, ox + 8, winY + 18, 10, 8, win, trim, s.litWindows)
-      this.drawWindow(g, ox + w - 18, winY + 18, 10, 8, win, trim, s.litWindows)
-    }
-    // chimney
-    g.fillStyle(trim, 1)
-    g.fillRect(ox + w - 14, oy + 4, 6, 14)
-    // damage cracks
-    if (s.condition < 50) this.drawCracks(g, ox, oy + roofH, w, h - roofH, s.condition)
-  }
-
-  private static drawVilla(g: Phaser.GameObjects.Graphics, ox: number, oy: number, s: BuildingStyle, wall: number, roof: number, trim: number, accent: number, win: number) {
-    const w = s.width, h = s.height
-    const roofH = 20
-    // wide base
-    g.fillStyle(wall, 1)
-    g.fillRect(ox, oy + roofH, w, h - roofH)
-    // hip roof
-    g.fillStyle(roof, 1)
-    g.fillTriangle(ox - 3, oy + roofH + 1, ox + w * 0.35, oy + 4, ox + w * 0.35, oy + roofH + 1)
-    g.fillTriangle(ox + w * 0.65, oy + roofH + 1, ox + w + 3, oy + roofH + 1, ox + w * 0.65, oy + 4)
-    g.fillRect(ox + w * 0.35, oy + 4, w * 0.3, roofH - 4)
-    // columns at entry
-    g.fillStyle(0xffffff, 0.85)
-    g.fillRect(ox + w / 2 - 14, oy + h - 30, 4, 30)
-    g.fillRect(ox + w / 2 + 10, oy + h - 30, 4, 30)
-    // door
-    g.fillStyle(accent, 1)
-    g.fillRect(ox + w / 2 - 8, oy + h - 28, 16, 28)
-    // windows row
-    const winY = oy + roofH + 10
-    for (let i = 0; i < 4; i++) {
-      const wx = ox + 6 + i * (w - 16) / 3
-      this.drawWindow(g, wx, winY, 10, 12, win, trim, s.litWindows)
-    }
-    if (s.floors > 1) {
-      for (let i = 0; i < 4; i++) {
-        const wx = ox + 6 + i * (w - 16) / 3
-        this.drawWindow(g, wx, winY + 22, 10, 10, win, trim, s.litWindows)
-      }
-    }
-    if (s.condition < 50) this.drawCracks(g, ox, oy + roofH, w, h - roofH, s.condition)
-  }
-
-  private static drawApartment(g: Phaser.GameObjects.Graphics, ox: number, oy: number, s: BuildingStyle, wall: number, roof: number, trim: number, accent: number, win: number) {
-    const w = s.width, h = s.height
-    // body
-    g.fillStyle(wall, 1)
-    g.fillRect(ox, oy + 6, w, h - 6)
-    // flat roof with cornice
-    g.fillStyle(roof, 1)
-    g.fillRect(ox - 2, oy, w + 4, 8)
-    g.fillStyle(mixColor(roof, 0x000000, 0.4), 1)
-    g.fillRect(ox - 2, oy + 8, w + 4, 2)
-    // ground floor entry
-    g.fillStyle(accent, 1)
-    g.fillRect(ox + w / 2 - 10, oy + h - 18, 20, 18)
-    g.fillStyle(trim, 1)
-    g.fillRect(ox + w / 2 - 10, oy + h - 18, 20, 2)
-    // window grid
-    const cols = 3
-    const winW = 10, winH = 10
-    const padX = (w - cols * winW) / (cols + 1)
-    for (let f = 0; f < s.floors; f++) {
-      const fy = oy + 14 + f * 18
-      for (let c = 0; c < cols; c++) {
-        const wx = ox + padX + c * (winW + padX)
-        const lit = s.litWindows && (((f * 7 + c * 13) % 5) > 1)
-        this.drawWindow(g, wx, fy, winW, winH, win, trim, lit)
-      }
-    }
-    // balcony bars
-    g.fillStyle(trim, 1)
-    for (let f = 1; f < s.floors; f++) {
-      g.fillRect(ox + 3, oy + 12 + f * 18 + 11, w - 6, 1)
-    }
-    if (s.condition < 50) this.drawCracks(g, ox, oy + 6, w, h - 6, s.condition)
-  }
-
-  private static drawShop(g: Phaser.GameObjects.Graphics, ox: number, oy: number, s: BuildingStyle, wall: number, roof: number, trim: number, _accent: number, win: number) {
-    const w = s.width, h = s.height
-    // body
-    g.fillStyle(wall, 1)
-    g.fillRect(ox, oy + 18, w, h - 18)
-    // awning
-    g.fillStyle(roof, 1)
-    g.fillTriangle(ox - 4, oy + 22, ox + w + 4, oy + 22, ox + w / 2, oy + 8)
-    // alternating awning stripes
-    g.fillStyle(0xffffff, 0.55)
-    for (let i = 0; i < 4; i++) {
-      const tx = ox + i * (w / 4)
-      g.fillTriangle(tx, oy + 22, tx + w / 8, oy + 22, tx + w / 16, oy + 14)
-    }
-    // big window
-    const bigWin = { x: ox + 4, y: oy + 26, w: w - 8, h: 22 }
-    g.fillStyle(0x101820, 1)
-    g.fillRect(bigWin.x, bigWin.y, bigWin.w, bigWin.h)
-    g.fillStyle(win, 0.85)
-    g.fillRect(bigWin.x + 1, bigWin.y + 1, bigWin.w - 2, bigWin.h - 2)
-    g.fillStyle(0xffffff, 0.3)
-    g.fillRect(bigWin.x + 2, bigWin.y + 2, bigWin.w - 4, 3)
-    // door
-    g.fillStyle(trim, 1)
-    g.fillRect(ox + w / 2 - 8, oy + h - 8, 16, 8)
-    // sign
-    if (s.hasSign && s.signColor !== undefined) {
-      g.fillStyle(s.signColor, 1)
-      g.fillRect(ox + 2, oy + 2, w - 4, 8)
-      g.fillStyle(0xffffff, 0.95)
-      for (let i = 0; i < 5; i++) {
-        g.fillRect(ox + 6 + i * 8, oy + 5, 4, 2)
-      }
-    }
-    if (s.condition < 50) this.drawCracks(g, ox, oy + 18, w, h - 18, s.condition)
-  }
-
-  private static drawOffice(g: Phaser.GameObjects.Graphics, ox: number, oy: number, s: BuildingStyle, wall: number, roof: number, trim: number, _accent: number, win: number) {
-    const w = s.width, h = s.height
-    g.fillStyle(wall, 1)
-    g.fillRect(ox, oy + 6, w, h - 6)
-    g.fillStyle(roof, 1)
-    g.fillRect(ox - 2, oy, w + 4, 8)
-    // glass facade - big rows
-    const cols = 4
-    const winW = 10, winH = 12
-    const padX = (w - cols * winW) / (cols + 1)
-    for (let f = 0; f < s.floors; f++) {
-      const fy = oy + 12 + f * 18
-      for (let c = 0; c < cols; c++) {
-        const wx = ox + padX + c * (winW + padX)
-        const lit = s.litWindows && (((f * 11 + c * 7) % 4) > 0)
-        this.drawWindow(g, wx, fy, winW, winH, win, trim, lit)
-      }
-    }
-    // entrance double doors
-    g.fillStyle(0x101820, 1)
-    g.fillRect(ox + w / 2 - 12, oy + h - 14, 24, 14)
-    g.fillStyle(win, 0.6)
-    g.fillRect(ox + w / 2 - 11, oy + h - 13, 22, 12)
-    // sign
-    if (s.hasSign) {
-      g.fillStyle(trim, 1)
-      g.fillRect(ox, oy, w, 5)
-      g.fillStyle(0xffffff, 0.9)
-      g.fillRect(ox + 6, oy + 1, 12, 3)
-    }
-    if (s.condition < 50) this.drawCracks(g, ox, oy + 6, w, h - 6, s.condition)
-  }
-
-  private static drawTower(g: Phaser.GameObjects.Graphics, ox: number, oy: number, s: BuildingStyle, wall: number, roof: number, trim: number, accent: number, win: number) {
-    const w = s.width, h = s.height
-    // tapered tower
-    const tipNarrow = 6
-    g.fillStyle(wall, 1)
-    g.beginPath()
-    g.moveTo(ox + tipNarrow, oy + 4)
-    g.lineTo(ox + w - tipNarrow, oy + 4)
-    g.lineTo(ox + w, oy + h)
-    g.lineTo(ox, oy + h)
-    g.closePath()
-    g.fillPath()
-    // crown
-    g.fillStyle(roof, 1)
-    g.fillRect(ox + tipNarrow - 1, oy, w - tipNarrow * 2 + 2, 4)
-    g.fillStyle(accent, 1)
-    g.fillRect(ox + w / 2 - 1, oy - 6, 2, 6)
-    // windows
-    const cols = 3
-    const winW = 8, winH = 10
-    for (let f = 0; f < s.floors; f++) {
-      const fy = oy + 10 + f * 14
-      const innerW = w - tipNarrow * 2 + (f / s.floors) * tipNarrow * 1.4
-      const startX = ox + (w - innerW) / 2
-      const padX = (innerW - cols * winW) / (cols + 1)
-      for (let c = 0; c < cols; c++) {
-        const wx = startX + padX + c * (winW + padX)
-        const lit = s.litWindows && (((f * 17 + c * 11) % 5) > 1)
-        this.drawWindow(g, wx, fy, winW, winH, win, trim, lit)
-      }
-    }
-    // base entrance
-    g.fillStyle(0x101820, 1)
-    g.fillRect(ox + w / 2 - 10, oy + h - 12, 20, 12)
-    g.fillStyle(win, 0.7)
-    g.fillRect(ox + w / 2 - 9, oy + h - 11, 18, 10)
-    if (s.condition < 50) this.drawCracks(g, ox, oy + 4, w, h - 4, s.condition)
-  }
-
-  private static drawWindow(g: Phaser.GameObjects.Graphics, x: number, y: number, w: number, h: number, color: number, trim: number, lit: boolean) {
-    g.fillStyle(trim, 1)
-    g.fillRect(x - 1, y - 1, w + 2, h + 2)
-    g.fillStyle(lit ? color : mixColor(color, 0x101830, 0.55), 1)
-    g.fillRect(x, y, w, h)
-    // mullions
-    g.fillStyle(trim, 0.7)
-    g.fillRect(x + Math.floor(w / 2), y, 1, h)
-    g.fillRect(x, y + Math.floor(h / 2), w, 1)
-    // highlight
-    g.fillStyle(0xffffff, lit ? 0.55 : 0.18)
-    g.fillRect(x + 1, y + 1, Math.max(2, Math.floor(w / 3)), 1)
-  }
-
-  private static drawCracks(g: Phaser.GameObjects.Graphics, x: number, y: number, w: number, h: number, condition: number) {
-    const intensity = Math.max(0, (50 - condition) / 50)
-    g.lineStyle(1, 0x2a1810, 0.4 + intensity * 0.5)
-    const cracks = Math.round(2 + intensity * 5)
-    const seedRng = mulberry32(x * 31 + y * 17 + Math.floor(condition))
-    for (let i = 0; i < cracks; i++) {
-      const sx = x + seedRng() * w
-      const sy = y + seedRng() * (h * 0.7)
-      g.beginPath()
-      g.moveTo(sx, sy)
-      let cx = sx, cy = sy
-      const steps = 3 + Math.floor(seedRng() * 3)
-      for (let s = 0; s < steps; s++) {
-        cx += (seedRng() - 0.3) * 8
-        cy += seedRng() * 6
-        g.lineTo(cx, cy)
-      }
-      g.strokePath()
-    }
-    if (condition < 25) {
-      // boarded windows mark
-      g.fillStyle(0x4a3320, 0.7)
-      g.fillRect(x + w * 0.2, y + h * 0.3, 6, 1)
-      g.fillRect(x + w * 0.6, y + h * 0.5, 6, 1)
-    }
-  }
-
-  private static drawOwnedBadge(g: Phaser.GameObjects.Graphics, x: number, y: number) {
-    g.fillStyle(0x000000, 0.4)
-    g.fillCircle(x + 1, y + 1, 8)
-    g.fillStyle(0xf1c40f, 1)
-    g.fillCircle(x, y, 8)
-    g.lineStyle(1.5, 0xb8870a, 1)
-    g.strokeCircle(x, y, 8)
-    // crown shape
-    g.fillStyle(0xfff4c8, 1)
-    g.fillTriangle(x - 4, y + 2, x + 4, y + 2, x, y - 3)
-    g.fillRect(x - 4, y + 2, 8, 2)
-  }
-}
-
-function mulberry32(a: number) {
-  return function () {
-    a |= 0; a = (a + 0x6D2B79F5) | 0
-    let t = Math.imul(a ^ (a >>> 15), 1 | a)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
-}
-
-function mixColor(a: number, b: number, t: number): number {
-  t = Math.max(0, Math.min(1, t))
-  const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff
-  const br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff
-  const r = Math.round(ar + (br - ar) * t)
-  const g = Math.round(ag + (bg - ag) * t)
-  const bl = Math.round(ab + (bb - ab) * t)
-  return (r << 16) | (g << 8) | bl
 }

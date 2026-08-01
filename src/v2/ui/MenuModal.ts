@@ -1,4 +1,5 @@
 import type { Engine } from '../sim/Engine'
+import { ModalManager, type ManagedModal } from './ModalManager'
 
 const MAIN_MENU_HTML = `
   <div class="menu-card">
@@ -16,6 +17,7 @@ export class MenuModal {
   private root: HTMLDivElement
   private onNew: () => void
   private view: 'main' | 'achievements' | 'help' = 'main'
+  private modal: ManagedModal
 
   constructor(engine: Engine, mountIn: HTMLElement, onNew: () => void) {
     this.engine = engine
@@ -25,11 +27,12 @@ export class MenuModal {
     this.renderMain()
     mountIn.appendChild(this.root)
     this.root.addEventListener('click', (e) => this.handleClick(e))
+    this.modal = { id: 'menu', el: this.root, onCancel: () => this.close() }
   }
 
   private handleClick(e: Event) {
     const target = e.target as HTMLElement
-    if (target === this.root) { this.close(); return }
+    if (target === this.root) return // backdrop handled by ModalManager
     const act = target.dataset?.act
     if (!act) return
 
@@ -58,11 +61,11 @@ export class MenuModal {
   open() {
     // Always reset to main menu when opening fresh
     this.renderMain()
-    this.root.classList.add('show')
+    ModalManager.get().push(this.modal)
   }
 
   close() {
-    this.root.classList.remove('show')
+    ModalManager.get().pop(this.modal)
     // Reset to main view for next open
     this.view = 'main'
   }

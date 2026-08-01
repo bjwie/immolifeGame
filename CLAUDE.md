@@ -73,6 +73,16 @@ The 6 Berlin districts are defined in `CityRenderer.generate()` with `priceMulti
 ### DOM overlay
 `window.__overlayRoot` is created in `main.ts` and is the mount point for HUD and all modals. They live as siblings of the Phaser canvas, styled by `src/v2/ui/styles.css`. CSS variables (`--bg`, `--accent`, `--muted`, etc.) defined there drive the whole UI palette — prefer them over hardcoded colors.
 
+### Modal stack (`ModalManager`)
+All modals (`DealSheet`, `MenuModal`, `NegotiationModal`, `RentalModal`) go through `src/v2/ui/ModalManager.ts` (singleton via `ModalManager.get()`). Rules to follow when adding a new modal:
+
+- Don't set `style.display`, `style.opacity`, or `style.visibility` from JS — visibility is owned by the manager via the `.show` class. CSS pattern is `#my-modal { display: none } #my-modal.show { display: flex }`.
+- Don't attach your own backdrop click handler — the manager wires one on first `push` and only fires it for the top modal. Inner `[data-close]` / `[data-cancel]` buttons attach their own listeners as normal (clicks on inner elements bypass the backdrop check via `e.target !== modal.el`).
+- Provide a `ManagedModal` descriptor with an `onCancel` that performs cleanup and ends in `pop`. ESC and backdrop click both route through `onCancel`. If your modal has callbacks to a parent (like `NegotiationModal`'s `onAccepted` / `onCancelled`), capture them into locals before calling `close()` — `close()` clears state.
+- Only the top modal is shown; lower modals lose `.show` to keep their state but stop painting (no compounding backdrops). They're restored when the top is popped.
+
+ESC handling: the manager listens on `document` in capture phase and `stopPropagation`s when the stack is non-empty, so the Phaser ESC key handler in `CityScene` only fires when no modal is open (and uses that to open the main menu).
+
 ## Conventions
 
 - Strings shown to the user are German and use ASCII transliteration (`ae/oe/ue/ss`) — match this style. Existing strings like `"Kreditrate verpasst!"` and `"Eigenkapital reicht nicht"` set the tone.
