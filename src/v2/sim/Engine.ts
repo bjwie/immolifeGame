@@ -1,5 +1,5 @@
 import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, CapexEvent, CapexKind, ContractorOffer, ContractorTier, GameState, GameTime, GewerkKind, GewerkStep, Lawsuit, Loan, MarketEvent, Player, Property, PropertyType, RenovationContract, RenovationScope, SellerNegotiationState, Speed, Tenant, Unit, WEGProposal } from './types'
-import type { CityLayout, DistrictDef, DistrictId } from '../render/CityRenderer'
+import type { CityLayout, DistrictDef, DistrictId } from '../world/cityLayout'
 import { generateApplicants, pickPropertyName, pickSeller } from './names'
 import { UNLOCK_CONDITIONS, type UnlockCondition } from './UnlockConditions'
 

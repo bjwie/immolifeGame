@@ -1,4 +1,4 @@
-import type { DistrictId } from '../render/CityRenderer'
+import type { DistrictId } from '../world/cityLayout'
 
 export type UnlockConditionType = 'ownedCount' | 'netWorth' | 'reputation'
 

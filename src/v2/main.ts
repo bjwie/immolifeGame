@@ -1,5 +1,4 @@
-import Phaser from 'phaser'
-import { CityScene } from './scenes/CityScene'
+import { CityScene3D } from './three/CityScene3D'
 import type { Difficulty } from './sim/types'
 import './ui/styles.css'
 
@@ -15,7 +14,7 @@ function buildStartScreen(onStart: (choice: StartChoice) => void) {
   let selectedDifficulty: Difficulty = (localStorage.getItem(DIFFICULTY_KEY) as Difficulty) || 'standard'
   root.innerHTML = `
     <h1>IMMOLIFE</h1>
-    <div class="tagline">Berliner Immobilien-Tycoon</div>
+    <div class="tagline">Berliner Immobilien-Tycoon — jetzt in 3D</div>
     <div class="difficulty-row">
       <div class="diff-title">Schwierigkeit (nur fuer "Neues Spiel")</div>
       <div class="diff-options">
@@ -41,7 +40,7 @@ function buildStartScreen(onStart: (choice: StartChoice) => void) {
       <button class="${hasSave ? '' : 'primary'}" data-act="new">⊕ Neues Spiel</button>
       <button data-act="help">❓ Wie spielt man?</button>
     </div>
-    <div class="footer">Steuerung: Klick = Auswahl · Rechtsklick/Shift+Drag = Pan · Mausrad = Zoom · Leertaste = Pause</div>
+    <div class="footer">Steuerung: Klick = Umsehen (Maus) · WASD = Laufen · Shift = Sprint · Klick auf Gebaeude = Details · Leertaste = Pause · ESC = Menue</div>
   `
   document.body.appendChild(root)
 
@@ -80,7 +79,7 @@ function buildStartScreen(onStart: (choice: StartChoice) => void) {
     card.innerHTML = `
       <div style="background:rgba(0,0,0,0.4);border:1px solid #2c3a4d;border-radius:10px;padding:18px;text-align:left;font-size:13px;line-height:1.6;color:#e6ecf3">
         <p>Du bist ein junger Investor in Berlin. Startkapital je nach Schwierigkeit (€250k - €400k).</p>
-        <p>Klick auf Gebaeude um <b>Cap Rate, Cashflow und Hypotheken-Optionen</b> zu sehen.</p>
+        <p>Lauf durch die Stadt und klick auf Gebaeude um <b>Cap Rate, Cashflow und Hypotheken-Optionen</b> zu sehen.</p>
         <p>Banken bieten unterschiedliche Konditionen — leveraged kaufen ist der Schluessel zum Skalieren.</p>
         <p>Renoviere Bruchbuden, jage Gentrifizierungs-Wellen, halte Mieter zufrieden.</p>
         <p><b>Ziel:</b> Mogul werden. Erste Stufe: 1 Mio Vermoegen.</p>
@@ -93,9 +92,7 @@ function buildStartScreen(onStart: (choice: StartChoice) => void) {
 
 function startGame(choice?: StartChoice) {
   console.log('[ImmoLife] startGame() called', choice)
-  // Stash the chosen difficulty on a window field so CityScene picks it up.
-  // (We don't pass scene data here because Phaser's scene constructor isn't
-  // aware of our typed flow.)
+  // Stash the chosen difficulty on a window field so CityScene3D picks it up.
   if (choice && choice.fresh) {
     ;(window as any).__immolife_difficulty = choice.difficulty
   } else {
@@ -109,24 +106,10 @@ function startGame(choice?: StartChoice) {
   document.body.appendChild(overlay)
   ;(window as any).__overlayRoot = overlay
 
-  const w = Math.max(800, window.innerWidth || 1280)
-  const h = Math.max(600, window.innerHeight || 720)
-  const game = new Phaser.Game({
-    type: Phaser.CANVAS,
-    width: w,
-    height: h,
-    parent: 'game-container',
-    backgroundColor: '#3a5a3e',
-    scene: [CityScene],
-    scale: { mode: Phaser.Scale.NONE, width: w, height: h },
-    render: { antialias: false, pixelArt: true, roundPixels: true },
-    fps: { target: 60, forceSetTimeOut: true },
-    autoFocus: false,
-  })
-  ;(window as any).__game = game
-  console.log('[ImmoLife] Phaser game created')
-
-  window.addEventListener('resize', () => game.scale.resize(window.innerWidth, window.innerHeight))
+  const container = document.getElementById('game-container')!
+  const scene = new CityScene3D(container)
+  ;(window as any).__game = scene
+  console.log('[ImmoLife] 3D scene created')
 }
 
 // Boot — idempotent (HMR safe)

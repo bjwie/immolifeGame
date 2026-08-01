@@ -1,0 +1,1224 @@
+/**
+ * First-person 3D city scene (Three.js) — replaces the old Phaser CityScene.
+ * Owns the camera/world/buildings and wires the Engine to the DOM UI exactly
+ * like the 2D scene did: same events, same modals, same tooltip, same
+ * lock/unlock visuals — just walkable at street level.
+ */
+import * as THREE from 'three'
+import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js'
+import { Sky } from 'three/examples/jsm/objects/Sky.js'
+import { generateCityLayout, formatProgress, mulberry32 } from '../world/cityLayout'
+import type { CityLayout, DistrictDef, DistrictId } from '../world/cityLayout'
+import { rollStyle } from '../world/buildingStyle'
+import type { BuildingKind } from '../world/buildingStyle'
+import { paintGround, paintLockOverlay } from './ground'
+import { AmbientLife } from './ambient'
+import { facadeTexture, dimsFor, ownedBadgeTexture } from './facade'
+import type { BuildingDims } from './facade'
+import { Engine, formatEuro } from '../sim/Engine'
+import type { Property } from '../sim/types'
+import { HUD } from '../ui/HUD'
+import { DealSheet } from '../ui/DealSheet'
+import { MenuModal } from '../ui/MenuModal'
+import { NegotiationModal } from '../ui/NegotiationModal'
+import { RentalModal } from '../ui/RentalModal'
+import { RenovationModal } from '../ui/RenovationModal'
+import { WEGModal } from '../ui/WEGModal'
+import { ActivityLog } from '../ui/ActivityLog'
+import { ModalManager } from '../ui/ModalManager'
+
+/** meters per tile (ground canvas paints 48px per tile) */
+const TILE_M = 12
+const GROUND_PX_PER_TILE = 48
+const EYE = 1.7
+const WALK_SPEED = 14
+const SPRINT_SPEED = 28
+const PLAYER_RADIUS = 0.6
+
+interface BuildingHandle {
+  group: THREE.Group
+  prop: Property
+  isOwned: boolean
+  snapshotKey: string
+  dims: BuildingDims
+  frontDir: THREE.Vector3
+  center: THREE.Vector3
+  priceLabel?: { obj: CSS2DObject; el: HTMLDivElement }
+  meshes: THREE.Mesh[]
+}
+
+interface Collider { minX: number; maxX: number; minZ: number; maxZ: number }
+
+export class CityScene3D {
+  readonly engine: Engine
+  private layout: CityLayout
+
+  private renderer: THREE.WebGLRenderer
+  private css2d: CSS2DRenderer
+  private scene = new THREE.Scene()
+  private camera: THREE.PerspectiveCamera
+  private sun: THREE.DirectionalLight
+
+  private buildingsRoot = new THREE.Group()
+  private byPropertyId = new Map<string, BuildingHandle>()
+  private colliders: Collider[] = []
+  /** Backdrop city: every buildable spot without an active property gets a
+   *  deterministic filler building (instanced, non-purchasable). */
+  private fillerRoot = new THREE.Group()
+  private fillerColliders: Collider[] = []
+  private staticColliders: Collider[] = []
+  private lastFillerKey = '__unset__'
+  private lastFillerToast = 0
+
+  private lockOverlays = new Map<DistrictId, THREE.Mesh>()
+  private banners = new Map<DistrictId, { el: HTMLDivElement; nameEl: HTMLDivElement; subEl: HTMLDivElement }>()
+
+  private hud: HUD
+  private deal: DealSheet
+  private menu: MenuModal
+  private activityLog: ActivityLog
+  private hoverDiv: HTMLDivElement
+  private crosshair: HTMLDivElement
+  private hint: HTMLDivElement
+  private hoveredPropertyId: string | null = null
+  private aimedHandle: BuildingHandle | null = null
+
+  // player state
+  private yaw = 0
+  private pitch = -0.05
+  private pos = new THREE.Vector3()
+  private keys = new Set<string>()
+  private locked = false
+  private lastLockToast = 0
+  /** Pointer lock unavailable (iframe/edge cases): drag-to-look + cursor picking. */
+  private fallbackLook = false
+  private drag: { x: number; y: number; total: number; dragged: boolean } | null = null
+  private cursor = { x: 0, y: 0 }
+
+  private raycaster = new THREE.Raycaster()
+  private clock = new THREE.Clock()
+  private particles: Array<{ mesh: THREE.Mesh; vel: THREE.Vector3; life: number }> = []
+  private disposed = false
+  private sunDir = new THREE.Vector3()
+  private bobPhase = 0
+  private bobAmount = 0
+  private fovTarget = 72
+  private ambient!: AmbientLife
+
+  constructor(container: HTMLElement) {
+    this.layout = generateCityLayout(48, 4242)
+
+    // Engine — pick up the difficulty chosen at the start screen (only relevant
+    // for a fresh game; on continue, the saved difficulty wins via tryLoad).
+    const chosenDifficulty = (window as any).__immolife_difficulty as 'easy' | 'standard' | 'hardcore' | undefined
+    this.engine = new Engine(this.layout, chosenDifficulty ? { freshStart: true, difficulty: chosenDifficulty } : {})
+    if (chosenDifficulty) delete (window as any).__immolife_difficulty
+
+    // --- renderer setup
+    this.renderer = new THREE.WebGLRenderer({ antialias: true })
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    this.renderer.setSize(window.innerWidth, window.innerHeight)
+    this.renderer.shadowMap.enabled = true
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
+    this.renderer.toneMappingExposure = 1.25
+    container.appendChild(this.renderer.domElement)
+
+    this.css2d = new CSS2DRenderer()
+    this.css2d.setSize(window.innerWidth, window.innerHeight)
+    this.css2d.domElement.style.position = 'absolute'
+    this.css2d.domElement.style.inset = '0'
+    this.css2d.domElement.style.pointerEvents = 'none'
+    container.appendChild(this.css2d.domElement)
+
+    this.camera = new THREE.PerspectiveCamera(72, window.innerWidth / window.innerHeight, 0.1, 900)
+
+    // --- sky, fog, lights: late-afternoon Berlin light
+    const sky = new Sky()
+    sky.scale.setScalar(4000)
+    const skyU = sky.material.uniforms
+    skyU.turbidity.value = 3.2
+    skyU.rayleigh.value = 1.1
+    skyU.mieCoefficient.value = 0.0035
+    skyU.mieDirectionalG.value = 0.8
+    this.sunDir.setFromSphericalCoords(1, THREE.MathUtils.degToRad(90 - 38), THREE.MathUtils.degToRad(205))
+    skyU.sunPosition.value.copy(this.sunDir)
+    this.scene.add(sky)
+    this.scene.fog = new THREE.Fog(0xcfe0ef, 200, 750)
+    this.scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x6a8a5e, 1.35))
+    this.scene.add(new THREE.AmbientLight(0x8ea4c0, 0.35))
+    this.sun = new THREE.DirectionalLight(0xfff0d5, 2.2)
+    this.sun.castShadow = true
+    this.sun.shadow.mapSize.set(2048, 2048)
+    this.sun.shadow.bias = -0.0004
+    const sc = this.sun.shadow.camera
+    sc.left = -110; sc.right = 110; sc.top = 110; sc.bottom = -110
+    sc.near = 10; sc.far = 500
+    this.scene.add(this.sun)
+    this.scene.add(this.sun.target)
+
+    // --- ground + trees
+    const ground = paintGround(this.layout)
+    const groundTex = new THREE.CanvasTexture(ground.canvas)
+    groundTex.colorSpace = THREE.SRGBColorSpace
+    groundTex.anisotropy = 8
+    groundTex.magFilter = THREE.NearestFilter
+    const worldW = this.layout.tilesW * TILE_M
+    const worldH = this.layout.tilesH * TILE_M
+    const groundMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(worldW, worldH),
+      new THREE.MeshLambertMaterial({ map: groundTex }),
+    )
+    groundMesh.rotation.x = -Math.PI / 2
+    groundMesh.position.set(worldW / 2, 0, worldH / 2)
+    groundMesh.receiveShadow = true
+    this.scene.add(groundMesh)
+    // grass apron beyond city bounds so the horizon isn't a void
+    const apron = new THREE.Mesh(
+      new THREE.PlaneGeometry(worldW * 4, worldH * 6),
+      new THREE.MeshLambertMaterial({ color: 0x5aa647 }),
+    )
+    apron.rotation.x = -Math.PI / 2
+    apron.position.set(worldW / 2, -0.05, worldH / 2)
+    this.scene.add(apron)
+    this.plantTrees(ground.treeSpots)
+    this.plantStreetLamps()
+
+    this.scene.add(this.buildingsRoot)
+    this.scene.add(this.fillerRoot)
+    this.ambient = new AmbientLife(this.scene, this.layout, 60, 150)
+    this.mountPlazaFountain()
+
+    // --- locked-district overlays + banners
+    for (const d of this.layout.districts) {
+      if (d.locked) this.mountLockOverlay(d)
+      this.mountBanner(d)
+    }
+
+    // --- DOM UI (identical wiring to the 2D scene)
+    const overlay = (window as any).__overlayRoot as HTMLElement
+    this.hud = new HUD(this.engine, overlay, () => this.menu.open())
+    this.deal = new DealSheet(this.engine, overlay)
+    const negModal = new NegotiationModal(this.engine, overlay)
+    const rentalModal = new RentalModal(this.engine, overlay)
+    const renovationModal = new RenovationModal(this.engine, overlay)
+    const wegModal = new WEGModal(this.engine, overlay)
+    this.activityLog = new ActivityLog(this.engine, overlay)
+    this.activityLog.onFocusProperty = (id) => this.focusProperty(id)
+    this.deal.setNegotiationModal(negModal)
+    this.deal.setRentalModal(rentalModal)
+    this.deal.setRenovationModal(renovationModal)
+    this.deal.setWegModal(wegModal)
+    this.menu = new MenuModal(this.engine, overlay, () => this.refreshProperties())
+
+    this.hoverDiv = document.createElement('div')
+    this.hoverDiv.className = 'prop-tooltip fp'
+    overlay.appendChild(this.hoverDiv)
+
+    this.crosshair = document.createElement('div')
+    this.crosshair.id = 'crosshair'
+    overlay.appendChild(this.crosshair)
+
+    this.hint = document.createElement('div')
+    this.hint.id = 'fp-hint'
+    this.hint.innerHTML = `🖱 <b>Klicken</b>: Steuerung uebernehmen · <b>WASD</b> Laufen · <b>Shift</b> Sprint · <b>Leertaste</b> Pause · <b>ESC</b> Menue`
+    overlay.appendChild(this.hint)
+
+    // --- engine -> view sync (same events as the 2D scene)
+    this.engine.on('bought', () => { this.refreshProperties(); this.refreshLockProgress() })
+    this.engine.on('sold', (data: any) => { this.refreshProperties(); this.spawnCoinBurst(data.property); this.refreshLockProgress() })
+    this.engine.on('renovated', () => this.refreshProperties())
+    this.engine.on('renovationStart', () => this.refreshProperties())
+    this.engine.on('renovationDone', () => this.refreshProperties())
+    this.engine.on('leaseSigned', () => this.refreshProperties())
+    this.engine.on('month', () => { this.refreshProperties(); this.refreshLockProgress() })
+    this.engine.on('reset', () => this.refreshProperties())
+    this.engine.on('districtUnlocked', (data: { id: string; name: string; label: string }) => {
+      this.unlockDistrictVisual(data.id as DistrictId, true)
+      this.hud.toast(`${data.name} freigeschaltet!`, 'success')
+      this.refreshProperties()
+    })
+
+    // Reconcile: a save may have districts already unlocked from a previous
+    // session, but the freshly-generated layout marks them locked.
+    for (const id of this.engine.state.unlockedDistricts) {
+      this.unlockDistrictVisual(id as DistrictId, false)
+    }
+    this.refreshLockProgress()
+
+    // --- player spawn: on the central plaza in Mitte
+    this.pos.set(worldW / 2, EYE, worldH / 4)
+    this.yaw = Math.PI * 0.25
+
+    this.refreshProperties()
+    this.setupInput()
+
+    window.addEventListener('resize', this.onResize)
+
+    this.engine.start()
+    setTimeout(() => {
+      const t = this.engine.state.time
+      this.hud.toast(`Willkommen! Du startest mit ${formatEuro(this.engine.state.player.cash)} im ${t.month}/${t.year}.`, 'success')
+    }, 400)
+
+    this.loop()
+  }
+
+  // ------------------------------------------------------------------ trees
+
+  private plantTrees(spots: Array<{ px: number; py: number; park: boolean }>) {
+    if (spots.length === 0) return
+    const px2m = TILE_M / GROUND_PX_PER_TILE
+    const trunkGeo = new THREE.CylinderGeometry(0.22, 0.3, 2.4, 6)
+    const crownGeo = new THREE.IcosahedronGeometry(1.6, 1)
+    const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6b4226 })
+    const crownMat = new THREE.MeshLambertMaterial({ color: 0x2e7a26 })
+    const crown2Mat = new THREE.MeshLambertMaterial({ color: 0x46b042 })
+    const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, spots.length)
+    const crowns = new THREE.InstancedMesh(crownGeo, crownMat, spots.length)
+    const crowns2 = new THREE.InstancedMesh(crownGeo, crown2Mat, spots.length)
+    trunks.castShadow = true
+    crowns.castShadow = true
+    const m = new THREE.Matrix4()
+    spots.forEach((sp, i) => {
+      const x = sp.px * px2m, z = sp.py * px2m
+      const scale = sp.park ? 1.25 : 1.0
+      m.makeScale(scale, scale, scale).setPosition(x, 1.2 * scale, z)
+      trunks.setMatrixAt(i, m)
+      m.makeScale(scale, scale, scale).setPosition(x, 3.4 * scale, z)
+      crowns.setMatrixAt(i, m)
+      m.makeScale(scale * 0.55, scale * 0.55, scale * 0.55).setPosition(x - 0.7 * scale, 4.1 * scale, z + 0.3 * scale)
+      crowns2.setMatrixAt(i, m)
+    })
+    this.scene.add(trunks, crowns, crowns2)
+  }
+
+  /** A real fountain on the central plaza in Mitte. */
+  private mountPlazaFountain() {
+    const { tilesW, tilesH, tiles } = this.layout
+    const at = (x: number, y: number) => (x >= 0 && x < tilesW && y >= 0 && y < tilesH) ? tiles[y * tilesW + x] : null
+    for (let ty = 0; ty < tilesH; ty++) {
+      for (let tx = 0; tx < tilesW; tx++) {
+        if (at(tx, ty) !== 'plaza') continue
+        if (at(tx - 1, ty) !== 'plaza' || at(tx + 1, ty) !== 'plaza' || at(tx, ty - 1) !== 'plaza' || at(tx, ty + 1) !== 'plaza') continue
+        const cx = tx * TILE_M + TILE_M / 2, cz = ty * TILE_M + TILE_M / 2
+        const stone = new THREE.MeshLambertMaterial({ color: 0xcfc6ae })
+        const water = new THREE.MeshLambertMaterial({ color: 0x4a9fd8, emissive: 0x1a4a6e, emissiveIntensity: 0.35 })
+        const basin = new THREE.Mesh(new THREE.CylinderGeometry(4.4, 4.6, 0.9, 20), stone)
+        basin.position.set(cx, 0.45, cz)
+        basin.castShadow = true
+        const pool = new THREE.Mesh(new THREE.CylinderGeometry(4.0, 4.0, 0.12, 20), water)
+        pool.position.set(cx, 0.85, cz)
+        const column = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.65, 2.4, 10), stone)
+        column.position.set(cx, 1.8, cz)
+        column.castShadow = true
+        const bowl = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.1, 0.5, 14), stone)
+        bowl.position.set(cx, 3.1, cz)
+        bowl.castShadow = true
+        const bowlWater = new THREE.Mesh(new THREE.CylinderGeometry(1.3, 1.3, 0.1, 14), water)
+        bowlWater.position.set(cx, 3.4, cz)
+        this.scene.add(basin, pool, column, bowl, bowlWater)
+        this.staticColliders.push({ minX: cx - 4.6, maxX: cx + 4.6, minZ: cz - 4.6, maxZ: cz + 4.6 })
+        return
+      }
+    }
+  }
+
+  /** Warm-bulb street lamps on sidewalk corners next to every crossing. */
+  private plantStreetLamps() {
+    const { tilesW, tilesH, tiles } = this.layout
+    const spots: Array<{ x: number; z: number }> = []
+    for (let ty = 0; ty < tilesH; ty++) {
+      for (let tx = 0; tx < tilesW; tx++) {
+        if (tiles[ty * tilesW + tx] !== 'road_x') continue
+        // lamp on the south-east sidewalk corner of the crossing
+        const cx = tx + 1, cy = ty + 1
+        if (cx >= tilesW || cy >= tilesH) continue
+        if (tiles[cy * tilesW + cx] !== 'sidewalk') continue
+        spots.push({ x: cx * TILE_M + 1.2, z: cy * TILE_M + 1.2 })
+      }
+    }
+    if (spots.length === 0) return
+    const poleGeo = new THREE.CylinderGeometry(0.09, 0.13, 5.2, 6)
+    const headGeo = new THREE.SphereGeometry(0.34, 8, 6)
+    const poleMat = new THREE.MeshLambertMaterial({ color: 0x2c343c })
+    const headMat = new THREE.MeshLambertMaterial({ color: 0xffe9b0, emissive: 0xcf9a30, emissiveIntensity: 0.65 })
+    const poles = new THREE.InstancedMesh(poleGeo, poleMat, spots.length)
+    const heads = new THREE.InstancedMesh(headGeo, headMat, spots.length)
+    poles.castShadow = true
+    const m = new THREE.Matrix4()
+    spots.forEach((sp, i) => {
+      m.identity().setPosition(sp.x, 2.6, sp.z)
+      poles.setMatrixAt(i, m)
+      m.identity().setPosition(sp.x, 5.3, sp.z)
+      heads.setMatrixAt(i, m)
+    })
+    this.scene.add(poles, heads)
+  }
+
+  // ------------------------------------------------------ filler city
+
+  /** The city is fully built: every buildable spot that has no active listing
+   *  or owned property carries a deterministic backdrop building. Only market
+   *  objects are interactive — fillers answer clicks with an info toast. */
+  private buildFillers() {
+    const occupied = new Set<string>()
+    for (const p of this.engine.state.listings) occupied.add(p.tileX + ',' + p.tileY)
+    for (const p of this.engine.state.owned) occupied.add(p.tileX + ',' + p.tileY)
+    const key = [...occupied].sort().join(';')
+    if (key === this.lastFillerKey) return
+    this.lastFillerKey = key
+
+    // dispose previous batch meshes
+    for (const child of [...this.fillerRoot.children]) {
+      const mesh = child as THREE.InstancedMesh
+      mesh.geometry.dispose()
+      const mat = mesh.material
+      if (Array.isArray(mat)) mat.forEach(m => m.dispose())
+      else mat.dispose()
+    }
+    this.fillerRoot.clear()
+    this.fillerColliders = []
+
+    interface Batch {
+      styleKey: string
+      kind: BuildingKind
+      district: string | undefined
+      seed: number
+      spots: Array<{ x: number; z: number; yaw: number }>
+    }
+    const batches = new Map<string, Batch>()
+    const districtIndex = new Map(this.layout.districts.map((d, i) => [d.id, i]))
+
+    for (const spot of this.layout.buildableSpots) {
+      if (occupied.has(spot.tileX + ',' + spot.tileY)) continue
+      const d = this.layout.districts.find(dd => dd.id === spot.district)!
+      const rng = mulberry32(((spot.tileX * 73856093) ^ (spot.tileY * 19349663)) >>> 0)
+      const kind = pickFillerKind(spot.district, !!d.locked, rng())
+      const variant = Math.floor(rng() * 3)
+      const base = (d.locked ? 999 * 1013 : districtIndex.get(d.id)! * 1013) + FILLER_KIND_INDEX[kind] * 211
+      const seed = base + variant * 57
+      const district = d.locked ? undefined : spot.district
+      const styleKey = `${kind}|${seed}|${district ?? '-'}`
+      let batch = batches.get(styleKey)
+      if (!batch) {
+        batch = { styleKey, kind, district, seed, spots: [] }
+        batches.set(styleKey, batch)
+      }
+      const front = this.frontDirForTile(spot.tileX, spot.tileY)
+      batch.spots.push({
+        x: spot.tileX * TILE_M + TILE_M / 2,
+        z: spot.tileY * TILE_M + TILE_M / 2,
+        yaw: Math.atan2(front.x, front.z),
+      })
+    }
+
+    const m = new THREE.Matrix4()
+    for (const batch of batches.values()) {
+      const style = rollStyle(batch.kind, batch.seed, 90, batch.district)
+      const dims = dimsFor(style)
+      // fillers stay inside their tile so dense blocks don't interpenetrate
+      const scale = Math.min(1, (TILE_M - 0.6) / Math.max(dims.w, dims.d))
+      const w = dims.w * scale, dep = dims.d * scale
+      const frontTex = facadeTexture(style, batch.district, 'front')
+      const sideTex = facadeTexture(style, batch.district, 'side')
+      const mats = [
+        new THREE.MeshLambertMaterial({ map: sideTex }),
+        new THREE.MeshLambertMaterial({ map: sideTex }),
+        new THREE.MeshLambertMaterial({ color: style.roofColor }),
+        new THREE.MeshLambertMaterial({ color: 0x333333 }),
+        new THREE.MeshLambertMaterial({ map: frontTex }),
+        new THREE.MeshLambertMaterial({ map: sideTex }),
+      ]
+      const body = new THREE.InstancedMesh(new THREE.BoxGeometry(w, dims.bodyH, dep), mats, batch.spots.length)
+      body.castShadow = true
+      body.receiveShadow = true
+      body.userData.filler = true
+      batch.spots.forEach((sp, i) => {
+        m.makeRotationY(sp.yaw).setPosition(sp.x, dims.bodyH / 2, sp.z)
+        body.setMatrixAt(i, m)
+        const swap = Math.abs(Math.sin(sp.yaw)) > 0.5
+        const hw = (swap ? dep : w) / 2, hd = (swap ? w : dep) / 2
+        this.fillerColliders.push({ minX: sp.x - hw, maxX: sp.x + hw, minZ: sp.z - hd, maxZ: sp.z + hd })
+      })
+      this.fillerRoot.add(body)
+
+      if (dims.roof === 'pyramid' || dims.roof === 'hip') {
+        const roofGeo = new THREE.ConeGeometry(Math.SQRT1_2, 1, 4)
+        roofGeo.rotateY(Math.PI / 4)
+        roofGeo.scale(w * 1.08, dims.roofH, dep * 1.08)
+        const roof = new THREE.InstancedMesh(roofGeo, new THREE.MeshLambertMaterial({ color: style.roofColor }), batch.spots.length)
+        roof.castShadow = true
+        roof.userData.filler = true
+        batch.spots.forEach((sp, i) => {
+          m.makeRotationY(sp.yaw).setPosition(sp.x, dims.bodyH + dims.roofH / 2, sp.z)
+          roof.setMatrixAt(i, m)
+        })
+        this.fillerRoot.add(roof)
+      }
+    }
+  }
+
+  // ------------------------------------------- district lock visuals
+
+  private mountLockOverlay(d: DistrictDef) {
+    const wPx = d.bounds.w * GROUND_PX_PER_TILE
+    const hPx = d.bounds.h * GROUND_PX_PER_TILE
+    const tex = new THREE.CanvasTexture(paintLockOverlay(wPx, hPx))
+    tex.colorSpace = THREE.SRGBColorSpace
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(d.bounds.w * TILE_M, d.bounds.h * TILE_M),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }),
+    )
+    mesh.rotation.x = -Math.PI / 2
+    mesh.position.set((d.bounds.x + d.bounds.w / 2) * TILE_M, 0.08, (d.bounds.y + d.bounds.h / 2) * TILE_M)
+    mesh.userData.lockedDistrict = d.id
+    this.lockOverlays.set(d.id, mesh)
+    this.scene.add(mesh)
+  }
+
+  private mountBanner(d: DistrictDef) {
+    const el = document.createElement('div')
+    el.className = 'district-banner-3d' + (d.locked ? ' locked' : '')
+    el.style.setProperty('--banner-color', '#' + d.color.toString(16).padStart(6, '0'))
+    const nameEl = document.createElement('div')
+    nameEl.className = 'db-name'
+    nameEl.textContent = (d.locked ? `GESPERRT - ${d.name}` : d.name).toUpperCase()
+    const subEl = document.createElement('div')
+    subEl.className = 'db-sub'
+    el.appendChild(nameEl)
+    el.appendChild(subEl)
+    const obj = new CSS2DObject(el)
+    obj.position.set((d.bounds.x + d.bounds.w / 2) * TILE_M, 30, (d.bounds.y + d.bounds.h / 2) * TILE_M)
+    this.scene.add(obj)
+    this.banners.set(d.id, { el, nameEl, subEl })
+  }
+
+  /** Pull current unlockProgress for every locked district and push it into
+   *  each banner's sub-text. Called on bought/sold/month and once on init. */
+  private refreshLockProgress() {
+    for (const d of this.layout.districts) {
+      if (this.engine.isDistrictUnlocked(d.id)) continue
+      const p = this.engine.unlockProgress(d.id)
+      if (!p) continue
+      const banner = this.banners.get(d.id)
+      if (banner) banner.subEl.textContent = formatProgress(p.current, p.threshold)
+    }
+  }
+
+  /** Fade out the lock overlay, swap banner styling to the unlocked look,
+   *  and mark the layout DistrictDef unlocked. Idempotent. */
+  private unlockDistrictVisual(id: DistrictId, animate: boolean) {
+    const d = this.layout.districts.find(dd => dd.id === id)
+    if (!d || !d.locked) return
+    d.locked = false
+
+    const overlay = this.lockOverlays.get(id)
+    if (overlay) {
+      this.lockOverlays.delete(id)
+      const mat = overlay.material as THREE.MeshBasicMaterial
+      if (!animate) {
+        this.scene.remove(overlay)
+        mat.map?.dispose(); mat.dispose(); overlay.geometry.dispose()
+      } else {
+        const t0 = performance.now()
+        const fade = () => {
+          const k = (performance.now() - t0) / 600
+          mat.opacity = Math.max(0, 1 - k)
+          if (k < 1 && !this.disposed) requestAnimationFrame(fade)
+          else {
+            this.scene.remove(overlay)
+            mat.map?.dispose(); mat.dispose(); overlay.geometry.dispose()
+          }
+        }
+        fade()
+      }
+    }
+
+    const banner = this.banners.get(id)
+    if (banner) {
+      banner.el.classList.remove('locked')
+      banner.nameEl.textContent = d.name.toUpperCase()
+      banner.subEl.textContent = ''
+    }
+  }
+
+  // ------------------------------------------------------------ properties
+
+  private snapshotKey(p: Property, isOwned: boolean): string {
+    const condBucket = Math.round(p.condition / 5) * 5
+    const renov = !!p.activeRenovation && p.activeRenovation.status === 'active'
+    const vacant = isOwned && !renov && this.isVacant(p)
+    const nomad = this.isNomadOuted(p)
+    return `${condBucket}|${isOwned}|${renov}|${vacant}|${nomad}`
+  }
+
+  private isVacant(p: Property): boolean {
+    if (p.state !== 'owned') return false
+    if (p.tenant) return false
+    if (p.units && p.units.length > 0) return p.units.every(u => !u.tenant)
+    return true
+  }
+
+  private isNomadOuted(p: Property): boolean {
+    const tenants = [p.tenant, ...(p.units?.map(u => u.tenant) ?? [])].filter(Boolean) as NonNullable<Property['tenant']>[]
+    return tenants.some(t => t.personality === 'nomad' && (t.monthsBehind ?? 0) >= 3)
+  }
+
+  private refreshProperties() {
+    this.hideTooltip()
+    this.hoveredPropertyId = null
+    const allProps = new Map<string, Property>()
+    for (const p of this.engine.state.listings) allProps.set(p.id, p)
+    for (const p of this.engine.state.owned) allProps.set(p.id, p)
+
+    for (const [id, handle] of this.byPropertyId) {
+      if (!allProps.has(id)) {
+        this.disposeBuilding(handle)
+        this.byPropertyId.delete(id)
+      }
+    }
+
+    for (const p of allProps.values()) {
+      const isOwned = p.state === 'owned'
+      const existing = this.byPropertyId.get(p.id)
+      const key = this.snapshotKey(p, isOwned)
+      if (existing && existing.snapshotKey === key) {
+        existing.prop = p
+        existing.isOwned = isOwned
+        if (existing.priceLabel) {
+          if (isOwned) { existing.priceLabel.el.style.display = 'none' }
+          else {
+            existing.priceLabel.el.style.display = ''
+            existing.priceLabel.el.textContent = formatEuro(p.price)
+          }
+        }
+      } else {
+        if (existing) { this.disposeBuilding(existing); this.byPropertyId.delete(p.id) }
+        this.spawnBuilding(p, isOwned, key)
+      }
+    }
+
+    this.rebuildColliders()
+    this.buildFillers()
+  }
+
+  private frontDirForTile(tileX: number, tileY: number): THREE.Vector3 {
+    const { tilesW, tilesH, tiles } = this.layout
+    const walk = (tx: number, ty: number) => {
+      if (tx < 0 || tx >= tilesW || ty < 0 || ty >= tilesH) return false
+      const t = tiles[ty * tilesW + tx]
+      return t === 'sidewalk' || t === 'road_h' || t === 'road_v' || t === 'road_x'
+    }
+    if (walk(tileX, tileY + 1)) return new THREE.Vector3(0, 0, 1)
+    if (walk(tileX, tileY - 1)) return new THREE.Vector3(0, 0, -1)
+    if (walk(tileX + 1, tileY)) return new THREE.Vector3(1, 0, 0)
+    if (walk(tileX - 1, tileY)) return new THREE.Vector3(-1, 0, 0)
+    return new THREE.Vector3(0, 0, 1)
+  }
+
+  private spawnBuilding(p: Property, isOwned: boolean, key: string) {
+    const style = rollStyle(p.type, p.styleSeed, Math.round(p.condition / 5) * 5, p.district)
+    const dims = dimsFor(style)
+    const group = new THREE.Group()
+    const center = new THREE.Vector3(p.tileX * TILE_M + TILE_M / 2, 0, p.tileY * TILE_M + TILE_M / 2)
+    group.position.copy(center)
+    const frontDir = this.frontDirForTile(p.tileX, p.tileY)
+    group.rotation.y = Math.atan2(frontDir.x, frontDir.z)
+
+    const meshes: THREE.Mesh[] = []
+    const frontTex = facadeTexture(style, p.district, 'front')
+    const sideTex = facadeTexture(style, p.district, 'side')
+    const mkMat = (tex: THREE.CanvasTexture) => new THREE.MeshLambertMaterial({ map: tex })
+    const roofMat = new THREE.MeshLambertMaterial({ color: style.roofColor })
+    const bottomMat = new THREE.MeshLambertMaterial({ color: 0x333333 })
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(dims.w, dims.bodyH, dims.d),
+      [mkMat(sideTex), mkMat(sideTex), roofMat, bottomMat, mkMat(frontTex), mkMat(sideTex)],
+    )
+    body.position.y = dims.bodyH / 2
+    body.castShadow = true
+    body.receiveShadow = true
+    group.add(body)
+    meshes.push(body)
+
+    // roof
+    if (dims.roof === 'pyramid' || dims.roof === 'hip') {
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(Math.SQRT1_2, 1, 4), new THREE.MeshLambertMaterial({ color: style.roofColor }))
+      cone.rotation.y = Math.PI / 4
+      cone.scale.set(dims.w * 1.08, dims.roofH, dims.d * 1.08)
+      cone.position.y = dims.bodyH + dims.roofH / 2
+      cone.castShadow = true
+      group.add(cone)
+      meshes.push(cone)
+      if (style.kind === 'house') {
+        const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.6, 0.7), new THREE.MeshLambertMaterial({ color: style.trimColor }))
+        chimney.position.set(dims.w * 0.28, dims.bodyH + 1.0, dims.d * 0.12)
+        group.add(chimney)
+        meshes.push(chimney)
+      }
+    } else if (style.kind === 'office' || style.kind === 'tower') {
+      const mech = new THREE.Mesh(new THREE.BoxGeometry(dims.w * 0.3, 1.1, dims.d * 0.25), new THREE.MeshLambertMaterial({ color: 0x707880 }))
+      mech.position.set(-dims.w * 0.2, dims.bodyH + 0.55, -dims.d * 0.15)
+      group.add(mech)
+      meshes.push(mech)
+      if (style.kind === 'tower') {
+        const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 3.4, 4), new THREE.MeshLambertMaterial({ color: style.accentColor }))
+        antenna.position.y = dims.bodyH + 1.7
+        group.add(antenna)
+        meshes.push(antenna)
+      }
+    }
+
+    const renovActive = !!p.activeRenovation && p.activeRenovation.status === 'active'
+    if (renovActive) this.addScaffold(group, dims)
+
+    const topY = dims.bodyH + dims.roofH
+
+    // owned badge (gold sprite) — parity with the old OwnedBadgeLayer
+    if (isOwned) {
+      const badge = new THREE.Sprite(new THREE.SpriteMaterial({ map: ownedBadgeTexture(), depthTest: true }))
+      badge.scale.set(1.8, 1.8, 1)
+      badge.position.y = topY + 1.6
+      group.add(badge)
+    }
+
+    const handle: BuildingHandle = { group, prop: p, isOwned, snapshotKey: key, dims, frontDir, center, meshes }
+
+    // price tag for listings — parity with the old for-sale tag
+    if (!isOwned) {
+      const el = document.createElement('div')
+      el.className = 'price-tag-3d'
+      el.textContent = formatEuro(p.price)
+      const obj = new CSS2DObject(el)
+      obj.position.y = topY + 2.6
+      group.add(obj)
+      handle.priceLabel = { obj, el }
+    }
+
+    // occupancy markers — parity with the old OccupancyMarkerLayer
+    if (isOwned && !renovActive && this.isVacant(p)) {
+      const el = document.createElement('div')
+      el.className = 'marker-chip vacant'
+      el.textContent = 'ZU VERMIETEN'
+      const obj = new CSS2DObject(el)
+      obj.position.y = topY + 1.2 + (isOwned ? 1.6 : 0)
+      group.add(obj)
+    }
+    if (this.isNomadOuted(p)) {
+      const el = document.createElement('div')
+      el.className = 'marker-chip nomad'
+      el.textContent = '⚠ Mietnomade'
+      const obj = new CSS2DObject(el)
+      obj.position.y = topY + 3.0
+      group.add(obj)
+    }
+
+    for (const m of meshes) m.userData.propertyId = p.id
+    this.buildingsRoot.add(group)
+    this.byPropertyId.set(p.id, handle)
+  }
+
+  /** Simple 3D scaffold: yellow corner poles + rails + grey tarp on the front. */
+  private addScaffold(group: THREE.Group, dims: BuildingDims) {
+    const poleMat = new THREE.MeshLambertMaterial({ color: 0xf2c94c })
+    const railMat = new THREE.MeshLambertMaterial({ color: 0xc89020 })
+    const h = dims.bodyH + 0.5
+    const hw = dims.w / 2 + 0.35, hd = dims.d / 2 + 0.35
+    const poleGeo = new THREE.CylinderGeometry(0.09, 0.09, h, 5)
+    for (const [px, pz] of [[-hw, hd], [hw, hd], [-hw, -hd], [hw, -hd]] as const) {
+      const pole = new THREE.Mesh(poleGeo, poleMat)
+      pole.position.set(px, h / 2, pz)
+      group.add(pole)
+    }
+    const railGeo = new THREE.BoxGeometry(dims.w + 0.7, 0.07, 0.07)
+    for (let y = 2; y < h; y += 2.8) {
+      const rail = new THREE.Mesh(railGeo, railMat)
+      rail.position.set(0, y, hd)
+      group.add(rail)
+    }
+    const tarp = new THREE.Mesh(
+      new THREE.PlaneGeometry(dims.w + 0.6, h * 0.85),
+      new THREE.MeshLambertMaterial({ color: 0xb0b0b0, transparent: true, opacity: 0.3, side: THREE.DoubleSide }),
+    )
+    tarp.position.set(0, h * 0.45, hd + 0.05)
+    group.add(tarp)
+  }
+
+  private disposeBuilding(handle: BuildingHandle) {
+    this.buildingsRoot.remove(handle.group)
+    handle.group.traverse(obj => {
+      const mesh = obj as THREE.Mesh
+      if (mesh.geometry) mesh.geometry.dispose()
+      const mat = (mesh as any).material
+      if (Array.isArray(mat)) mat.forEach((m: THREE.Material) => m.dispose())
+      else if (mat) (mat as THREE.Material).dispose()
+      // CSS2DObjects remove their element when removed from the scene graph,
+      // but be explicit so no chips leak:
+      if ((obj as any).isCSS2DObject) (obj as CSS2DObject).element.remove()
+    })
+    if (this.aimedHandle === handle) this.aimedHandle = null
+  }
+
+  private rebuildColliders() {
+    this.colliders = []
+    for (const h of this.byPropertyId.values()) {
+      // rotated buildings (front facing +-X) have swapped footprints
+      const swap = Math.abs(h.frontDir.x) > 0.5
+      const hw = (swap ? h.dims.d : h.dims.w) / 2
+      const hd = (swap ? h.dims.w : h.dims.d) / 2
+      this.colliders.push({
+        minX: h.center.x - hw,
+        maxX: h.center.x + hw,
+        minZ: h.center.z - hd,
+        maxZ: h.center.z + hd,
+      })
+    }
+  }
+
+  // ------------------------------------------------------------------ input
+
+  private setupInput() {
+    const canvas = this.renderer.domElement
+    canvas.addEventListener('contextmenu', e => e.preventDefault())
+
+    canvas.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return
+      if (ModalManager.get().size() > 0) return
+      if (this.locked) {
+        // pointer locked: interact with whatever the crosshair aims at
+        this.interact()
+        return
+      }
+      this.drag = { x: e.clientX, y: e.clientY, total: 0, dragged: false }
+      if (!this.fallbackLook) {
+        const req: any = canvas.requestPointerLock()
+        // Chromium returns a promise; if the environment forbids pointer lock
+        // (some embeds/iframes), fall back to drag-look + cursor picking.
+        if (req && typeof req.catch === 'function') {
+          req.catch(() => { this.fallbackLook = true; this.updateHudChrome() })
+        }
+      }
+    })
+
+    window.addEventListener('mouseup', (e) => {
+      if (e.button !== 0) return
+      const d = this.drag
+      this.drag = null
+      if (!d || this.locked) return
+      if (ModalManager.get().size() > 0) return
+      if (this.fallbackLook && !d.dragged) this.interactAt(e.clientX, e.clientY)
+    })
+
+    document.addEventListener('pointerlockchange', () => {
+      this.locked = document.pointerLockElement === canvas
+      this.updateHudChrome()
+    })
+    document.addEventListener('pointerlockerror', () => {
+      this.fallbackLook = true
+      this.updateHudChrome()
+    })
+
+    document.addEventListener('mousemove', (e) => {
+      this.cursor.x = e.clientX
+      this.cursor.y = e.clientY
+      if (this.locked) {
+        this.yaw -= e.movementX * 0.0022
+        this.pitch -= e.movementY * 0.0022
+        this.pitch = Math.max(-1.45, Math.min(1.45, this.pitch))
+        return
+      }
+      if (this.drag && (e.buttons & 1)) {
+        const dx = e.clientX - this.drag.x
+        const dy = e.clientY - this.drag.y
+        this.drag.total += Math.abs(dx) + Math.abs(dy)
+        if (this.drag.total > 6) this.drag.dragged = true
+        this.yaw -= dx * 0.005
+        this.pitch = Math.max(-1.45, Math.min(1.45, this.pitch - dy * 0.005))
+        this.drag.x = e.clientX
+        this.drag.y = e.clientY
+      }
+    })
+
+    document.addEventListener('keydown', (e) => {
+      const tgt = e.target as HTMLElement
+      const typing = tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)
+      if (typing) return
+      this.keys.add(e.code)
+      if (e.code === 'Space' && ModalManager.get().size() === 0) {
+        e.preventDefault()
+        const cur = this.engine.getSpeed()
+        this.engine.setSpeed(cur === 0 ? 1 : 0)
+      }
+      if (e.code === 'Escape') {
+        // ModalManager handles ESC when modals are open (capture phase).
+        // While pointer-locked the browser consumes ESC for the unlock, so this
+        // only fires unlocked: open the main menu — parity with the 2D scene.
+        if (ModalManager.get().size() === 0 && !this.locked) this.menu.open()
+      }
+    })
+    document.addEventListener('keyup', (e) => this.keys.delete(e.code))
+    window.addEventListener('blur', () => this.keys.clear())
+  }
+
+  /** Crosshair-raycast interaction: property -> DealSheet, locked district -> info toast. */
+  private interact() {
+    this.handleHit(this.aimcast())
+  }
+
+  /** Cursor-position interaction (fallback mode without pointer lock). */
+  private interactAt(clientX: number, clientY: number) {
+    const ndcX = (clientX / window.innerWidth) * 2 - 1
+    const ndcY = -((clientY / window.innerHeight) * 2 - 1)
+    this.handleHit(this.aimcastAt(ndcX, ndcY))
+  }
+
+  private handleHit(hit: { property?: string; lockedDistrict?: DistrictId; filler?: boolean } | null) {
+    if (!hit) return
+    if (hit.property) {
+      const handle = this.byPropertyId.get(hit.property)
+      if (!handle) return
+      this.hideTooltip()
+      this.hoveredPropertyId = null
+      if (this.locked) document.exitPointerLock()
+      this.deal.open(handle.prop, handle.isOwned)
+    } else if (hit.filler) {
+      const now = performance.now()
+      if (now - this.lastFillerToast > 2500) {
+        this.lastFillerToast = now
+        this.hud.toast('Nicht auf dem Markt — achte auf Gebaeude mit Preisschild.', 'info')
+      }
+    } else if (hit.lockedDistrict) {
+      this.lockedDistrictToast(hit.lockedDistrict)
+    }
+  }
+
+  private lockedDistrictToast(id: DistrictId) {
+    const now = performance.now()
+    if (now - this.lastLockToast < 2500) return
+    this.lastLockToast = now
+    const d = this.layout.districts.find(dd => dd.id === id)
+    if (!d) return
+    const prog = this.engine.unlockProgress(id)
+    const msg = prog
+      ? `${d.name} ist gesperrt - ${prog.label} (${prog.current}/${prog.threshold})`
+      : `${d.name} ist gesperrt`
+    this.hud.toast(msg, 'info')
+  }
+
+  private aimcast(): { property?: string; lockedDistrict?: DistrictId } | null {
+    return this.aimcastAt(0, 0)
+  }
+
+  private aimcastAt(ndcX: number, ndcY: number): { property?: string; lockedDistrict?: DistrictId; filler?: boolean } | null {
+    this.raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera)
+    this.raycaster.far = 400
+    const targets: THREE.Object3D[] = [this.buildingsRoot, this.fillerRoot, ...this.lockOverlays.values()]
+    const hits = this.raycaster.intersectObjects(targets, true)
+    for (const h of hits) {
+      const pid = h.object.userData.propertyId
+      if (pid) return { property: pid }
+      if (h.object.userData.filler) return { filler: true }
+      const locked = h.object.userData.lockedDistrict
+      if (locked) return { lockedDistrict: locked }
+    }
+    return null
+  }
+
+  // ------------------------------------------------------------- tooltip
+
+  private showTooltip(p: Property, isOwned: boolean) {
+    const cap = this.engine.capRate(p)
+    const t = p.tenant
+    const condClass = p.condition >= 70 ? 'good' : p.condition >= 40 ? 'mid' : 'bad'
+    const tag = isOwned ? '<span class="pt-tag owned">DEIN</span>' : '<span class="pt-tag forsale">VERKAUF</span>'
+    const channelTag = !isOwned && p.seller
+      ? p.seller.channel === 'agent'
+        ? `<div class="pt-row" style="font-size:10px;color:var(--accent)">🏢 via ${escapeHtml(p.seller.agentName!.split(' (')[0])}</div>`
+        : `<div class="pt-row" style="font-size:10px;color:var(--muted)">🏠 Privatverkauf von ${escapeHtml(p.seller.ownerName)}</div>`
+      : ''
+    this.hoverDiv.innerHTML = `
+      <div class="pt-name">${escapeHtml(this.engine.nameFor(p))}</div>
+      <div class="pt-sub">${capitalize(p.type)}${p.buildingForm === 'mfh' ? ` · MFH ${p.units.length} Einh.` : p.buildingForm === 'wg' ? ` · WG ${p.units.length} Zi.` : ''} · ${districtName(p.district)} · ${p.yearBuilt}</div>
+      <div class="pt-row"><span>${isOwned ? 'Wert' : 'Preis'}</span><b>${formatEuro(isOwned ? p.marketValue : p.price)}</b></div>
+      <div class="pt-row"><span>Miete</span><b>${formatEuro(p.baseRent)}/M</b></div>
+      <div class="pt-row"><span>Zustand</span><b class="${condClass}">${Math.round(p.condition)}%</b></div>
+      <div class="pt-row"><span>Cap Rate</span><b class="${cap >= 5 ? 'good' : cap >= 3 ? 'mid' : 'bad'}">${cap.toFixed(1)}%</b></div>
+      ${isOwned ? `<div class="pt-row"><span>Mieter</span><b>${t ? escapeHtml(t.name) : 'leer'}</b></div>` : ''}
+      ${channelTag}
+      ${tag}
+    `
+    this.hoverDiv.style.display = 'block'
+  }
+
+  private hideTooltip() {
+    this.hoverDiv.style.display = 'none'
+  }
+
+  /** Fallback mode: anchor the tooltip above the mouse cursor like in 2D. */
+  private positionTooltipAtCursor() {
+    this.hoverDiv.classList.remove('fp')
+    this.hoverDiv.style.left = this.cursor.x + 'px'
+    this.hoverDiv.style.top = this.cursor.y + 'px'
+  }
+
+  // ---------------------------------------------------------- focus helper
+
+  /** Activity-Log helper: teleport the player in front of a property and open
+   *  its DealSheet — the FP equivalent of the old camera pan. */
+  focusProperty(propertyId: string) {
+    const handle = this.byPropertyId.get(propertyId)
+    if (!handle) return
+    const dist = Math.max(handle.dims.w, handle.dims.d) / 2 + 9
+    const target = handle.center.clone().addScaledVector(handle.frontDir, dist)
+    this.pos.set(target.x, EYE, target.z)
+    const dx = handle.center.x - this.pos.x
+    const dz = handle.center.z - this.pos.z
+    this.yaw = Math.atan2(-dx, -dz)
+    this.pitch = Math.atan2(handle.dims.bodyH * 0.5, Math.hypot(dx, dz)) * 0.6
+    const all = [...this.engine.state.listings, ...this.engine.state.owned]
+    const p = all.find(pp => pp.id === propertyId)
+    if (!p) return
+    const isOwned = p.state === 'owned'
+    setTimeout(() => this.deal.open(p, isOwned), 200)
+  }
+
+  // ------------------------------------------------------------- particles
+
+  private spawnCoinBurst(p: Property) {
+    const handle = this.byPropertyId.get(p.id)
+    const base = handle
+      ? handle.center.clone().setY(handle.dims.bodyH * 0.6)
+      : new THREE.Vector3(p.tileX * TILE_M + TILE_M / 2, 4, p.tileY * TILE_M + TILE_M / 2)
+    const geo = new THREE.SphereGeometry(0.22, 6, 5)
+    for (let i = 0; i < 12; i++) {
+      const mat = new THREE.MeshBasicMaterial({ color: 0xf1c40f, transparent: true })
+      const mesh = new THREE.Mesh(geo, mat)
+      mesh.position.copy(base)
+      const angle = Math.random() * Math.PI * 2
+      const vel = new THREE.Vector3(Math.cos(angle) * (2 + Math.random() * 3), 4 + Math.random() * 3, Math.sin(angle) * (2 + Math.random() * 3))
+      this.scene.add(mesh)
+      this.particles.push({ mesh, vel, life: 1.2 })
+    }
+  }
+
+  private updateParticles(dt: number) {
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const pt = this.particles[i]
+      pt.life -= dt
+      pt.vel.y -= 9.8 * dt
+      pt.mesh.position.addScaledVector(pt.vel, dt)
+      ;(pt.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, pt.life / 1.2)
+      if (pt.life <= 0) {
+        this.scene.remove(pt.mesh)
+        ;(pt.mesh.material as THREE.Material).dispose()
+        this.particles.splice(i, 1)
+      }
+    }
+  }
+
+  // ------------------------------------------------------------- main loop
+
+  private districtAt(x: number, z: number): DistrictDef | null {
+    const tx = Math.floor(x / TILE_M), ty = Math.floor(z / TILE_M)
+    return this.layout.districts.find(d =>
+      tx >= d.bounds.x && tx < d.bounds.x + d.bounds.w && ty >= d.bounds.y && ty < d.bounds.y + d.bounds.h) ?? null
+  }
+
+  private blockedAt(x: number, z: number): 'building' | 'locked' | null {
+    for (const c of this.colliders) {
+      if (x > c.minX - PLAYER_RADIUS && x < c.maxX + PLAYER_RADIUS && z > c.minZ - PLAYER_RADIUS && z < c.maxZ + PLAYER_RADIUS) return 'building'
+    }
+    for (const c of this.fillerColliders) {
+      if (x > c.minX - PLAYER_RADIUS && x < c.maxX + PLAYER_RADIUS && z > c.minZ - PLAYER_RADIUS && z < c.maxZ + PLAYER_RADIUS) return 'building'
+    }
+    for (const c of this.staticColliders) {
+      if (x > c.minX - PLAYER_RADIUS && x < c.maxX + PLAYER_RADIUS && z > c.minZ - PLAYER_RADIUS && z < c.maxZ + PLAYER_RADIUS) return 'building'
+    }
+    const d = this.districtAt(x, z)
+    if (d && !this.engine.isDistrictUnlocked(d.id)) return 'locked'
+    return null
+  }
+
+  private move(dt: number): boolean {
+    const fwd = (this.keys.has('KeyW') || this.keys.has('ArrowUp') ? 1 : 0) - (this.keys.has('KeyS') || this.keys.has('ArrowDown') ? 1 : 0)
+    const strafe = (this.keys.has('KeyD') || this.keys.has('ArrowRight') ? 1 : 0) - (this.keys.has('KeyA') || this.keys.has('ArrowLeft') ? 1 : 0)
+    if (!fwd && !strafe) return false
+    if (ModalManager.get().size() > 0) return false
+    const speed = (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) ? SPRINT_SPEED : WALK_SPEED
+    const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw)
+    // camera forward on ground plane
+    const dirX = -sin * fwd + cos * strafe
+    const dirZ = -cos * fwd - sin * strafe
+    const len = Math.hypot(dirX, dirZ) || 1
+    const dx = (dirX / len) * speed * dt
+    const dz = (dirZ / len) * speed * dt
+
+    const worldW = this.layout.tilesW * TILE_M
+    const worldH = this.layout.tilesH * TILE_M
+    // axis-separated slide
+    let nx = this.pos.x + dx
+    let blocked = this.blockedAt(nx, this.pos.z)
+    if (blocked) { if (blocked === 'locked') this.bumpLocked(nx, this.pos.z); nx = this.pos.x }
+    let nz = this.pos.z + dz
+    blocked = this.blockedAt(nx, nz)
+    if (blocked) { if (blocked === 'locked') this.bumpLocked(nx, nz); nz = this.pos.z }
+    this.pos.x = Math.max(1, Math.min(worldW - 1, nx))
+    this.pos.z = Math.max(1, Math.min(worldH - 1, nz))
+    return true
+  }
+
+  private bumpLocked(x: number, z: number) {
+    const d = this.districtAt(x, z)
+    if (d) this.lockedDistrictToast(d.id)
+  }
+
+  private updateHudChrome() {
+    const modalOpen = ModalManager.get().size() > 0
+    this.crosshair.style.display = this.locked && !modalOpen ? 'block' : 'none'
+    this.hint.style.display = !this.locked && !modalOpen ? 'block' : 'none'
+    if (this.fallbackLook) {
+      this.hint.innerHTML = `🖱 <b>Ziehen</b>: Umsehen · <b>Klick auf Gebaeude</b>: Details · <b>WASD</b> Laufen · <b>Shift</b> Sprint · <b>Leertaste</b> Pause · <b>ESC</b> Menue`
+    }
+    if (this.locked) this.hoverDiv.classList.add('fp')
+  }
+
+  private highlight(handle: BuildingHandle | null) {
+    if (this.aimedHandle === handle) return
+    const setEmissive = (h: BuildingHandle, on: boolean) => {
+      for (const m of h.meshes) {
+        const mats = Array.isArray(m.material) ? m.material : [m.material]
+        for (const mat of mats) {
+          if ((mat as THREE.MeshLambertMaterial).emissive) {
+            (mat as THREE.MeshLambertMaterial).emissive.setHex(on ? 0x2a2a20 : 0x000000)
+          }
+        }
+      }
+    }
+    if (this.aimedHandle) setEmissive(this.aimedHandle, false)
+    this.aimedHandle = handle
+    if (handle) setEmissive(handle, true)
+  }
+
+  private loop = () => {
+    if (this.disposed) return
+    requestAnimationFrame(this.loop)
+    const dt = Math.min(0.05, this.clock.getDelta())
+
+    const moving = this.move(dt)
+    this.updateParticles(dt)
+    this.ambient.update(dt)
+
+    // head-bob + sprint FOV kick
+    const sprinting = moving && (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight'))
+    this.bobAmount += ((moving ? 1 : 0) - this.bobAmount) * Math.min(1, dt * 8)
+    if (moving) this.bobPhase += dt * (sprinting ? 13 : 9)
+    this.fovTarget = sprinting ? 79 : 72
+    if (Math.abs(this.camera.fov - this.fovTarget) > 0.05) {
+      this.camera.fov += (this.fovTarget - this.camera.fov) * Math.min(1, dt * 6)
+      this.camera.updateProjectionMatrix()
+    }
+
+    // camera from player state
+    this.camera.position.copy(this.pos)
+    this.camera.position.y = EYE + Math.sin(this.bobPhase) * 0.055 * this.bobAmount
+    this.camera.rotation.set(0, 0, 0)
+    this.camera.rotateY(this.yaw)
+    this.camera.rotateX(this.pitch)
+
+    // sun follows player so the shadow box stays useful
+    this.sun.position.copy(this.pos).addScaledVector(this.sunDir, 220)
+    this.sun.target.position.set(this.pos.x, 0, this.pos.z)
+
+    // aim raycast: tooltip + highlight. Pointer-locked -> crosshair centre;
+    // fallback mode -> hover under the visible cursor (like the 2D scene).
+    const modalOpen = ModalManager.get().size() > 0
+    const canAim = !modalOpen && (this.locked || (this.fallbackLook && !this.drag?.dragged))
+    if (canAim) {
+      const hit = this.locked
+        ? this.aimcast()
+        : this.aimcastAt((this.cursor.x / window.innerWidth) * 2 - 1, -((this.cursor.y / window.innerHeight) * 2 - 1))
+      if (hit?.property) {
+        const handle = this.byPropertyId.get(hit.property) ?? null
+        this.highlight(handle)
+        if (handle && this.hoveredPropertyId !== hit.property) {
+          this.hoveredPropertyId = hit.property
+          this.showTooltip(handle.prop, handle.isOwned)
+        }
+        if (!this.locked) this.positionTooltipAtCursor()
+      } else {
+        this.highlight(null)
+        if (this.hoveredPropertyId) { this.hoveredPropertyId = null; this.hideTooltip() }
+      }
+    } else {
+      this.highlight(null)
+      if (this.hoveredPropertyId) { this.hoveredPropertyId = null; this.hideTooltip() }
+    }
+    if (modalOpen && this.locked) document.exitPointerLock()
+    this.updateHudChrome()
+
+    this.renderer.render(this.scene, this.camera)
+    this.css2d.render(this.scene, this.camera)
+  }
+
+  private onResize = () => {
+    const w = window.innerWidth, h = window.innerHeight
+    this.camera.aspect = w / h
+    this.camera.updateProjectionMatrix()
+    this.renderer.setSize(w, h)
+    this.css2d.setSize(w, h)
+  }
+
+  destroy() {
+    this.disposed = true
+    this.engine.stop()
+    window.removeEventListener('resize', this.onResize)
+    this.hud?.destroy()
+    this.activityLog?.destroy()
+    this.hoverDiv?.remove()
+    this.crosshair?.remove()
+    this.hint?.remove()
+    this.renderer.dispose()
+    this.renderer.domElement.remove()
+    this.css2d.domElement.remove()
+  }
+}
+
+// ----------------------------------------------------------------- helpers
+
+const FILLER_KIND_INDEX: Record<BuildingKind, number> = {
+  house: 0, apartment: 1, office: 2, shop: 3, tower: 4, villa: 5,
+}
+
+/** Deterministic backdrop mix per district — apartment-heavy with local flavour. */
+function pickFillerKind(district: DistrictId, locked: boolean, r: number): BuildingKind {
+  const pick = (weights: Array<[BuildingKind, number]>): BuildingKind => {
+    let acc = 0
+    for (const [kind, w] of weights) {
+      acc += w
+      if (r < acc) return kind
+    }
+    return weights[weights.length - 1][0]
+  }
+  if (locked) return pick([['apartment', 0.5], ['house', 0.3], ['shop', 0.2]])
+  switch (district) {
+    case 'mitte': return pick([['apartment', 0.45], ['office', 0.25], ['tower', 0.15], ['shop', 0.15]])
+    case 'prenzlauer': return pick([['apartment', 0.6], ['shop', 0.2], ['house', 0.1], ['villa', 0.1]])
+    case 'charlottenburg': return pick([['apartment', 0.45], ['villa', 0.25], ['office', 0.15], ['shop', 0.15]])
+    case 'kreuzberg': return pick([['apartment', 0.6], ['shop', 0.25], ['office', 0.15]])
+    case 'wedding': return pick([['apartment', 0.55], ['shop', 0.2], ['house', 0.15], ['office', 0.1]])
+    case 'neukoelln': return pick([['apartment', 0.55], ['shop', 0.25], ['house', 0.2]])
+    default: return pick([['apartment', 0.6], ['house', 0.2], ['shop', 0.2]])
+  }
+}
+
+function capitalize(s: string) { return s.slice(0, 1).toUpperCase() + s.slice(1) }
+function escapeHtml(s: string) { return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!)) }
+function districtName(id: string): string {
+  const map: Record<string, string> = {
+    mitte: 'Mitte', prenzlauer: 'Prenzlauer Berg', kreuzberg: 'Kreuzberg',
+    charlottenburg: 'Charlottenburg', wedding: 'Wedding', neukoelln: 'Neukoelln',
+    spandau: 'Spandau', steglitz: 'Steglitz', lichtenberg: 'Lichtenberg', marzahn: 'Marzahn',
+  }
+  return map[id] ?? id
+}

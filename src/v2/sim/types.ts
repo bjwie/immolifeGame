@@ -1,5 +1,5 @@
-import type { BuildingKind } from '../render/BuildingRenderer'
-import type { DistrictId } from '../render/CityRenderer'
+import type { BuildingKind } from '../world/buildingStyle'
+import type { DistrictId } from '../world/cityLayout'
 
 export type PropertyType = BuildingKind  // alias — we use the renderer's typing throughout
 
