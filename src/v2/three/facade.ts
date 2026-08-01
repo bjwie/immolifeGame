@@ -423,6 +423,25 @@ function paintDistrictSkin(g: CanvasRenderingContext2D, W: number, H: number, s:
 
 // ------------------------------------------------- marker sprite textures
 
+let blobTex: THREE.CanvasTexture | null = null
+
+/** Soft radial contact-shadow blob laid under buildings. */
+export function contactShadowTexture(): THREE.CanvasTexture {
+  if (blobTex) return blobTex
+  const c = document.createElement('canvas')
+  c.width = 64; c.height = 64
+  const g = c.getContext('2d')!
+  const grad = g.createRadialGradient(32, 32, 6, 32, 32, 32)
+  grad.addColorStop(0, 'rgba(0,0,0,0.34)')
+  grad.addColorStop(0.7, 'rgba(0,0,0,0.18)')
+  grad.addColorStop(1, 'rgba(0,0,0,0)')
+  g.fillStyle = grad
+  g.fillRect(0, 0, 64, 64)
+  const tex = new THREE.CanvasTexture(c)
+  blobTex = tex
+  return tex
+}
+
 let ownedBadgeTex: THREE.CanvasTexture | null = null
 
 /** Gold circle badge with a little house glyph — the 3D version of the old

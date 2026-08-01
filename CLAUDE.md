@@ -13,7 +13,7 @@ npm run preview      # serve the production build locally
 
 There is no test runner, linter, or formatter configured. `npm run build` is the only correctness gate — `tsconfig.json` has `strict`, `noUnusedLocals`, and `noUnusedParameters` enabled, so dead code breaks the build.
 
-Append `?skip=1` to the dev URL (or set `window.__immolife_autostart = true`) to bypass the start screen and boot straight into the game — useful when iterating on `CityScene`.
+Append `?skip=1` to the dev URL (or set `window.__immolife_autostart = true`) to bypass the start screen and boot straight into the game — useful when iterating on `CityScene3D`.
 
 ## Critical: v1 vs v2 split
 
@@ -23,6 +23,7 @@ The repo contains two parallel implementations. **Only `src/v2/` is live.**
 - `index.html` loads `/src/v2/main.ts` as the entry point.
 - `README.md`, `WORLD_DESIGN_GUIDE.md`, and `POPOVER_EXAMPLES.md` describe the **legacy** v1 architecture (`GameManager`, `WorldManager`, `UILibraries`, tippy.js popovers, `src/scenes/GameScene.ts`, `src/managers/...`). None of that exists in v2. Treat those docs as historical.
 - Several `package.json` deps (`tippy.js`, `chart.js`, `sweetalert2`, `toastify-js`, `lodash`) are leftover from v1 and are **not imported** by v2. The HUD's net-worth chart is a hand-rolled canvas (`ChartCanvas` in `HUD.ts`), not Chart.js.
+- v2 was originally a 2D top-down Phaser game; it is now a **first-person 3D city built on Three.js**. Phaser is gone from `package.json`. Any doc or commit message mentioning Phaser sprites/scenes for v2 is historical.
 
 When the user asks for game changes, always work in `src/v2/`.
 
@@ -30,14 +31,17 @@ When the user asks for game changes, always work in `src/v2/`.
 
 ### Layer overview
 ```
-main.ts            boot, start screen, Phaser game construction
-  └─ CityScene     single Phaser scene — owns camera, world, sprites
-       ├─ CityRenderer       generates 36×24 tile grid + 6 districts (procedural)
-       ├─ BuildingRenderer   procedural pixel-art building textures (cached by style key)
-       └─ Engine             game state + simulation loop (no Phaser deps)
+main.ts              boot, start screen, CityScene3D construction
+  └─ three/CityScene3D   first-person Three.js scene — camera, world, input, engine wiring
+       ├─ world/cityLayout     pure 60×24 tile grid + 10 districts (6 playable + 4 locked)
+       ├─ world/buildingStyle  pure deterministic style rolls (palettes, sizes, subtypes)
+       ├─ three/ground         paints the 2D tile art onto the ground-plane canvas
+       ├─ three/facade         canvas facade textures for building boxes (cached by style key)
+       ├─ three/ambient        instanced cars + pedestrians
+       └─ Engine               game state + simulation loop (no renderer deps)
             ├─ HUD                 \
             ├─ DealSheet            \  DOM overlays mounted into
-            ├─ NegotiationModal     /  window.__overlayRoot, NOT Phaser
+            ├─ NegotiationModal     /  window.__overlayRoot, NOT the WebGL canvas
             ├─ RentalModal         /
             └─ MenuModal          /
 ```
@@ -48,7 +52,7 @@ main.ts            boot, start screen, Phaser game construction
 Engine is a tiny event bus with `on(name, fn)` / `emit(name, data)`. Known event names emitted from `Engine`:
 `day`, `month`, `year`, `bought`, `sold`, `renovated`, `leaseSigned`, `speed`, `event`, `toast`, `achievement`, `financial`, `reset`, `brokerChanged`. Add a new event by emitting it in `Engine.ts` and subscribing wherever you need a UI refresh — never poll.
 
-The Engine has zero Phaser imports — it only depends on `CityLayout` from `CityRenderer` for buildable tile coordinates. Keep it that way; the renderer/scene depends on Engine, not the reverse.
+The Engine has zero renderer imports — it only depends on `CityLayout` from `src/v2/world/cityLayout.ts` for buildable tile coordinates. Keep it that way; the 3D scene depends on Engine, not the reverse. (`world/` modules are pure: no Three.js, no DOM beyond canvas-free logic.)
 
 ### Time loop
 `Engine.tick()` runs on `setInterval` at `dayDurationMs (1200) / speed`. 30 days = 1 month → triggers `processMonth()` (degradation, rent, loans, market events, autosave). Speed `0` clears the interval (pause). Valid speeds: `[0, 1, 2, 4, 8]` from `SPEEDS` in `types.ts`.
@@ -56,22 +60,24 @@ The Engine has zero Phaser imports — it only depends on `CityLayout` from `Cit
 ### Save/load
 Single localStorage key: `immolife_v2_save`, JSON of `{ state, v: 2, ts }`. `Engine` constructor auto-loads unless `{ freshStart: true }`. `processMonth()` calls `autoSave()` every in-game month. Market `events` carry function references (`apply`) so they are **wiped on load** — `tryLoad` clears them. When adding new fields to `GameState`, add a migration default in `tryLoad()` (see existing `negotiationSkill`, `bankRelations`, `brokerId` migrations) — old saves are common.
 
-### Scene ↔ Engine sync (CityScene)
-`CityScene.refreshProperties()` reconciles Phaser sprites with `engine.state.listings + engine.state.owned`. Triggered on `bought / sold / renovated / leaseSigned / month / reset`. When a property's owned-state flips, the sprite is destroyed and respawned because click/hover closures capture `isOwned` at spawn time — don't try to mutate the existing sprite in place.
+### Scene ↔ Engine sync (CityScene3D)
+`CityScene3D.refreshProperties()` reconciles building groups with `engine.state.listings + engine.state.owned`. Triggered on `bought / sold / renovated / renovationStart / renovationDone / leaseSigned / month / reset`. Each active property has a `snapshotKey` (condition bucket, owned, renovation, vacancy, nomad-outed) — when it changes, the whole group is disposed and respawned (facade textures are cached, so this is cheap). Price-tag text is updated in place.
 
-The hover tooltip is a **DOM div** positioned in screen space using the camera transform (`(worldX - cam.scrollX) * cam.zoom`). It's hidden during pan/zoom because re-projecting fast feels worse than dropping it.
+**Filler city:** every `buildableSpot` without an active property carries an instanced backdrop building (`buildFillers()`), so the city always looks fully built. Fillers are batched `InstancedMesh`es keyed by style, deterministic per tile, non-purchasable — clicking one shows an info toast. When the engine spawns a listing on a filled tile, the reconcile swap happens automatically via the occupied-tile key.
 
-### Camera input
-Pan: right-click drag, middle-click drag, or Shift+left-drag. Wheel = zoom (clamped 0.5–2.5). The browser context menu is suppressed in `setupInput()` so right-click works. Left-click on a building opens the DealSheet — but only if the pointer hasn't moved >6px (otherwise it was a pan).
+### First-person input
+Click the canvas → pointer lock (mouse look + WASD/arrows, Shift sprint, crosshair raycast; click = open DealSheet / locked-district info). If pointer lock is unavailable (some embeds), the scene falls back to **drag-to-look + cursor picking** with 2D-style hover tooltips — don't remove this path, it's what makes the game testable in embedded browsers. Space toggles pause; ESC opens the menu when no modal is open (`ModalManager` eats ESC in capture phase otherwise; while pointer-locked the browser consumes ESC to exit the lock). Movement collides with building footprints (axis-separated slide), the plaza fountain, world bounds, and locked districts (bump → progress toast).
 
 ### Districts and types
-The 6 Berlin districts are defined in `CityRenderer.generate()` with `priceMultiplier` / `rentMultiplier` / `trend`. IDs are ASCII: `mitte | prenzlauer | kreuzberg | charlottenburg | wedding | neukoelln` (note: `neukoelln`, not `neukölln`). Building kinds: `house | apartment | office | shop | tower | villa` — the `BuildingKind` type from `BuildingRenderer.ts` is re-exported via `types.ts` as `PropertyType`.
+The 10 Berlin districts (6 playable + 4 locked edge teasers) are defined in `world/cityLayout.ts` with `priceMultiplier` / `rentMultiplier` / `trend`. IDs are ASCII: `mitte | prenzlauer | kreuzberg | charlottenburg | wedding | neukoelln` + locked `spandau | steglitz | lichtenberg | marzahn`. Building kinds: `house | apartment | office | shop | tower | villa` — the `BuildingKind` type from `world/buildingStyle.ts` is re-exported via `types.ts` as `PropertyType`.
 
 ### Procedural rendering
-`BuildingRenderer.ensureTexture(scene, style, isOwned)` produces a deterministic texture key and caches generated textures globally (`textureCache`). Two builds with the same `style` + `isOwned` reuse the same texture — never regenerate textures per-frame. `BuildingRenderer.rollStyle(kind, seed, condition)` is deterministic given seed; condition is bucketed (`Math.round(p.condition / 5) * 5`) so minor wear doesn't churn textures.
+`three/facade.ts` paints per-style canvas facade textures (front + side) that wrap `BoxGeometry` buildings; cached by a deterministic style key, `NearestFilter` for the crisp pixel look. It ports the old 2D visual language: Altbau (Stuck-Pediments, cornice), Plattenbau (panel seams), Neubau (Bandfenster, anthracite cap), shop sign bands, office/tower glass grids, **condition patina** (tint, cracks <50, boarded windows <25, bucketed by 5), and **district skins** (Kreuzberg graffiti, Prenzlauer drainpipes, Neukoelln awnings, ...). `rollStyle(kind, seed, condition, district)` in `world/buildingStyle.ts` is deterministic given seed — same consumption order as the old 2D renderer, so styles are save-stable.
+
+State markers on buildings: gold sprite badge = owned, CSS2D chips = price tag / `ZU VERMIETEN` / nomad warning, 3D scaffold group = active renovation. CSS2D labels distance-fade (`fadeLabelsByDistance`) so the horizon doesn't pile up with banners.
 
 ### DOM overlay
-`window.__overlayRoot` is created in `main.ts` and is the mount point for HUD and all modals. They live as siblings of the Phaser canvas, styled by `src/v2/ui/styles.css`. CSS variables (`--bg`, `--accent`, `--muted`, etc.) defined there drive the whole UI palette — prefer them over hardcoded colors.
+`window.__overlayRoot` is created in `main.ts` and is the mount point for HUD and all modals. They live as siblings of the WebGL canvas (plus a `CSS2DRenderer` layer for world-anchored labels), styled by `src/v2/ui/styles.css`. CSS variables (`--bg`, `--accent`, `--muted`, etc.) defined there drive the whole UI palette — prefer them over hardcoded colors.
 
 ### Modal stack (`ModalManager`)
 All modals (`DealSheet`, `MenuModal`, `NegotiationModal`, `RentalModal`) go through `src/v2/ui/ModalManager.ts` (singleton via `ModalManager.get()`). Rules to follow when adding a new modal:
@@ -81,7 +87,7 @@ All modals (`DealSheet`, `MenuModal`, `NegotiationModal`, `RentalModal`) go thro
 - Provide a `ManagedModal` descriptor with an `onCancel` that performs cleanup and ends in `pop`. ESC and backdrop click both route through `onCancel`. If your modal has callbacks to a parent (like `NegotiationModal`'s `onAccepted` / `onCancelled`), capture them into locals before calling `close()` — `close()` clears state.
 - Only the top modal is shown; lower modals lose `.show` to keep their state but stop painting (no compounding backdrops). They're restored when the top is popped.
 
-ESC handling: the manager listens on `document` in capture phase and `stopPropagation`s when the stack is non-empty, so the Phaser ESC key handler in `CityScene` only fires when no modal is open (and uses that to open the main menu).
+ESC handling: the manager listens on `document` in capture phase and `stopPropagation`s when the stack is non-empty, so the ESC key handler in `CityScene3D` only fires when no modal is open (and uses that to open the main menu).
 
 ## Conventions
 

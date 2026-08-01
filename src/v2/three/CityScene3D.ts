@@ -13,7 +13,7 @@ import { rollStyle } from '../world/buildingStyle'
 import type { BuildingKind } from '../world/buildingStyle'
 import { paintGround, paintLockOverlay } from './ground'
 import { AmbientLife } from './ambient'
-import { facadeTexture, dimsFor, ownedBadgeTexture } from './facade'
+import { facadeTexture, dimsFor, ownedBadgeTexture, contactShadowTexture } from './facade'
 import type { BuildingDims } from './facade'
 import { Engine, formatEuro } from '../sim/Engine'
 import type { Property } from '../sim/types'
@@ -71,7 +71,10 @@ export class CityScene3D {
   private lastFillerToast = 0
 
   private lockOverlays = new Map<DistrictId, THREE.Mesh>()
-  private banners = new Map<DistrictId, { el: HTMLDivElement; nameEl: HTMLDivElement; subEl: HTMLDivElement }>()
+  /** Visual unlock state for teaser districts. The shared layout's `locked`
+   *  flag stays untouched — Engine.resetToFresh() re-seeds from it. */
+  private visuallyUnlocked = new Set<DistrictId>()
+  private banners = new Map<DistrictId, { el: HTMLDivElement; nameEl: HTMLDivElement; subEl: HTMLDivElement; pos: THREE.Vector3 }>()
 
   private hud: HUD
   private deal: DealSheet
@@ -232,7 +235,7 @@ export class CityScene3D {
     this.engine.on('renovationDone', () => this.refreshProperties())
     this.engine.on('leaseSigned', () => this.refreshProperties())
     this.engine.on('month', () => { this.refreshProperties(); this.refreshLockProgress() })
-    this.engine.on('reset', () => this.refreshProperties())
+    this.engine.on('reset', () => { this.resyncLockVisuals(); this.refreshProperties(); this.refreshLockProgress() })
     this.engine.on('districtUnlocked', (data: { id: string; name: string; label: string }) => {
       this.unlockDistrictVisual(data.id as DistrictId, true)
       this.hud.toast(`${data.name} freigeschaltet!`, 'success')
@@ -241,9 +244,7 @@ export class CityScene3D {
 
     // Reconcile: a save may have districts already unlocked from a previous
     // session, but the freshly-generated layout marks them locked.
-    for (const id of this.engine.state.unlockedDistricts) {
-      this.unlockDistrictVisual(id as DistrictId, false)
-    }
+    this.resyncLockVisuals()
     this.refreshLockProgress()
 
     // --- player spawn: on the central plaza in Mitte
@@ -291,6 +292,26 @@ export class CityScene3D {
       crowns2.setMatrixAt(i, m)
     })
     this.scene.add(trunks, crowns, crowns2)
+
+    // bushes around park trees
+    const parkSpots = spots.filter(s => s.park)
+    if (parkSpots.length > 0) {
+      const bushGeo = new THREE.IcosahedronGeometry(0.65, 1)
+      const bushes = new THREE.InstancedMesh(bushGeo, new THREE.MeshLambertMaterial({ color: 0x3c8f30 }), parkSpots.length * 3)
+      let bi = 0
+      parkSpots.forEach((sp, i) => {
+        const x = sp.px * px2m, z = sp.py * px2m
+        const rng = mulberry32(i * 7919 + 13)
+        for (let k = 0; k < 3; k++) {
+          const ang = rng() * Math.PI * 2
+          const dist = 2.5 + rng() * 2.4
+          const s2 = 0.7 + rng() * 0.6
+          m.makeScale(s2, s2 * 0.8, s2).setPosition(x + Math.cos(ang) * dist, 0.35 * s2, z + Math.sin(ang) * dist)
+          bushes.setMatrixAt(bi++, m)
+        }
+      })
+      this.scene.add(bushes)
+    }
   }
 
   /** A real fountain on the central plaza in Mitte. */
@@ -319,6 +340,27 @@ export class CityScene3D {
         bowlWater.position.set(cx, 3.4, cz)
         this.scene.add(basin, pool, column, bowl, bowlWater)
         this.staticColliders.push({ minX: cx - 4.6, maxX: cx + 4.6, minZ: cz - 4.6, maxZ: cz + 4.6 })
+        // benches facing the fountain
+        const wood = new THREE.MeshLambertMaterial({ color: 0x7a5230 })
+        const iron = new THREE.MeshLambertMaterial({ color: 0x30363c })
+        for (let k = 0; k < 4; k++) {
+          const ang = k * Math.PI / 2 + Math.PI / 4
+          const bx = cx + Math.cos(ang) * 9.5, bz = cz + Math.sin(ang) * 9.5
+          const bench = new THREE.Group()
+          const seat = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.12, 0.7), wood)
+          seat.position.y = 0.55
+          const back = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.55, 0.1), wood)
+          back.position.set(0, 0.95, -0.32)
+          const legL = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.55, 0.6), iron)
+          legL.position.set(-1.1, 0.28, 0)
+          const legR = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.55, 0.6), iron)
+          legR.position.set(1.1, 0.28, 0)
+          bench.add(seat, back, legL, legR)
+          bench.position.set(bx, 0, bz)
+          bench.rotation.y = Math.atan2(cx - bx, cz - bz)
+          bench.traverse(o => { (o as THREE.Mesh).castShadow = true })
+          this.scene.add(bench)
+        }
         return
       }
     }
@@ -393,12 +435,13 @@ export class CityScene3D {
     for (const spot of this.layout.buildableSpots) {
       if (occupied.has(spot.tileX + ',' + spot.tileY)) continue
       const d = this.layout.districts.find(dd => dd.id === spot.district)!
+      const locked = !this.engine.isDistrictUnlocked(d.id)
       const rng = mulberry32(((spot.tileX * 73856093) ^ (spot.tileY * 19349663)) >>> 0)
-      const kind = pickFillerKind(spot.district, !!d.locked, rng())
+      const kind = pickFillerKind(spot.district, locked, rng())
       const variant = Math.floor(rng() * 3)
-      const base = (d.locked ? 999 * 1013 : districtIndex.get(d.id)! * 1013) + FILLER_KIND_INDEX[kind] * 211
+      const base = (locked ? 999 * 1013 : districtIndex.get(d.id)! * 1013) + FILLER_KIND_INDEX[kind] * 211
       const seed = base + variant * 57
-      const district = d.locked ? undefined : spot.district
+      const district = locked ? undefined : spot.district
       const styleKey = `${kind}|${seed}|${district ?? '-'}`
       let batch = batches.get(styleKey)
       if (!batch) {
@@ -434,14 +477,24 @@ export class CityScene3D {
       body.castShadow = true
       body.receiveShadow = true
       body.userData.filler = true
+      const blobGeo = new THREE.PlaneGeometry(w * 1.45, dep * 1.45)
+      blobGeo.rotateX(-Math.PI / 2)
+      const blobs = new THREE.InstancedMesh(
+        blobGeo,
+        new THREE.MeshBasicMaterial({ map: contactShadowTexture(), transparent: true, depthWrite: false }),
+        batch.spots.length,
+      )
       batch.spots.forEach((sp, i) => {
         m.makeRotationY(sp.yaw).setPosition(sp.x, dims.bodyH / 2, sp.z)
         body.setMatrixAt(i, m)
+        m.makeRotationY(sp.yaw).setPosition(sp.x, 0.03, sp.z)
+        blobs.setMatrixAt(i, m)
         const swap = Math.abs(Math.sin(sp.yaw)) > 0.5
         const hw = (swap ? dep : w) / 2, hd = (swap ? w : dep) / 2
         this.fillerColliders.push({ minX: sp.x - hw, maxX: sp.x + hw, minZ: sp.z - hd, maxZ: sp.z + hd })
       })
       this.fillerRoot.add(body)
+      this.fillerRoot.add(blobs)
 
       if (dims.roof === 'pyramid' || dims.roof === 'hip') {
         const roofGeo = new THREE.ConeGeometry(Math.SQRT1_2, 1, 4)
@@ -489,9 +542,10 @@ export class CityScene3D {
     el.appendChild(nameEl)
     el.appendChild(subEl)
     const obj = new CSS2DObject(el)
-    obj.position.set((d.bounds.x + d.bounds.w / 2) * TILE_M, 30, (d.bounds.y + d.bounds.h / 2) * TILE_M)
+    const pos = new THREE.Vector3((d.bounds.x + d.bounds.w / 2) * TILE_M, 30, (d.bounds.y + d.bounds.h / 2) * TILE_M)
+    obj.position.copy(pos)
     this.scene.add(obj)
-    this.banners.set(d.id, { el, nameEl, subEl })
+    this.banners.set(d.id, { el, nameEl, subEl, pos })
   }
 
   /** Pull current unlockProgress for every locked district and push it into
@@ -506,12 +560,36 @@ export class CityScene3D {
     }
   }
 
-  /** Fade out the lock overlay, swap banner styling to the unlocked look,
-   *  and mark the layout DistrictDef unlocked. Idempotent. */
+  /** Two-way sync of lock visuals with engine state — covers save-load at
+   *  boot AND the in-place "Neues Spiel" reset, which re-locks districts. */
+  private resyncLockVisuals() {
+    for (const d of this.layout.districts) {
+      if (!d.locked) continue // never a teaser district
+      const engineLocked = !this.engine.isDistrictUnlocked(d.id)
+      const visualUnlocked = this.visuallyUnlocked.has(d.id)
+      if (!engineLocked && !visualUnlocked) {
+        this.unlockDistrictVisual(d.id, false)
+      } else if (engineLocked && visualUnlocked) {
+        this.visuallyUnlocked.delete(d.id)
+        if (!this.lockOverlays.has(d.id)) this.mountLockOverlay(d)
+        const banner = this.banners.get(d.id)
+        if (banner) {
+          banner.el.classList.add('locked')
+          banner.nameEl.textContent = `GESPERRT - ${d.name}`.toUpperCase()
+        }
+      }
+    }
+    // filler styles depend on lock state — force a rebuild on the next refresh
+    this.lastFillerKey = '__stale__'
+  }
+
+  /** Fade out the lock overlay and swap banner styling to the unlocked look.
+   *  Idempotent. Does NOT mutate the shared layout. */
   private unlockDistrictVisual(id: DistrictId, animate: boolean) {
     const d = this.layout.districts.find(dd => dd.id === id)
     if (!d || !d.locked) return
-    d.locked = false
+    if (this.visuallyUnlocked.has(id)) return
+    this.visuallyUnlocked.add(id)
 
     const overlay = this.lockOverlays.get(id)
     if (overlay) {
@@ -669,6 +747,15 @@ export class CityScene3D {
         meshes.push(antenna)
       }
     }
+
+    // contact shadow blob
+    const blob = new THREE.Mesh(
+      new THREE.PlaneGeometry(dims.w * 1.45, dims.d * 1.45),
+      new THREE.MeshBasicMaterial({ map: contactShadowTexture(), transparent: true, depthWrite: false }),
+    )
+    blob.rotation.x = -Math.PI / 2
+    blob.position.y = 0.03
+    group.add(blob)
 
     const renovActive = !!p.activeRenovation && p.activeRenovation.status === 'active'
     if (renovActive) this.addScaffold(group, dims)
@@ -1156,9 +1243,30 @@ export class CityScene3D {
     }
     if (modalOpen && this.locked) document.exitPointerLock()
     this.updateHudChrome()
+    this.fadeLabelsByDistance()
 
     this.renderer.render(this.scene, this.camera)
     this.css2d.render(this.scene, this.camera)
+  }
+
+  /** Distance-fade CSS2D labels so far-away banners/tags don't pile up on the
+   *  horizon. District banners fade earlier than gameplay price tags. */
+  private fadeLabelsByDistance() {
+    const fade = (el: HTMLElement, d: number, near: number, far: number) => {
+      const o = d < near ? 1 : Math.max(0, 1 - (d - near) / (far - near))
+      el.style.opacity = String(o)
+      el.style.visibility = o <= 0.02 ? 'hidden' : 'visible'
+    }
+    for (const b of this.banners.values()) {
+      const d = Math.hypot(b.pos.x - this.pos.x, b.pos.z - this.pos.z)
+      fade(b.el, d, 150, 320)
+    }
+    for (const h of this.byPropertyId.values()) {
+      const d = Math.hypot(h.center.x - this.pos.x, h.center.z - this.pos.z)
+      for (const child of h.group.children) {
+        if ((child as any).isCSS2DObject) fade((child as CSS2DObject).element, d, 240, 440)
+      }
+    }
   }
 
   private onResize = () => {
