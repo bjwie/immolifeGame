@@ -71,8 +71,8 @@ export class AmbientLife {
       }
     }
 
-    const bodyGeo = new THREE.BoxGeometry(1.75, 0.6, 3.9)
-    const cabinGeo = new THREE.BoxGeometry(1.55, 0.55, 1.9)
+    const bodyGeo = new THREE.BoxGeometry(1.72, 0.52, 3.9)
+    const cabinGeo = new THREE.BoxGeometry(1.5, 0.44, 1.7)
     this.carBody = new THREE.InstancedMesh(bodyGeo, new THREE.MeshLambertMaterial({ color: 0xffffff }), this.cars.length)
     this.carCabin = new THREE.InstancedMesh(cabinGeo, new THREE.MeshLambertMaterial({ color: 0x1a232e }), this.cars.length)
     this.carBody.castShadow = true
@@ -136,9 +136,13 @@ export class AmbientLife {
         heading = c.dir > 0 ? 0 : Math.PI
       }
       this.q.setFromAxisAngle(this.v.set(0, 1, 0), heading)
-      this.m.compose(this.v.set(x, 0.42, z), this.q, this.s)
+      this.m.compose(this.v.set(x, 0.44, z), this.q, this.s)
       this.carBody.setMatrixAt(i, this.m)
-      this.m.compose(this.v.set(x, 0.95, z), this.q, this.s)
+      // cabin sits slightly toward the rear
+      const backOff = 0.35
+      const cabX = c.axis === 'x' ? x - c.dir * backOff : x
+      const cabZ = c.axis === 'z' ? z - c.dir * backOff : z
+      this.m.compose(this.v.set(cabX, 0.92, cabZ), this.q, this.s)
       this.carCabin.setMatrixAt(i, this.m)
     }
     this.carBody.instanceMatrix.needsUpdate = true

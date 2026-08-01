@@ -107,6 +107,7 @@ export class CityScene3D {
   private bobAmount = 0
   private fovTarget = 72
   private ambient!: AmbientLife
+  private clouds: Array<{ sprite: THREE.Sprite; speed: number }> = []
 
   constructor(container: HTMLElement) {
     this.layout = generateCityLayout(48, 4242)
@@ -191,6 +192,7 @@ export class CityScene3D {
     this.scene.add(this.fillerRoot)
     this.ambient = new AmbientLife(this.scene, this.layout, 60, 150)
     this.mountPlazaFountain()
+    this.mountClouds()
 
     // --- locked-district overlays + banners
     for (const d of this.layout.districts) {
@@ -363,6 +365,36 @@ export class CityScene3D {
         }
         return
       }
+    }
+  }
+
+  /** Soft cloud sprites drifting over the city. */
+  private mountClouds() {
+    const c = document.createElement('canvas')
+    c.width = 256; c.height = 128
+    const g = c.getContext('2d')!
+    const rng = mulberry32(777)
+    for (let i = 0; i < 9; i++) {
+      const x = 40 + rng() * 176, y = 40 + rng() * 48, r = 22 + rng() * 30
+      const grad = g.createRadialGradient(x, y, r * 0.15, x, y, r)
+      grad.addColorStop(0, 'rgba(255,255,255,0.85)')
+      grad.addColorStop(1, 'rgba(255,255,255,0)')
+      g.fillStyle = grad
+      g.fillRect(x - r, y - r, r * 2, r * 2)
+    }
+    const tex = new THREE.CanvasTexture(c)
+    tex.colorSpace = THREE.SRGBColorSpace
+    const worldW = this.layout.tilesW * TILE_M
+    const worldH = this.layout.tilesH * TILE_M
+    const rng2 = mulberry32(1312)
+    for (let i = 0; i < 14; i++) {
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.45 + rng2() * 0.3, depthWrite: false })
+      const sprite = new THREE.Sprite(mat)
+      const s = 70 + rng2() * 90
+      sprite.scale.set(s, s * 0.42, 1)
+      sprite.position.set(rng2() * (worldW + 600) - 300, 110 + rng2() * 70, rng2() * (worldH + 400) - 200)
+      this.scene.add(sprite)
+      this.clouds.push({ sprite, speed: 1.2 + rng2() * 2.2 })
     }
   }
 
@@ -1195,6 +1227,11 @@ export class CityScene3D {
     const moving = this.move(dt)
     this.updateParticles(dt)
     this.ambient.update(dt)
+    const cloudWrap = this.layout.tilesW * TILE_M + 300
+    for (const cl of this.clouds) {
+      cl.sprite.position.x += cl.speed * dt
+      if (cl.sprite.position.x > cloudWrap) cl.sprite.position.x = -300
+    }
 
     // head-bob + sprint FOV kick
     const sprinting = moving && (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight'))
