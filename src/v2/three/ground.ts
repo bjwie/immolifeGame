@@ -67,9 +67,11 @@ export function paintGround(layout: CityLayout, m: Metrics): GroundPaint {
           break
         }
         case 'sidewalk': {
-          g.fillStyle = css(0xc8c4bc); g.fillRect(x, y, w, h)
+          // Kept deliberately mid-grey: under a 2.9-intensity sun a light
+          // pavement clips to pure white and swallows the paving detail.
+          g.fillStyle = css(0x9c9890); g.fillRect(x, y, w, h)
           // paving slabs
-          g.strokeStyle = css(0xb0aca4, 0.75)
+          g.strokeStyle = css(0x87837c, 0.75)
           g.lineWidth = 1
           const slab = 1.2 * PPM
           for (let sx = x + slab; sx < x + w; sx += slab) {
@@ -80,7 +82,7 @@ export function paintGround(layout: CityLayout, m: Metrics): GroundPaint {
           }
           // granite curb on the road edges
           const curb = 0.35 * PPM
-          g.fillStyle = css(0x8b8b90)
+          g.fillStyle = css(0x6e6e73)
           if (isRoad(n)) g.fillRect(x, y, w, curb)
           if (isRoad(sd)) g.fillRect(x, y + h - curb, w, curb)
           if (isRoad(wq)) g.fillRect(x, y, curb, h)
@@ -106,7 +108,7 @@ export function paintGround(layout: CityLayout, m: Metrics): GroundPaint {
         case 'road_h':
         case 'road_v':
         case 'road_x': {
-          g.fillStyle = css(0x3a3a3e); g.fillRect(x, y, w, h)
+          g.fillStyle = css(0x47474d); g.fillRect(x, y, w, h)
           // asphalt grain
           const aSeed = (tx * 13 + ty * 7) & 0xff
           for (let i = 0; i < 14; i++) {
@@ -162,7 +164,7 @@ export function paintGround(layout: CityLayout, m: Metrics): GroundPaint {
           break
         }
         case 'plaza': {
-          g.fillStyle = css(0xe2dac4); g.fillRect(x, y, w, h)
+          g.fillStyle = css(0xbdb69f); g.fillRect(x, y, w, h)
           // radial-ish paving pattern
           g.strokeStyle = css(0xc8c0aa, 0.8)
           g.lineWidth = 1

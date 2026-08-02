@@ -8,6 +8,7 @@
  * ground-floor Ladenlokal, condition patina and district skins.
  */
 import * as THREE from 'three'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import type { BuildingStyle } from '../world/buildingStyle'
 import { mixColor, bodyHeight } from '../world/buildingStyle'
 import { mulberry32 } from '../world/cityLayout'
@@ -192,8 +193,9 @@ function paintUpperFloor(
   const y = Math.round(top + floorPx * 0.24)
 
   if (sub === 'neubau' || s.kind === 'office' || s.kind === 'tower') {
-    // continuous dark band behind the strip windows
-    fill(g, 0x1a2028, 0.8)
+    // recessed band behind the strip windows — a near-black band reads as a
+    // hole punched in the facade, so keep it a tinted shade of the wall
+    fill(g, mixColor(s.trimColor, 0x28323c, 0.5), 0.72)
     g.fillRect(4, y - 3, W - 8, winH + 6)
   }
 
@@ -432,6 +434,79 @@ export function gableGeometry(w: number, d: number, h: number): THREE.BufferGeom
   geo.dispose()
   flat.computeVertexNormals()
   return flat
+}
+
+// ------------------------------------------------- architectural relief
+
+/**
+ * Everything that sticks out of the plain box: cornice, string course,
+ * balconies, dormers, entrance canopy. Merged into ONE geometry so a whole
+ * batch of filler buildings still costs a single extra draw call, while the
+ * silhouette stops reading as a painted cardboard box.
+ *
+ * Local space: building centred at origin, base at y = 0, street face at +z.
+ */
+export function trimGeometry(style: BuildingStyle, dims: BuildingDims): THREE.BufferGeometry | null {
+  const parts: THREE.BufferGeometry[] = []
+  const { w, d, bodyH } = dims
+  const box = (bw: number, bh: number, bd: number, x: number, y: number, z: number) => {
+    const g = new THREE.BoxGeometry(bw, bh, bd)
+    g.translate(x, y, z)
+    parts.push(g)
+  }
+
+  // cornice under the roof — the strongest single silhouette cue
+  const corniceH = style.subtype === 'altbau' ? 0.7 : 0.45
+  box(w + 0.55, corniceH, d + 0.55, 0, bodyH - corniceH / 2, 0)
+
+  // string course above the ground floor
+  if (!style.detached) {
+    box(w + 0.26, 0.26, d + 0.26, 0, style.groundHeight, 0)
+  }
+
+  const sub = style.kind === 'apartment' ? style.subtype : undefined
+
+  if (sub === 'altbau' && style.floors >= 3) {
+    // two balconies on the street side, first and third upper floor
+    for (const f of [1, 3]) {
+      if (f >= style.floors) continue
+      const y = style.groundHeight + (f - 1) * style.floorHeight + style.floorHeight * 0.08
+      for (const sx of [-1, 1]) {
+        const x = sx * w * 0.26
+        box(2.7, 0.22, 1.05, x, y, d / 2 + 0.5)
+        box(2.7, 0.62, 0.1, x, y + 0.42, d / 2 + 0.98)
+        box(0.1, 0.62, 1.05, x - 1.3, y + 0.42, d / 2 + 0.5)
+        box(0.1, 0.62, 1.05, x + 1.3, y + 0.42, d / 2 + 0.5)
+      }
+    }
+  }
+
+  if (dims.roof === 'gable' && dims.roofH > 1) {
+    // dormers poking through the front slope
+    for (const sx of [-1, 1]) {
+      box(1.7, 1.25, 1.5, sx * w * 0.24, bodyH + dims.roofH * 0.34, d * 0.17)
+    }
+  }
+
+  if (style.detached) {
+    // entrance canopy over the door
+    box(2.9, 0.2, 1.3, 0, style.groundHeight - 0.5, d / 2 + 0.55)
+    box(0.14, style.groundHeight - 0.5, 0.14, -1.2, (style.groundHeight - 0.5) / 2, d / 2 + 1.05)
+    box(0.14, style.groundHeight - 0.5, 0.14, 1.2, (style.groundHeight - 0.5) / 2, d / 2 + 1.05)
+  }
+
+  if (parts.length === 0) return null
+  const merged = mergeGeometries(parts, false)
+  for (const p of parts) p.dispose()
+  return merged
+}
+
+/** Stone/render tone for the relief — light enough to catch the sun and read
+ *  against the wall it sits on. */
+export function trimColor(style: BuildingStyle): number {
+  if (style.subtype === 'altbau') return 0xfff6e2
+  if (style.subtype === 'plattenbau') return mixColor(style.wallColor, 0xbfc4c8, 0.6)
+  return mixColor(style.wallColor, 0xffffff, 0.45)
 }
 
 // ------------------------------------------------- marker sprite textures

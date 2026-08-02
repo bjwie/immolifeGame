@@ -35,6 +35,7 @@ export class AmbientLife {
   private peds: Ped[] = []
   private carBody: THREE.InstancedMesh
   private carCabin: THREE.InstancedMesh
+  private carWheels: THREE.InstancedMesh
   private pedBody: THREE.InstancedMesh
   private pedHead: THREE.InstancedMesh
   private layout: CityLayout
@@ -77,13 +78,25 @@ export class AmbientLife {
       }
     }
 
+    const n = Math.max(1, this.cars.length)
     const bodyGeo = new THREE.BoxGeometry(1.72, 0.52, 3.9)
-    const cabinGeo = new THREE.BoxGeometry(1.5, 0.44, 1.7)
-    this.carBody = new THREE.InstancedMesh(bodyGeo, new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, this.cars.length))
-    this.carCabin = new THREE.InstancedMesh(cabinGeo, new THREE.MeshLambertMaterial({ color: 0x1a232e }), Math.max(1, this.cars.length))
+    const cabinGeo = new THREE.BoxGeometry(1.5, 0.46, 1.8)
+    // clear-coat car paint and dark glass — the biggest single readability win
+    // for traffic, because the highlights make the shapes legible at distance
+    this.carBody = new THREE.InstancedMesh(bodyGeo, new THREE.MeshStandardMaterial({
+      color: 0xffffff, roughness: 0.28, metalness: 0.55, envMapIntensity: 1.2,
+    }), n)
+    this.carCabin = new THREE.InstancedMesh(cabinGeo, new THREE.MeshStandardMaterial({
+      color: 0x121a24, roughness: 0.08, metalness: 0.35, envMapIntensity: 1.6,
+    }), n)
+    const wheelGeo = new THREE.CylinderGeometry(0.33, 0.33, 0.22, 10)
+    wheelGeo.rotateZ(Math.PI / 2)   // axis across the car
+    this.carWheels = new THREE.InstancedMesh(wheelGeo, new THREE.MeshStandardMaterial({
+      color: 0x15181c, roughness: 0.85, metalness: 0.1,
+    }), n * 4)
     this.carBody.castShadow = true
     this.cars.forEach((_, i) => this.carBody.setColorAt(i, new THREE.Color(CAR_COLORS[i % CAR_COLORS.length])))
-    scene.add(this.carBody, this.carCabin)
+    scene.add(this.carBody, this.carCabin, this.carWheels)
 
     // --- pedestrians on sidewalks
     const walkTiles: Array<{ tx: number; ty: number }> = []
@@ -103,8 +116,8 @@ export class AmbientLife {
     }
     const pedGeo = new THREE.CapsuleGeometry(0.26, 0.72, 2, 6)
     const headGeo = new THREE.SphereGeometry(0.19, 6, 5)
-    this.pedBody = new THREE.InstancedMesh(pedGeo, new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, this.peds.length))
-    this.pedHead = new THREE.InstancedMesh(headGeo, new THREE.MeshLambertMaterial({ color: 0xe8c39e }), Math.max(1, this.peds.length))
+    this.pedBody = new THREE.InstancedMesh(pedGeo, new THREE.MeshStandardMaterial({ color: 0xffffff }), Math.max(1, this.peds.length))
+    this.pedHead = new THREE.InstancedMesh(headGeo, new THREE.MeshStandardMaterial({ color: 0xe8c39e }), Math.max(1, this.peds.length))
     this.pedBody.castShadow = true
     this.peds.forEach((_, i) => this.pedBody.setColorAt(i, new THREE.Color(CLOTHES[i % CLOTHES.length])))
     scene.add(this.pedBody, this.pedHead)
@@ -148,9 +161,20 @@ export class AmbientLife {
       const cabZ = c.axis === 'z' ? z - c.dir * backOff : z
       this.m.compose(this.v.set(cabX, 0.92, cabZ), this.q, this.s)
       this.carCabin.setMatrixAt(i, this.m)
+      // four wheels, offset along the car's own axes
+      const alongX = c.axis === 'x'
+      for (let k = 0; k < 4; k++) {
+        const fore = (k < 2 ? 1 : -1) * 1.25
+        const side = (k % 2 === 0 ? 1 : -1) * 0.83
+        const wx = alongX ? x + fore * c.dir : x + side
+        const wz = alongX ? z + side : z + fore * c.dir
+        this.m.compose(this.v.set(wx, 0.33, wz), this.q, this.s)
+        this.carWheels.setMatrixAt(i * 4 + k, this.m)
+      }
     }
     this.carBody.instanceMatrix.needsUpdate = true
     this.carCabin.instanceMatrix.needsUpdate = true
+    this.carWheels.instanceMatrix.needsUpdate = true
 
     for (let i = 0; i < this.peds.length; i++) {
       const p = this.peds[i]

@@ -13,8 +13,9 @@ import { rollStyle, mixColor } from '../world/buildingStyle'
 import type { BuildingKind } from '../world/buildingStyle'
 import { paintGround, paintLockOverlay } from './ground'
 import { AmbientLife } from './ambient'
-import { facadeTexture, dimsFor, ownedBadgeTexture, contactShadowTexture, gableGeometry } from './facade'
+import { facadeTexture, dimsFor, ownedBadgeTexture, contactShadowTexture, gableGeometry, trimGeometry, trimColor } from './facade'
 import type { BuildingDims, Lot, Face } from './facade'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { buildMetrics, tileCenter, tileRect, tileAtWorld } from './metrics'
 import type { Metrics } from './metrics'
 import { Engine, formatEuro } from '../sim/Engine'
@@ -129,7 +130,7 @@ export class CityScene3D {
     this.renderer.shadowMap.enabled = true
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
-    this.renderer.toneMappingExposure = 1.25
+    this.renderer.toneMappingExposure = 0.78
     container.appendChild(this.renderer.domElement)
 
     this.css2d = new CSS2DRenderer()
@@ -153,13 +154,20 @@ export class CityScene3D {
     skyU.mieDirectionalG.value = 0.8
     // Every lot fronts +z, so the sun has to sit on the +z side or every single
     // street facade in the city would be permanently in its own shadow.
-    this.sunDir.setFromSphericalCoords(1, THREE.MathUtils.degToRad(90 - 44), THREE.MathUtils.degToRad(34))
+    this.sunDir.setFromSphericalCoords(1, THREE.MathUtils.degToRad(90 - 54), THREE.MathUtils.degToRad(28))
     skyU.sunPosition.value.copy(this.sunDir)
+
     this.scene.add(sky)
+    // IBL comes from a plain sky/ground gradient, NOT from the Sky shader:
+    // Sky outputs unnormalised radiance in the hundreds, which through PMREM
+    // blows every surface to white. A 0..1 gradient keeps envMapIntensity
+    // meaning what it says.
+    this.scene.environment = this.buildEnvironment()
     this.scene.fog = new THREE.Fog(0xcfe0ef, 70, 350)
-    this.scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x6a8a5e, 1.4))
-    this.scene.add(new THREE.AmbientLight(0x93a8c4, 0.5))
-    this.sun = new THREE.DirectionalLight(0xfff0d5, 2.1)
+    // the gradient environment already supplies sky/ground bounce, so the
+    // hemisphere light is only a gentle top-up now
+    this.scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x6a8a5e, 0.62))
+    this.sun = new THREE.DirectionalLight(0xfff2dc, 2.9)
     this.sun.castShadow = true
     this.sun.shadow.mapSize.set(2048, 2048)
     this.sun.shadow.bias = -0.0004
@@ -176,12 +184,12 @@ export class CityScene3D {
     const ground = paintGround(this.layout, this.metrics)
     const groundTex = new THREE.CanvasTexture(ground.canvas)
     groundTex.colorSpace = THREE.SRGBColorSpace
-    groundTex.anisotropy = 8
+    groundTex.anisotropy = this.renderer.capabilities.getMaxAnisotropy()
     const worldW = this.metrics.width
     const worldH = this.metrics.depth
     const groundMesh = new THREE.Mesh(
       new THREE.PlaneGeometry(worldW, worldH),
-      new THREE.MeshLambertMaterial({ map: groundTex }),
+      new THREE.MeshStandardMaterial({ map: groundTex, roughness: 0.93, metalness: 0.0, envMapIntensity: 0.3 }),
     )
     groundMesh.rotation.x = -Math.PI / 2
     groundMesh.position.set(worldW / 2, 0, worldH / 2)
@@ -190,7 +198,7 @@ export class CityScene3D {
     // grass apron beyond city bounds so the horizon isn't a void
     const apron = new THREE.Mesh(
       new THREE.PlaneGeometry(worldW * 4, worldH * 6),
-      new THREE.MeshLambertMaterial({ color: 0x5aa647 }),
+      new THREE.MeshStandardMaterial({ color: 0x5aa647, roughness: 1, envMapIntensity: 0.4 }),
     )
     apron.rotation.x = -Math.PI / 2
     apron.position.set(worldW / 2, -0.05, worldH / 2)
@@ -276,6 +284,31 @@ export class CityScene3D {
     this.loop()
   }
 
+  /** Sky/ground gradient prefiltered into an irradiance map — gives every
+   *  PBR surface believable ambient bounce without a real HDRI. */
+  private buildEnvironment(): THREE.Texture {
+    const c = document.createElement('canvas')
+    c.width = 64
+    c.height = 32
+    const g = c.getContext('2d')!
+    const grad = g.createLinearGradient(0, 0, 0, 32)
+    grad.addColorStop(0.00, '#7fa9df')
+    grad.addColorStop(0.45, '#c3d8ee')
+    grad.addColorStop(0.50, '#d6dfe4')
+    grad.addColorStop(0.56, '#8c9472')
+    grad.addColorStop(1.00, '#5b6448')
+    g.fillStyle = grad
+    g.fillRect(0, 0, 64, 32)
+    const tex = new THREE.CanvasTexture(c)
+    tex.mapping = THREE.EquirectangularReflectionMapping
+    tex.colorSpace = THREE.SRGBColorSpace
+    const pmrem = new THREE.PMREMGenerator(this.renderer)
+    const rt = pmrem.fromEquirectangular(tex)
+    pmrem.dispose()
+    tex.dispose()
+    return rt.texture
+  }
+
   /** Stand the player on the Mitte sidewalk closest to the middle of the
    *  district, looking down the street rather than at a wall. */
   private spawnPlayer() {
@@ -303,36 +336,58 @@ export class CityScene3D {
   private plantTrees(spots: Array<{ x: number; z: number; park: boolean }>) {
     if (spots.length === 0) return
     // Street trees: slim trunk, crown starting above head height so you can
-    // walk under them without the canopy clipping the camera.
-    const trunkGeo = new THREE.CylinderGeometry(0.16, 0.24, 4.2, 6)
-    const crownGeo = new THREE.IcosahedronGeometry(1.9, 1)
-    const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6b4226 })
-    const crownMat = new THREE.MeshLambertMaterial({ color: 0x2e7a26 })
-    const crown2Mat = new THREE.MeshLambertMaterial({ color: 0x46b042 })
+    // walk under them without the canopy clipping the camera. Each canopy is
+    // three overlapping blobs with their own rotation, scale and green, which
+    // is what stops a whole avenue of trees reading as one cloned lollipop.
+    const trunkGeo = new THREE.CylinderGeometry(0.15, 0.27, 4.2, 7)
+    const crownGeo = new THREE.IcosahedronGeometry(1.55, 1)
+    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6b4226, roughness: 0.95, envMapIntensity: 0.4 })
+    const crownMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.92, envMapIntensity: 0.5, flatShading: true })
     const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, spots.length)
-    const crowns = new THREE.InstancedMesh(crownGeo, crownMat, spots.length)
-    const crowns2 = new THREE.InstancedMesh(crownGeo, crown2Mat, spots.length)
+    const crowns = new THREE.InstancedMesh(crownGeo, crownMat, spots.length * 3)
     trunks.castShadow = true
     crowns.castShadow = true
+
     const m = new THREE.Matrix4()
+    const q = new THREE.Quaternion()
+    const e = new THREE.Euler()
+    const v = new THREE.Vector3()
+    const sc = new THREE.Vector3()
+    const col = new THREE.Color()
+    const GREENS = [0x2f7d27, 0x3d9130, 0x276b23, 0x49a13a]
+    let ci = 0
     spots.forEach((sp, i) => {
-      const rng = mulberry32(Math.round(sp.x * 31 + sp.z * 17))
-      const scale = (sp.park ? 1.3 : 0.95) + rng() * 0.25
-      m.makeScale(1, scale, 1).setPosition(sp.x, 2.1 * scale, sp.z)
+      const rng = mulberry32(Math.round(sp.x * 31 + sp.z * 17) >>> 0)
+      const scale = (sp.park ? 1.25 : 0.92) + rng() * 0.3
+      const lean = (rng() - 0.5) * 0.09
+      e.set(lean, rng() * Math.PI * 2, (rng() - 0.5) * 0.06)
+      q.setFromEuler(e)
+      m.compose(v.set(sp.x, 2.1 * scale, sp.z), q, sc.set(1, scale, 1))
       trunks.setMatrixAt(i, m)
-      m.makeScale(scale, scale * 0.95, scale).setPosition(sp.x, 5.2 * scale, sp.z)
-      crowns.setMatrixAt(i, m)
-      m.makeScale(scale * 0.6, scale * 0.6, scale * 0.6).setPosition(sp.x - 0.8 * scale, 6.1 * scale, sp.z + 0.4 * scale)
-      crowns2.setMatrixAt(i, m)
+      for (let k = 0; k < 3; k++) {
+        const bs = scale * (k === 0 ? 1.0 : 0.62 + rng() * 0.25)
+        const off = k === 0 ? 0 : 1.0 * scale
+        const ang = rng() * Math.PI * 2
+        e.set(rng() * Math.PI, rng() * Math.PI, rng() * Math.PI)
+        q.setFromEuler(e)
+        m.compose(
+          v.set(sp.x + Math.cos(ang) * off, (5.0 + (k === 0 ? 0 : rng() * 1.3)) * scale, sp.z + Math.sin(ang) * off),
+          q, sc.set(bs, bs * 0.9, bs),
+        )
+        crowns.setMatrixAt(ci, m)
+        col.setHex(GREENS[Math.floor(rng() * GREENS.length)])
+        crowns.setColorAt(ci, col)
+        ci++
+      }
     })
-    trunks.computeBoundingSphere(); crowns.computeBoundingSphere(); crowns2.computeBoundingSphere()
-    this.scene.add(trunks, crowns, crowns2)
+    trunks.computeBoundingSphere(); crowns.computeBoundingSphere()
+    this.scene.add(trunks, crowns)
 
     // bushes around park trees
     const parkSpots = spots.filter(s => s.park)
     if (parkSpots.length > 0) {
       const bushGeo = new THREE.IcosahedronGeometry(0.65, 1)
-      const bushes = new THREE.InstancedMesh(bushGeo, new THREE.MeshLambertMaterial({ color: 0x3c8f30 }), parkSpots.length * 3)
+      const bushes = new THREE.InstancedMesh(bushGeo, new THREE.MeshStandardMaterial({ color: 0x3c8f30, roughness: 0.95, flatShading: true }), parkSpots.length * 3)
       let bi = 0
       parkSpots.forEach((sp, i) => {
         const rng = mulberry32(i * 7919 + 13)
@@ -359,8 +414,9 @@ export class CityScene3D {
         if (at(tx - 1, ty) !== 'plaza' || at(tx + 1, ty) !== 'plaza' || at(tx, ty - 1) !== 'plaza' || at(tx, ty + 1) !== 'plaza') continue
         const c0 = tileCenter(this.metrics, tx, ty)
         const cx = c0.x, cz = c0.z
-        const stone = new THREE.MeshLambertMaterial({ color: 0xcfc6ae })
-        const water = new THREE.MeshLambertMaterial({ color: 0x4a9fd8, emissive: 0x1a4a6e, emissiveIntensity: 0.35 })
+        const stone = new THREE.MeshStandardMaterial({ color: 0xcfc6ae, roughness: 0.85, envMapIntensity: 0.7 })
+        // real water: smooth and reflective, so it catches the sky
+        const water = new THREE.MeshStandardMaterial({ color: 0x3f93cf, roughness: 0.06, metalness: 0.25, envMapIntensity: 1.6 })
         const basin = new THREE.Mesh(new THREE.CylinderGeometry(4.4, 4.6, 0.9, 20), stone)
         basin.position.set(cx, 0.45, cz)
         basin.castShadow = true
@@ -377,8 +433,8 @@ export class CityScene3D {
         this.scene.add(basin, pool, column, bowl, bowlWater)
         this.staticColliders.push({ minX: cx - 4.6, maxX: cx + 4.6, minZ: cz - 4.6, maxZ: cz + 4.6 })
         // benches facing the fountain
-        const wood = new THREE.MeshLambertMaterial({ color: 0x7a5230 })
-        const iron = new THREE.MeshLambertMaterial({ color: 0x30363c })
+        const wood = new THREE.MeshStandardMaterial({ color: 0x7a5230, roughness: 0.8, envMapIntensity: 0.6 })
+        const iron = new THREE.MeshStandardMaterial({ color: 0x30363c, roughness: 0.42, metalness: 0.7, envMapIntensity: 0.9 })
         for (let k = 0; k < 4; k++) {
           const ang = k * Math.PI / 2 + Math.PI / 4
           const bx = cx + Math.cos(ang) * 9.5, bz = cz + Math.sin(ang) * 9.5
@@ -435,7 +491,7 @@ export class CityScene3D {
   /** Warm-bulb street lamps standing at the kerb along every sidewalk strip. */
   private plantStreetLamps() {
     const { tilesW, tilesH, tiles } = this.layout
-    const spots: Array<{ x: number; z: number }> = []
+    const spots: Array<{ x: number; z: number; toRoad: { x: number; z: number } }> = []
     const isRoad = (tx: number, ty: number) => {
       if (tx < 0 || tx >= tilesW || ty < 0 || ty >= tilesH) return false
       const t = tiles[ty * tilesW + tx]
@@ -449,27 +505,46 @@ export class CityScene3D {
         const r = tileRect(this.metrics, tx, ty)
         const inset = 1.3
         let x = r.x + r.w / 2, z = r.z + r.d / 2
-        if (isRoad(tx, ty - 1)) z = r.z + inset
-        else if (isRoad(tx, ty + 1)) z = r.z + r.d - inset
-        else if (isRoad(tx - 1, ty)) x = r.x + inset
-        else if (isRoad(tx + 1, ty)) x = r.x + r.w - inset
+        let toRoad: { x: number; z: number }
+        if (isRoad(tx, ty - 1)) { z = r.z + inset; toRoad = { x: 0, z: -1 } }
+        else if (isRoad(tx, ty + 1)) { z = r.z + r.d - inset; toRoad = { x: 0, z: 1 } }
+        else if (isRoad(tx - 1, ty)) { x = r.x + inset; toRoad = { x: -1, z: 0 } }
+        else if (isRoad(tx + 1, ty)) { x = r.x + r.w - inset; toRoad = { x: 1, z: 0 } }
         else continue
-        spots.push({ x, z })
+        spots.push({ x, z, toRoad })
       }
     }
     if (spots.length === 0) return
-    const poleGeo = new THREE.CylinderGeometry(0.08, 0.13, 6.0, 6)
-    const headGeo = new THREE.SphereGeometry(0.3, 8, 6)
-    const poleMat = new THREE.MeshLambertMaterial({ color: 0x2c343c })
-    const headMat = new THREE.MeshLambertMaterial({ color: 0xffe9b0, emissive: 0xcf9a30, emissiveIntensity: 0.65 })
+    // Berlin street lamp: mast + curved bracket reaching over the kerb, with
+    // the luminaire hanging off the end rather than a lollipop on a stick.
+    const mast = new THREE.CylinderGeometry(0.08, 0.14, 6.0, 7)
+    const arm = new THREE.BoxGeometry(0.1, 0.1, 1.5)
+    arm.translate(0, 3.0, 0.75)
+    const collar = new THREE.CylinderGeometry(0.17, 0.17, 0.3, 8)
+    collar.translate(0, 2.55, 0)
+    const poleGeo = mergeGeometries([mast, arm, collar], false)!
+    mast.dispose(); arm.dispose(); collar.dispose()
+    const shade = new THREE.ConeGeometry(0.42, 0.42, 10)
+    shade.translate(0, 0.2, 0)
+    const bulb = new THREE.SphereGeometry(0.26, 8, 6)
+    const headGeo = mergeGeometries([shade, bulb], false)!
+    shade.dispose(); bulb.dispose()
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0x2c343c, roughness: 0.45, metalness: 0.75, envMapIntensity: 0.9 })
+    const headMat = new THREE.MeshStandardMaterial({ color: 0xffe9b0, emissive: 0xffd98a, emissiveIntensity: 1.1, roughness: 0.3 })
     const poles = new THREE.InstancedMesh(poleGeo, poleMat, spots.length)
     const heads = new THREE.InstancedMesh(headGeo, headMat, spots.length)
     poles.castShadow = true
     const m = new THREE.Matrix4()
+    const lampQ = new THREE.Quaternion()
+    const lampV = new THREE.Vector3()
+    const lampS = new THREE.Vector3(1, 1, 1)
     spots.forEach((sp, i) => {
-      m.identity().setPosition(sp.x, 3.0, sp.z)
+      // turn the bracket so it reaches out over the roadway
+      const yaw = Math.atan2(sp.toRoad.x, sp.toRoad.z)
+      lampQ.setFromAxisAngle(lampV.set(0, 1, 0), yaw)
+      m.compose(lampV.set(sp.x, 3.0, sp.z), lampQ, lampS)
       poles.setMatrixAt(i, m)
-      m.identity().setPosition(sp.x, 6.1, sp.z)
+      m.compose(lampV.set(sp.x + sp.toRoad.x * 1.5, 5.85, sp.z + sp.toRoad.z * 1.5), lampQ, lampS)
       heads.setMatrixAt(i, m)
     })
     poles.computeBoundingSphere(); heads.computeBoundingSphere()
@@ -566,11 +641,23 @@ export class CityScene3D {
       }
 
       const roofPieces = this.roofPieces(style, dims).map(piece => {
-        const mesh = new THREE.InstancedMesh(piece.geo, new THREE.MeshLambertMaterial({ color: piece.color }), n)
+        const mesh = new THREE.InstancedMesh(piece.geo, new THREE.MeshStandardMaterial({ color: piece.color, roughness: 0.72, metalness: 0.1, envMapIntensity: 0.7 }), n)
         mesh.castShadow = true
         mesh.userData.filler = true
         return { mesh, y: piece.y }
       })
+
+      // architectural relief, merged into one geometry -> one extra draw call
+      const trimGeo = trimGeometry(style, dims)
+      let trim: THREE.InstancedMesh | null = null
+      if (trimGeo) {
+        trim = new THREE.InstancedMesh(trimGeo, new THREE.MeshStandardMaterial({
+          color: trimColor(style), roughness: 0.8, envMapIntensity: 0.7,
+        }), n)
+        trim.castShadow = true
+        trim.receiveShadow = true
+        trim.userData.filler = true
+      }
 
       batch.spots.forEach((sp, i) => {
         const cx = sp.x + sp.front.x * zOff
@@ -585,6 +672,10 @@ export class CityScene3D {
           m.makeRotationY(sp.yaw).setPosition(cx, rp.y, cz)
           rp.mesh.setMatrixAt(i, m)
         }
+        if (trim) {
+          m.makeRotationY(sp.yaw).setPosition(cx, 0, cz)
+          trim.setMatrixAt(i, m)
+        }
         const alongX = Math.abs(sp.front.z) > 0.5
         const hx = (alongX ? dims.w : dims.d) / 2
         const hz = (alongX ? dims.d : dims.w) / 2
@@ -593,6 +684,7 @@ export class CityScene3D {
 
       body.computeBoundingSphere()
       this.fillerRoot.add(body)
+      if (trim) { trim.computeBoundingSphere(); this.fillerRoot.add(trim) }
       if (blobs) { blobs.computeBoundingSphere(); this.fillerRoot.add(blobs) }
       for (const rp of roofPieces) {
         rp.mesh.computeBoundingSphere()
@@ -613,14 +705,20 @@ export class CityScene3D {
   private facadeMaterials(style: ReturnType<typeof rollStyle>, district: string | undefined, dims: BuildingDims) {
     const tex = (f: Face) => facadeTexture(style, district, f, dims)
     const flank = tex(style.detached ? 'side' : 'firewall')
-    const roofTop = new THREE.MeshLambertMaterial({ color: mixColor(style.roofColor, 0x000000, 0.15) })
+    // Render/plaster: rough, barely reflective, but enough env pickup that
+    // shaded facades keep some sky bounce instead of going muddy.
+    const wall = (map: THREE.Texture) =>
+      new THREE.MeshStandardMaterial({ map, roughness: 0.88, metalness: 0.0, envMapIntensity: 0.8 })
+    const roofTop = new THREE.MeshStandardMaterial({
+      color: mixColor(style.roofColor, 0x000000, 0.15), roughness: 0.75, metalness: 0.08, envMapIntensity: 0.6,
+    })
     return [
-      new THREE.MeshLambertMaterial({ map: flank }),
-      new THREE.MeshLambertMaterial({ map: flank }),
+      wall(flank),
+      wall(flank),
       roofTop,
-      new THREE.MeshLambertMaterial({ color: 0x333333 }),
-      new THREE.MeshLambertMaterial({ map: tex('front') }),
-      new THREE.MeshLambertMaterial({ map: tex('back') }),
+      new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 1 }),
+      wall(tex('front')),
+      wall(tex('back')),
     ]
   }
 
@@ -859,27 +957,39 @@ export class CityScene3D {
     group.add(body)
     meshes.push(body)
 
+    // cornice, string course, balconies, dormers
+    const trimGeo = trimGeometry(style, dims)
+    if (trimGeo) {
+      const trimMesh = new THREE.Mesh(trimGeo, new THREE.MeshStandardMaterial({
+        color: trimColor(style), roughness: 0.8, envMapIntensity: 0.7,
+      }))
+      trimMesh.castShadow = true
+      trimMesh.receiveShadow = true
+      group.add(trimMesh)
+      meshes.push(trimMesh)
+    }
+
     // roof
     for (const piece of this.roofPieces(style, dims)) {
-      const mesh = new THREE.Mesh(piece.geo, new THREE.MeshLambertMaterial({ color: piece.color }))
+      const mesh = new THREE.Mesh(piece.geo, new THREE.MeshStandardMaterial({ color: piece.color, roughness: 0.72, metalness: 0.1, envMapIntensity: 0.7 }))
       mesh.position.y = piece.y
       mesh.castShadow = true
       group.add(mesh)
       meshes.push(mesh)
     }
     if (dims.roof !== 'flat' && dims.roofH > 0.5) {
-      const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.8, 2.2, 0.8), new THREE.MeshLambertMaterial({ color: style.trimColor }))
+      const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.8, 2.2, 0.8), new THREE.MeshStandardMaterial({ color: style.trimColor }))
       chimney.position.set(dims.w * 0.3, dims.bodyH + dims.roofH * 0.8, -dims.d * 0.18)
       chimney.castShadow = true
       group.add(chimney)
       meshes.push(chimney)
     } else if (style.kind === 'office' || style.kind === 'tower') {
-      const mech = new THREE.Mesh(new THREE.BoxGeometry(dims.w * 0.3, 1.4, dims.d * 0.25), new THREE.MeshLambertMaterial({ color: 0x707880 }))
+      const mech = new THREE.Mesh(new THREE.BoxGeometry(dims.w * 0.3, 1.4, dims.d * 0.25), new THREE.MeshStandardMaterial({ color: 0x707880 }))
       mech.position.set(-dims.w * 0.2, dims.bodyH + 1.1, -dims.d * 0.15)
       group.add(mech)
       meshes.push(mech)
       if (style.kind === 'tower') {
-        const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 4.2, 4), new THREE.MeshLambertMaterial({ color: style.accentColor }))
+        const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 4.2, 4), new THREE.MeshStandardMaterial({ color: style.accentColor }))
         antenna.position.y = dims.bodyH + 2.5
         group.add(antenna)
         meshes.push(antenna)
@@ -951,8 +1061,8 @@ export class CityScene3D {
 
   /** Simple 3D scaffold: yellow corner poles + rails + grey tarp on the front. */
   private addScaffold(group: THREE.Group, dims: BuildingDims) {
-    const poleMat = new THREE.MeshLambertMaterial({ color: 0xf2c94c })
-    const railMat = new THREE.MeshLambertMaterial({ color: 0xc89020 })
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0xf2c94c })
+    const railMat = new THREE.MeshStandardMaterial({ color: 0xc89020 })
     const h = dims.bodyH + 0.5
     const hw = dims.w / 2 + 0.35, hd = dims.d / 2 + 0.35
     const poleGeo = new THREE.CylinderGeometry(0.09, 0.09, h, 5)
@@ -969,7 +1079,7 @@ export class CityScene3D {
     }
     const tarp = new THREE.Mesh(
       new THREE.PlaneGeometry(dims.w + 0.6, h * 0.85),
-      new THREE.MeshLambertMaterial({ color: 0xb0b0b0, transparent: true, opacity: 0.3, side: THREE.DoubleSide }),
+      new THREE.MeshStandardMaterial({ color: 0xb0b0b0, transparent: true, opacity: 0.3, side: THREE.DoubleSide }),
     )
     tarp.position.set(0, h * 0.45, hd + 0.05)
     group.add(tarp)
@@ -1321,8 +1431,8 @@ export class CityScene3D {
       for (const m of h.meshes) {
         const mats = Array.isArray(m.material) ? m.material : [m.material]
         for (const mat of mats) {
-          if ((mat as THREE.MeshLambertMaterial).emissive) {
-            (mat as THREE.MeshLambertMaterial).emissive.setHex(on ? 0x2a2a20 : 0x000000)
+          if ((mat as THREE.MeshStandardMaterial).emissive) {
+            (mat as THREE.MeshStandardMaterial).emissive.setHex(on ? 0x2a2a20 : 0x000000)
           }
         }
       }

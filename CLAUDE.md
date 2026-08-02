@@ -104,6 +104,15 @@ Price tags / chips / district banners are `CSS2DObject`s. Two rules:
 
 Roofs come from `roofPieces()`: gable (a flat-shaded prism with its ridge along the street), hip (pyramid, freestanding kinds), or a parapet band for flat roofs. Both market buildings and instanced fillers go through it, so they always match.
 
+`trimGeometry()` supplies the architectural relief — cornice, string course, Altbau balconies with railings, roof dormers, entrance canopies — **merged into a single `BufferGeometry`** so a whole filler batch still costs one extra draw call. Add new relief there rather than as separate meshes, or the per-batch draw calls multiply across ~320 batches.
+
+### Lighting and materials
+Everything is `MeshStandardMaterial` lit by an IBL environment (`buildEnvironment()`), a directional sun, and a weak hemisphere top-up. Two traps:
+- **Don't build the environment from the `Sky` shader.** Sky emits unnormalised radiance in the hundreds; prefiltered through PMREM it blows every surface to white. The environment is a plain 0..1 sky/ground gradient so `envMapIntensity` means what it says.
+- Exposure is deliberately low (`toneMappingExposure` 0.78) and the ground canvas colours are mid-tone, because a 2.9-intensity sun clips light pavement to pure white and eats the paving detail.
+
+There is intentionally **no bloom / post-processing chain** — it was tried and removed; it washed the city out and buried the facade detail. Rendering is a direct `renderer.render()` with MSAA from the `antialias` flag.
+
 State markers on buildings: gold sprite badge = owned, CSS2D chips = price tag / `ZU VERMIETEN` / nomad warning, 3D scaffold group = active renovation. CSS2D labels distance-fade (`fadeLabelsByDistance`) so the horizon doesn't pile up with banners.
 
 ### DOM overlay
