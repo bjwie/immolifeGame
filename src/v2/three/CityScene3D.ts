@@ -47,7 +47,36 @@ interface BuildingHandle {
   meshes: THREE.Mesh[]
 }
 
-interface Collider { minX: number; maxX: number; minZ: number; maxZ: number }
+interface Collider {
+  minX: number; maxX: number; minZ: number; maxZ: number
+  /** roof height — only needed for the label occlusion test */
+  top: number
+  /** set for market buildings so a label can ignore its own building */
+  ownerId?: string
+}
+
+/** Slab test: does the ray [origin, origin + dir*limit] enter this box? */
+function rayHitsBox(
+  ox: number, oy: number, oz: number,
+  rx: number, ry: number, rz: number,
+  limit: number, c: Collider,
+): boolean {
+  let tmin = 0
+  let tmax = limit
+  const axis = (o: number, r: number, lo: number, hi: number) => {
+    if (Math.abs(r) < 1e-6) return o >= lo && o <= hi
+    let t1 = (lo - o) / r
+    let t2 = (hi - o) / r
+    if (t1 > t2) { const t = t1; t1 = t2; t2 = t }
+    if (t1 > tmin) tmin = t1
+    if (t2 < tmax) tmax = t2
+    return tmin <= tmax
+  }
+  if (!axis(ox, rx, c.minX, c.maxX)) return false
+  if (!axis(oy, ry, 0, c.top)) return false
+  if (!axis(oz, rz, c.minZ, c.maxZ)) return false
+  return true
+}
 
 export class CityScene3D {
   readonly engine: Engine
@@ -68,8 +97,16 @@ export class CityScene3D {
   private fillerRoot = new THREE.Group()
   private fillerColliders: Collider[] = []
   private staticColliders: Collider[] = []
-  private lastFillerKey = '__unset__'
   private lastFillerToast = 0
+  /** Fillers are built once for every buildable lot. When the market puts a
+   *  real property on a lot we only hide that lot's instances — rebuilding all
+   *  ~470 batches cost 120 ms and showed up as a hitch while walking. */
+  private fillerBuilt = false
+  private fillerTiles = new Map<string, {
+    refs: Array<{ mesh: THREE.InstancedMesh; index: number; matrix: THREE.Matrix4 }>
+    collider: Collider
+  }>()
+  private hiddenFillerTiles = new Set<string>()
 
   private lockOverlays = new Map<DistrictId, THREE.Mesh>()
   /** Visual unlock state for teaser districts. The shared layout's `locked`
@@ -100,9 +137,6 @@ export class CityScene3D {
   private cursor = { x: 0, y: 0 }
 
   private raycaster = new THREE.Raycaster()
-  /** separate ray so label occlusion never clobbers the crosshair ray's state */
-  private labelRay = new THREE.Raycaster()
-  private occluderSkip: THREE.Object3D | null = null
   private clock = new THREE.Clock()
   private particles: Array<{ mesh: THREE.Mesh; vel: THREE.Vector3; life: number }> = []
   private disposed = false
@@ -431,7 +465,7 @@ export class CityScene3D {
         const bowlWater = new THREE.Mesh(new THREE.CylinderGeometry(1.3, 1.3, 0.1, 14), water)
         bowlWater.position.set(cx, 3.4, cz)
         this.scene.add(basin, pool, column, bowl, bowlWater)
-        this.staticColliders.push({ minX: cx - 4.6, maxX: cx + 4.6, minZ: cz - 4.6, maxZ: cz + 4.6 })
+        this.staticColliders.push({ minX: cx - 4.6, maxX: cx + 4.6, minZ: cz - 4.6, maxZ: cz + 4.6, top: 3.5 })
         // benches facing the fountain
         const wood = new THREE.MeshStandardMaterial({ color: 0x7a5230, roughness: 0.8, envMapIntensity: 0.6 })
         const iron = new THREE.MeshStandardMaterial({ color: 0x30363c, roughness: 0.42, metalness: 0.7, envMapIntensity: 0.9 })
@@ -557,12 +591,7 @@ export class CityScene3D {
    *  or owned property carries a deterministic backdrop building. Only market
    *  objects are interactive — fillers answer clicks with an info toast. */
   private buildFillers() {
-    const occupied = new Set<string>()
-    for (const p of this.engine.state.listings) occupied.add(p.tileX + ',' + p.tileY)
-    for (const p of this.engine.state.owned) occupied.add(p.tileX + ',' + p.tileY)
-    const key = [...occupied].sort().join(';')
-    if (key === this.lastFillerKey) return
-    this.lastFillerKey = key
+    if (this.fillerBuilt) return
 
     // dispose previous batch meshes
     for (const child of [...this.fillerRoot.children]) {
@@ -574,13 +603,16 @@ export class CityScene3D {
     }
     this.fillerRoot.clear()
     this.fillerColliders = []
+    this.fillerTiles.clear()
+    this.hiddenFillerTiles.clear()
+    this.fillerBuilt = true
 
     interface Batch {
       kind: BuildingKind
       district: string | undefined
       seed: number
       lot: Lot
-      spots: Array<{ x: number; z: number; yaw: number; front: THREE.Vector3 }>
+      spots: Array<{ x: number; z: number; yaw: number; front: THREE.Vector3; tile: string }>
     }
     // Batched per (block, style): keeping a batch inside one city block keeps
     // its bounding sphere small, so the frustum can cull whole blocks that are
@@ -589,7 +621,6 @@ export class CityScene3D {
     const districtIndex = new Map(this.layout.districts.map((d, i) => [d.id, i]))
 
     for (const spot of this.layout.buildableSpots) {
-      if (occupied.has(spot.tileX + ',' + spot.tileY)) continue
       const d = this.layout.districts.find(dd => dd.id === spot.district)!
       const locked = !this.engine.isDistrictUnlocked(d.id)
       const rng = mulberry32(((spot.tileX * 73856093) ^ (spot.tileY * 19349663)) >>> 0)
@@ -608,7 +639,10 @@ export class CityScene3D {
         batches.set(key, batch)
       }
       const c = tileCenter(this.metrics, spot.tileX, spot.tileY)
-      batch.spots.push({ x: c.x, z: c.z, yaw: Math.atan2(front.x, front.z), front })
+      batch.spots.push({
+        x: c.x, z: c.z, yaw: Math.atan2(front.x, front.z), front,
+        tile: spot.tileX + ',' + spot.tileY,
+      })
     }
 
     const m = new THREE.Matrix4()
@@ -679,7 +713,22 @@ export class CityScene3D {
         const alongX = Math.abs(sp.front.z) > 0.5
         const hx = (alongX ? dims.w : dims.d) / 2
         const hz = (alongX ? dims.d : dims.w) / 2
-        this.fillerColliders.push({ minX: cx - hx, maxX: cx + hx, minZ: cz - hz, maxZ: cz + hz })
+        const collider: Collider = {
+          minX: cx - hx, maxX: cx + hx, minZ: cz - hz, maxZ: cz + hz,
+          top: dims.bodyH + dims.roofH,
+        }
+        const refs: Array<{ mesh: THREE.InstancedMesh; index: number; matrix: THREE.Matrix4 }> = []
+        const remember = (mesh: THREE.InstancedMesh | null) => {
+          if (!mesh) return
+          const mat = new THREE.Matrix4()
+          mesh.getMatrixAt(i, mat)
+          refs.push({ mesh, index: i, matrix: mat })
+        }
+        remember(body)
+        remember(trim)
+        remember(blobs)
+        for (const rp of roofPieces) remember(rp.mesh)
+        this.fillerTiles.set(sp.tile, { refs, collider })
       })
 
       body.computeBoundingSphere()
@@ -692,6 +741,40 @@ export class CityScene3D {
       }
     }
   }
+
+  /** Hide the filler on any lot the market has put a real property on, and
+   *  restore it when that property leaves. Touches only the lots that changed,
+   *  so buying a house costs microseconds instead of a full rebuild. */
+  private syncFillerOccupancy() {
+    const occupied = new Set<string>()
+    for (const p of this.engine.state.listings) occupied.add(p.tileX + ',' + p.tileY)
+    for (const p of this.engine.state.owned) occupied.add(p.tileX + ',' + p.tileY)
+
+    const touched = new Set<THREE.InstancedMesh>()
+    const ZERO = CityScene3D.ZERO_MATRIX
+
+    for (const tile of occupied) {
+      if (this.hiddenFillerTiles.has(tile)) continue
+      const entry = this.fillerTiles.get(tile)
+      if (!entry) continue
+      for (const r of entry.refs) { r.mesh.setMatrixAt(r.index, ZERO); touched.add(r.mesh) }
+    }
+    for (const tile of this.hiddenFillerTiles) {
+      if (occupied.has(tile)) continue
+      const entry = this.fillerTiles.get(tile)
+      if (!entry) continue
+      for (const r of entry.refs) { r.mesh.setMatrixAt(r.index, r.matrix); touched.add(r.mesh) }
+    }
+    for (const mesh of touched) mesh.instanceMatrix.needsUpdate = true
+
+    this.hiddenFillerTiles = occupied
+    this.fillerColliders = []
+    for (const [tile, entry] of this.fillerTiles) {
+      if (!occupied.has(tile)) this.fillerColliders.push(entry.collider)
+    }
+  }
+
+  private static ZERO_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0)
 
   /** Lot extents expressed in the building's local axes (w runs along the
    *  facade, d runs back from the street). */
@@ -817,7 +900,7 @@ export class CityScene3D {
       }
     }
     // filler styles depend on lock state — force a rebuild on the next refresh
-    this.lastFillerKey = '__stale__'
+    this.fillerBuilt = false
   }
 
   /** Fade out the lock overlay and swap banner styling to the unlocked look.
@@ -916,6 +999,7 @@ export class CityScene3D {
 
     this.rebuildColliders()
     this.buildFillers()
+    this.syncFillerOccupancy()
   }
 
   private frontDirForTile(tileX: number, tileY: number): THREE.Vector3 {
@@ -1112,6 +1196,8 @@ export class CityScene3D {
         maxX: h.center.x + hw,
         minZ: h.center.z - hd,
         maxZ: h.center.z + hd,
+        top: h.dims.bodyH + h.dims.roofH,
+        ownerId: h.prop.id,
       })
     }
   }
@@ -1514,43 +1600,54 @@ export class CityScene3D {
    *  CSS2DRenderer parks them against the screen edge. */
   private fadeLabelsByDistance() {
     const ndc = new THREE.Vector3()
-    const dir = new THREE.Vector3()
-    const fade = (el: HTMLElement, world: THREE.Vector3, near: number, far: number, occlude: boolean) => {
+    const fade = (el: HTMLElement, world: THREE.Vector3, near: number, far: number, ownerId: string | null) => {
       const d = Math.hypot(world.x - this.pos.x, world.z - this.pos.z)
       let o = d < near ? 1 : Math.max(0, 1 - (d - near) / (far - near))
-      ndc.copy(world).project(this.camera)
-      const onScreen = ndc.z < 1 && Math.abs(ndc.x) < 1.05 && Math.abs(ndc.y) < 1.05
-      if (!onScreen) o = 0
-      // CSS2D labels have no depth test, so a tag on the far side of a block
-      // would otherwise read as if it were stuck on the wall in front of it.
-      if (o > 0.02 && occlude && this.isOccluded(world, dir)) o = 0
+      if (o > 0.02) {
+        ndc.copy(world).project(this.camera)
+        const onScreen = ndc.z < 1 && Math.abs(ndc.x) < 1.05 && Math.abs(ndc.y) < 1.05
+        // CSS2D labels have no depth test, so a tag on the far side of a block
+        // would otherwise read as if it were stuck on the wall in front of it.
+        if (!onScreen || (ownerId !== null && this.isOccluded(world, ownerId))) o = 0
+      }
       el.style.opacity = String(o)
       el.style.visibility = o <= 0.02 ? 'hidden' : 'visible'
     }
-    for (const b of this.banners.values()) fade(b.el, b.pos, 150, 320, false)
+    for (const b of this.banners.values()) fade(b.el, b.pos, 150, 320, null)
     const world = new THREE.Vector3()
     for (const h of this.byPropertyId.values()) {
       for (const child of h.group.children) {
         if (!(child as any).isCSS2DObject) continue
         child.getWorldPosition(world)
-        this.occluderSkip = h.group
-        fade((child as CSS2DObject).element, world, 200, 360, true)
+        fade((child as CSS2DObject).element, world, 200, 360, h.prop.id)
       }
     }
   }
 
   /** Is another building between the camera and this world point? Hits on the
    *  label's own building don't count — a tag hanging over its own eave is
-   *  meant to be readable from the pavement below. */
-  private isOccluded(world: THREE.Vector3, scratch: THREE.Vector3): boolean {
-    scratch.copy(world).sub(this.camera.position)
-    const dist = scratch.length()
+   *  meant to be readable from the pavement below.
+   *
+   *  This deliberately tests building bounding boxes by hand instead of
+   *  raycasting the scene: a Raycaster walks every instance of ~470 batched
+   *  InstancedMeshes triangle by triangle, which cost ~1.4 ms *per label* and
+   *  was the reason the game stuttered to a halt while walking. */
+  private isOccluded(world: THREE.Vector3, ownerId: string | null): boolean {
+    const cam = this.camera.position
+    const dx = world.x - cam.x, dy = world.y - cam.y, dz = world.z - cam.z
+    const dist = Math.hypot(dx, dy, dz)
     if (dist < 2) return false
-    this.labelRay.set(this.camera.position, scratch.normalize())
-    this.labelRay.far = dist - 1.0
-    const hits = this.labelRay.intersectObjects([this.buildingsRoot, this.fillerRoot], true)
-    const own = this.occluderSkip
-    return hits.some(h => !own || !isDescendantOf(h.object, own))
+    const inv = 1 / dist
+    const rx = dx * inv, ry = dy * inv, rz = dz * inv
+    const limit = dist - 1.0
+    for (const c of this.colliders) {
+      if (c.ownerId && c.ownerId === ownerId) continue
+      if (rayHitsBox(cam.x, cam.y, cam.z, rx, ry, rz, limit, c)) return true
+    }
+    for (const c of this.fillerColliders) {
+      if (rayHitsBox(cam.x, cam.y, cam.z, rx, ry, rz, limit, c)) return true
+    }
+    return false
   }
 
   private onResize = () => {
@@ -1602,15 +1699,6 @@ function pickFillerKind(district: DistrictId, locked: boolean, r: number): Build
     case 'neukoelln': return pick([['apartment', 0.55], ['shop', 0.25], ['house', 0.2]])
     default: return pick([['apartment', 0.6], ['house', 0.2], ['shop', 0.2]])
   }
-}
-
-function isDescendantOf(node: THREE.Object3D, ancestor: THREE.Object3D): boolean {
-  let cur: THREE.Object3D | null = node
-  while (cur) {
-    if (cur === ancestor) return true
-    cur = cur.parent
-  }
-  return false
 }
 
 function capitalize(s: string) { return s.slice(0, 1).toUpperCase() + s.slice(1) }

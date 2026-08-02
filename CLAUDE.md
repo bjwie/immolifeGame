@@ -94,6 +94,10 @@ Party-wall flanks render as blank Brandmauern (`facadeTexture(..., 'firewall', .
 - The directional light's shadow camera is deliberately tiny (±48 m): shadow casting ignores the view frustum, so every metre of that box costs draw calls every frame.
 - Sanity check: looking at the ground should cost far fewer draw calls than looking down a street (~190 vs ~600). If they're equal, culling has regressed.
 
+### Two per-frame cost traps (both caused a walk-and-freeze once)
+- **Never raycast the scene per frame.** `Raycaster.intersectObjects` walks every instance of ~500 batched `InstancedMesh`es triangle by triangle. Label occlusion did this and cost ~1.4 ms *per visible label* — with a dozen tags on screen the frame budget was gone. It now tests the building `Collider` AABBs by hand (`rayHitsBox`), which is ~0.04 ms for all labels together. The crosshair `aimcast` is fine because it runs once per frame.
+- **Fillers are built once, never rebuilt per market change.** `buildFillers()` covers *every* buildable lot; `syncFillerOccupancy()` then zero-scales the instances of lots the market took over and restores them when a listing disappears. A full rebuild costs ~30–120 ms and used to fire on every `month`/`bought`/`sold`; the incremental sync is ~0.05 ms. Only a district unlock (which changes filler styles) sets `fillerBuilt = false` for a genuine rebuild.
+
 ### CSS2D labels
 Price tags / chips / district banners are `CSS2DObject`s. Two rules:
 - **Never animate `transform` in CSS on the mounted element** — `CSS2DRenderer` writes `transform` to position it, and a CSS animation silently overrides that, parking every label in the screen corner. Animate an inner element instead (see `.price-tag-3d .ptg-inner`).
