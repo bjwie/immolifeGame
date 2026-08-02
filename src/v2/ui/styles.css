@@ -1184,6 +1184,10 @@ canvas#nw-chart { background: var(--bg-2); border-radius: 6px; }
 #tour-panel .tour-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
 #tour-panel .tour-sub span { color: var(--text); font-weight: 700; }
 #tour-panel .tour-head button { padding: 7px 10px; font-size: 12px; white-space: nowrap; }
+#tour-panel .tour-count {
+  margin-top: 10px; font-size: 12px; font-weight: 800; color: var(--gold);
+  letter-spacing: 0.3px;
+}
 #tour-panel .tour-defects {
   list-style: none; margin: 10px 0 0; padding: 0;
   max-height: 132px; overflow-y: auto;
@@ -1201,6 +1205,45 @@ canvas#nw-chart { background: var(--bg-2); border-radius: 6px; }
 #tour-panel .tour-total { margin-top: 8px; font-size: 13px; }
 #tour-panel .tour-total b { color: var(--gold); }
 #tour-panel .tour-hint { margin-top: 8px; color: var(--muted); font-size: 11px; }
+#tour-panel .tour-hint b { color: var(--gold); }
+#tour-panel .tour-prompt {
+  margin-top: 8px; padding: 6px 9px; border-radius: 6px;
+  background: rgba(241,196,15,0.12); border: 1px solid var(--gold);
+  font-size: 12px;
+}
+#tour-panel .tour-prompt b { color: var(--gold); }
+
+/* the agent / owner showing you round */
+#seller-panel {
+  position: absolute; right: 18px; bottom: 18px;
+  width: min(400px, 46vw);
+  background: rgba(13, 20, 29, 0.96);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  z-index: 6300;
+  box-shadow: 0 10px 34px rgba(0,0,0,0.6);
+}
+#seller-panel .sp-head { display: flex; justify-content: space-between; align-items: flex-start; }
+#seller-panel .sp-name { font-weight: 800; font-size: 15px; }
+#seller-panel .sp-role { color: var(--muted); font-size: 11px; }
+#seller-panel .sp-log {
+  margin: 10px 0; max-height: 190px; overflow-y: auto;
+  font-size: 12px; line-height: 1.45;
+}
+#seller-panel .sp-log p { margin: 0 0 7px; }
+#seller-panel .sp-you { color: var(--accent); }
+#seller-panel .sp-you::before { content: '› '; }
+#seller-panel .sp-a { color: var(--text); }
+#seller-panel .sp-a.evasive { color: #c9c3ae; font-style: italic; }
+#seller-panel .sp-a.leak { color: var(--good); }
+#seller-panel .sp-qs { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; }
+#seller-panel .sp-q {
+  background: var(--bg-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 7px; padding: 7px 9px; font-size: 12px; cursor: pointer; text-align: left;
+}
+#seller-panel .sp-q:hover { border-color: var(--accent); }
+#seller-panel .sp-q.asked { opacity: 0.4; cursor: default; }
 
 /* Defect marker floating at the damage itself (CSS2D) */
 .defect-marker {

@@ -16,6 +16,9 @@ import { AmbientLife } from './ambient'
 import { buildStreetProps } from './props'
 import { InteriorTour } from './InteriorTour'
 import { preloadFurniture } from './models'
+import { buildDialogue } from './seller'
+import type { Dialogue } from './seller'
+import { mulberry32 as mulberrySeed } from '../world/cityLayout'
 import {
   facadeTexture, dimsFor, ownedBadgeTexture, contactShadowTexture, gableGeometry,
   trimGeometry, trimColor, scaffoldGeometry, neonSignTexture, siteFenceGeometry,
@@ -157,6 +160,10 @@ export class CityScene3D {
   private tour: InteriorTour | null = null
   private tourReturn: { x: number; z: number; yaw: number; pitch: number; speed: ReturnType<Engine['getSpeed']> } | null = null
   private tourPanel: HTMLDivElement | null = null
+  private tourDialogue: Dialogue | null = null
+  private dialoguePanel: HTMLDivElement | null = null
+  private torch: THREE.SpotLight | null = null
+  private torchOn = false
 
   constructor(container: HTMLElement) {
     this.layout = generateCityLayout(48, 4242)
@@ -351,15 +358,35 @@ export class CityScene3D {
     this.pitch = 0
     this.hideTooltip()
     this.hoveredPropertyId = null
+    this.tourDialogue = buildDialogue(
+      p, this.tour.findings,
+      mulberrySeed(((p.styleSeed ?? 1) * 40503) >>> 0),
+      this.engine.state.time.total,
+    )
+    // a torch for the cellar — every real viewing involves one
+    this.torch = new THREE.SpotLight(0xfff0d0, 0, 14, 0.5, 0.4, 1.2)
+    this.torch.position.set(0, 0, 0)
+    this.tour.scene.add(this.torch, this.torch.target)
+    this.torchOn = false
     this.mountTourPanel(p)
   }
 
   closeTour() {
     if (!this.tour) return
+    const found = this.tour.findings.filter(f => f.found)
+    const missed = this.tour.findings.length - found.length
+    const total = found.reduce((a, f) => a + f.cost, 0)
     this.tour.dispose()
     this.tour = null
+    this.torch = null
     this.tourPanel?.remove()
     this.tourPanel = null
+    this.dialoguePanel?.remove()
+    this.dialoguePanel = null
+    this.tourDialogue = null
+    if (found.length) {
+      this.hud.toast(`Besichtigung beendet: ${found.length} Maengel, ca. ${formatEuro(total)}${missed ? ` — ${missed} uebersehen?` : ''}`, 'info')
+    }
     const r = this.tourReturn
     if (r) {
       this.pos.set(r.x, EYE, r.z)
@@ -375,26 +402,78 @@ export class CityScene3D {
     const el = document.createElement('div')
     el.id = 'tour-panel'
     const t = this.tour!
-    const total = t.defects.reduce((a, d) => a + d.cost, 0)
-    const rows = t.defects.length
-      ? t.defects.map(d => `<li class="${d.severity}"><b>${escapeHtml(d.label)}</b><span>${formatEuro(d.cost)}</span></li>`).join('')
-      : `<li class="ok"><b>Keine wesentlichen Maengel gefunden</b></li>`
     el.innerHTML = `
       <div class="tour-head">
         <div>
           <div class="tour-title">🔎 Besichtigung — ${escapeHtml(this.engine.nameFor(p))}</div>
-          <div class="tour-sub">Zustand ${Math.round(p.condition)}% · <span id="tour-room">Flur</span></div>
+          <div class="tour-sub">${escapeHtml(t.archetypeLabel)} · ${t.roomCount} Zimmer · ${Math.round(t.sqm)} m² · <span id="tour-room">—</span></div>
         </div>
-        <button class="primary" data-tour-exit>Besichtigung beenden</button>
+        <button class="primary" data-tour-exit>Beenden</button>
       </div>
-      <ul class="tour-defects">${rows}</ul>
-      ${rows && t.defects.length ? `<div class="tour-total">Geschaetzter Instandsetzungsbedarf: <b>${formatEuro(total)}</b></div>` : ''}
-      <div class="tour-hint">WASD laufen · Maus ziehen zum Umsehen · Gang nach Osten fuehrt in den Keller</div>
+      <div id="tour-body"></div>
+      <div class="tour-prompt" id="tour-prompt" style="display:none">Taste <b>E</b> — ${escapeHtml(this.tourDialogue?.name ?? 'Verkaeufer')} ansprechen</div>
+      <div class="tour-hint">Nah rangehen und genau hinschauen identifiziert einen Mangel · <b>F</b> Taschenlampe · Gang nach Osten fuehrt in den Keller</div>
     `
     el.style.pointerEvents = 'auto'
     el.querySelector('[data-tour-exit]')?.addEventListener('click', () => this.closeTour())
     overlay.appendChild(el)
     this.tourPanel = el
+    this.refreshTourPanel()
+  }
+
+  /** The Q&A with whoever is showing you round. */
+  private toggleDialogue() {
+    if (this.dialoguePanel) { this.dialoguePanel.remove(); this.dialoguePanel = null; return }
+    const d = this.tourDialogue
+    if (!d) return
+    const overlay = (window as any).__overlayRoot as HTMLElement
+    const el = document.createElement('div')
+    el.id = 'seller-panel'
+    el.style.pointerEvents = 'auto'
+    el.innerHTML = `
+      <div class="sp-head">
+        <div>
+          <div class="sp-name">${escapeHtml(d.name)}</div>
+          <div class="sp-role">${escapeHtml(d.role)}</div>
+        </div>
+        <button class="ghost small" data-sp-close>Schliessen</button>
+      </div>
+      <div class="sp-log" id="sp-log"><p class="sp-a">${escapeHtml(d.greeting)}</p></div>
+      <div class="sp-qs">${d.items.map((it, i) =>
+        `<button class="sp-q" data-q="${i}">${escapeHtml(it.q)}</button>`).join('')}</div>
+    `
+    el.querySelector('[data-sp-close]')?.addEventListener('click', () => this.toggleDialogue())
+    const log = el.querySelector('#sp-log')!
+    el.querySelectorAll<HTMLElement>('.sp-q').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const it = d.items[Number(btn.dataset.q)]
+        if (!it || btn.classList.contains('asked')) return
+        btn.classList.add('asked')
+        log.insertAdjacentHTML('beforeend',
+          `<p class="sp-you">${escapeHtml(it.q)}</p><p class="sp-a ${it.tone}">${escapeHtml(it.a)}</p>`)
+        log.scrollTop = log.scrollHeight
+        if (it.tone === 'leak') this.hud.toast('Der Verkaeufer hat sich verplappert.', 'success')
+      })
+    })
+    overlay.appendChild(el)
+    this.dialoguePanel = el
+  }
+
+  /** Only what the player has actually identified so far. */
+  private refreshTourPanel() {
+    const t = this.tour
+    const body = this.tourPanel?.querySelector('#tour-body')
+    if (!t || !body) return
+    const found = t.findings.filter(f => f.found)
+    const total = found.reduce((a, f) => a + f.cost, 0)
+    const rows = found.length
+      ? found.map(f => `<li class="${f.def.severity}"><b>${escapeHtml(f.def.label)}</b><span>${formatEuro(f.cost)}</span></li>`).join('')
+      : `<li class="ok"><b>Noch nichts gefunden</b><span>such weiter</span></li>`
+    body.innerHTML = `
+      <div class="tour-count">${found.length} / ${t.findings.length} Maengel gefunden</div>
+      <ul class="tour-defects">${rows}</ul>
+      ${found.length ? `<div class="tour-total">Bisher beziffert: <b>${formatEuro(total)}</b></div>` : ''}
+    `
   }
 
   /** Sky/ground gradient prefiltered into an irradiance map — gives every
@@ -1409,6 +1488,14 @@ export class CityScene3D {
         const cur = this.engine.getSpeed()
         this.engine.setSpeed(cur === 0 ? 1 : 0)
       }
+      if (this.tour && e.code === 'KeyE') {
+        const near = this.pos.distanceTo(this.tour.sellerPos) < 3.2
+        if (near || this.dialoguePanel) this.toggleDialogue()
+      }
+      if (this.tour && e.code === 'KeyF') {
+        this.torchOn = !this.torchOn
+        this.hud.toast(this.torchOn ? 'Taschenlampe an' : 'Taschenlampe aus', 'info')
+      }
       if (e.code === 'Escape') {
         // ModalManager handles ESC when modals are open (capture phase).
         // While pointer-locked the browser consumes ESC for the unlock, so this
@@ -1739,9 +1826,29 @@ export class CityScene3D {
     this.fadeLabelsByDistance()
 
     if (this.tour) {
-      const room = this.tour.roomAt(this.pos.x, this.pos.z)
+      const info = this.tour.roomInfoAt(this.pos.x, this.pos.z)
       const label = this.tourPanel?.querySelector('#tour-room')
-      if (label && room) label.textContent = room
+      if (label && info) label.textContent = info.sqm ? `${info.name} · ${info.sqm} m²` : info.name
+      const dir = new THREE.Vector3()
+      this.camera.getWorldDirection(dir)
+      // torch follows the eye
+      if (this.torch) {
+        this.torch.intensity = this.torchOn ? 26 : 0
+        this.torch.position.copy(this.camera.position)
+        this.torch.target.position.copy(this.camera.position).addScaledVector(dir, 6)
+        this.torch.target.updateMatrixWorld()
+      }
+      // prompt when you are next to the agent
+      const nearSeller = this.pos.distanceTo(this.tour.sellerPos) < 3.2
+      const prompt = this.tourPanel?.querySelector('#tour-prompt') as HTMLElement | null
+      if (prompt) prompt.style.display = nearSeller && !this.dialoguePanel ? '' : 'none'
+      const newly = this.tour.updateDiscovery(this.camera.position, dir, dt)
+      if (newly.length) {
+        for (const f of newly) {
+          this.hud.toast(`Mangel entdeckt: ${f.def.label} (ca. ${formatEuro(f.cost)})`, f.def.severity === 'bad' ? 'error' : 'warning')
+        }
+        this.refreshTourPanel()
+      }
       this.tour.updateLabels(this.pos.x, this.pos.z)
       this.renderer.render(this.tour.scene, this.camera)
       this.css2d.render(this.tour.scene, this.camera)

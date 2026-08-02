@@ -296,6 +296,28 @@ export const meterBoard: Builder = () => {
   return b.finish(1.3, 0.1, 0.85)
 }
 
+/** A standing person — the agent or owner showing you round. */
+export const person: Builder = (rng) => {
+  const b = new Build()
+  const scale = 0.97 + rng() * 0.08
+  // proportions off a 1.75 m adult: legs to 0.86, torso to 1.44, head on top
+  b.add('dark', cyl(0.085, 0.86, 8), -0.095, 0.43, 0)                    // legs
+  b.add('dark', cyl(0.085, 0.86, 8), 0.095, 0.43, 0)
+  b.add('dark', rbox(0.3, 0.16, 0.22, 0.05), 0, 0.9, 0)                  // hips
+  b.add('fabric', rbox(0.4, 0.5, 0.23, 0.07), 0, 1.2, 0)                 // jacket
+  b.add('fabric', rbox(0.46, 0.1, 0.24, 0.05), 0, 1.4, 0)                // shoulders
+  b.add('fabric', cyl(0.052, 0.48, 8), -0.235, 1.16, 0.015)              // arms
+  b.add('fabric', cyl(0.052, 0.48, 8), 0.235, 1.16, 0.015)
+  b.add('white', rbox(0.11, 0.3, 0.16, 0.03), 0, 1.26, 0.075)            // shirt front
+  b.add('wood', cyl(0.052, 0.1, 8), 0, 1.49, 0)                          // neck
+  b.add('wood', rbox(0.17, 0.22, 0.19, 0.07), 0, 1.64, 0)                // head
+  b.add('dark', rbox(0.18, 0.08, 0.2, 0.05), 0, 1.73, -0.005)            // hair
+  b.add('dark', rbox(0.24, 0.31, 0.05, 0.015), 0.29, 1.05, 0.04)         // document folder
+  const piece = b.finish(0.5, 0.3, 1.78)
+  for (const part of piece.parts) part.geo.scale(scale, scale, scale)
+  return piece
+}
+
 export const cartonBox: Builder = (rng) => {
   const s = 0.32 + rng() * 0.34
   const b = new Build()
