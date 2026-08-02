@@ -53,6 +53,15 @@ function makePattern(g: CanvasRenderingContext2D, size: number, draw: (c: Canvas
   return g.createPattern(c, 'repeat')!
 }
 
+/** Tram territory: the eastern districts run trams, the west does not.
+ *  Column range covers Mitte + Prenzlauer Berg in the generated layout. */
+export function isTramRow(layout: CityLayout, ty: number): boolean {
+  return ty % 8 === 4 && ty > 0 && ty < layout.tilesH - 1
+}
+export function isTramColumn(tx: number): boolean {
+  return tx >= 12 && tx < 36
+}
+
 export function paintGround(layout: CityLayout, m: Metrics): GroundPaint {
   const { tilesW, tilesH, tiles } = layout
   const canvas = document.createElement('canvas')
@@ -234,6 +243,25 @@ export function paintGround(layout: CityLayout, m: Metrics): GroundPaint {
             g.fillStyle = css(0xf2f0e4, 0.85)
             for (let sy = y; sy < y + h; sy += 5 * PPM) {
               g.fillRect(x + w / 2 - 1.5, sy, 3, Math.min(2.5 * PPM, y + h - sy))
+            }
+          }
+
+          // tram tracks down the middle of the eastern avenues
+          if (horizontal && isTramRow(layout, ty) && isTramColumn(tx)) {
+            const cz = y + h / 2
+            const gauge = 1.435 * PPM
+            // sleeper bed
+            g.fillStyle = css(0x3d3a34, 0.55)
+            g.fillRect(x, cz - gauge / 2 - 0.45 * PPM, w, gauge + 0.9 * PPM)
+            g.fillStyle = css(0x2f2c27, 0.6)
+            for (let sx = x; sx < x + w; sx += 0.75 * PPM) {
+              g.fillRect(sx, cz - gauge / 2 - 0.4 * PPM, 0.3 * PPM, gauge + 0.8 * PPM)
+            }
+            for (const off of [-gauge / 2, gauge / 2]) {
+              g.fillStyle = css(0x23262a)
+              g.fillRect(x, cz + off - 0.09 * PPM, w, 0.18 * PPM)
+              g.fillStyle = css(0xb9c0c6)   // polished railhead
+              g.fillRect(x, cz + off - 0.04 * PPM, w, 0.06 * PPM)
             }
           }
 

@@ -509,6 +509,101 @@ export function trimColor(style: BuildingStyle): number {
   return mixColor(style.wallColor, 0xffffff, 0.45)
 }
 
+/**
+ * Berlin Baugeruest wrapping the street face and both flanks: standards,
+ * ledgers, boards and toe rails, merged into one geometry so a scaffolded
+ * building costs a single draw call.
+ */
+export function scaffoldGeometry(w: number, d: number, h: number): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = []
+  const box = (bw: number, bh: number, bd: number, x: number, y: number, z: number) => {
+    const g = new THREE.BoxGeometry(bw, bh, bd)
+    g.translate(x, y, z)
+    parts.push(g)
+  }
+  const out = 0.85                 // how far the deck stands off the wall
+  const top = h + 0.9
+  const zFront = d / 2 + out / 2
+  const hw = w / 2
+
+  // standards along the street face, every ~3 m
+  const bays = Math.max(2, Math.round(w / 3))
+  for (let i = 0; i <= bays; i++) {
+    const x = -hw + (w * i) / bays
+    box(0.09, top, 0.09, x, top / 2, d / 2 + 0.12)
+    box(0.09, top, 0.09, x, top / 2, d / 2 + out)
+  }
+  // standards down both flanks
+  const dBays = Math.max(2, Math.round(d / 3))
+  for (const sx of [-1, 1]) {
+    for (let i = 0; i <= dBays; i++) {
+      const z = -d / 2 + (d * i) / dBays
+      box(0.09, top, 0.09, sx * (hw + 0.12), top / 2, z)
+      box(0.09, top, 0.09, sx * (hw + out), top / 2, z)
+    }
+  }
+
+  // lifts: ledgers, decking boards and toe boards
+  for (let y = 2.0; y < top; y += 2.0) {
+    box(w + out * 2, 0.06, 0.06, 0, y, zFront - out / 2 + 0.06)
+    box(w + out * 2, 0.06, 0.06, 0, y, zFront + out / 2 - 0.06)
+    box(w + out * 2, 0.05, out, 0, y - 0.06, zFront)          // planks
+    box(w + out * 2, 0.22, 0.04, 0, y + 0.15, zFront + out / 2)  // toe board
+    for (const sx of [-1, 1]) {
+      box(0.06, 0.06, d, sx * (hw + 0.12), y, 0)
+      box(0.06, 0.06, d, sx * (hw + out), y, 0)
+      box(out, 0.05, d, sx * (hw + out / 2 + 0.06), y - 0.06, 0)
+      box(0.04, 0.22, d, sx * (hw + out), y + 0.15, 0)
+    }
+  }
+
+  // a couple of diagonal braces on the front for that unfinished look
+  for (let i = 0; i < bays; i += 2) {
+    const x = -hw + (w * (i + 0.5)) / bays
+    const brace = new THREE.BoxGeometry(0.05, Math.hypot(w / bays, 2.0), 0.05)
+    brace.rotateZ(Math.atan2(w / bays, 2.0))
+    brace.translate(x, 3.0, d / 2 + out)
+    parts.push(brace)
+  }
+
+  const merged = mergeGeometries(parts, false)!
+  for (const p of parts) p.dispose()
+  return merged
+}
+
+/** Illuminated Spaeti / Kiosk sign for shop ground floors. */
+export function neonSignTexture(seed: number): THREE.CanvasTexture {
+  const key = seed % NEON_WORDS.length
+  const hit = neonCache.get(key)
+  if (hit) return hit
+  const c = document.createElement('canvas')
+  c.width = 256
+  c.height = 64
+  const g = c.getContext('2d')!
+  const bg = ['#12161c', '#1b1220', '#101a18'][key % 3]
+  g.fillStyle = bg
+  g.fillRect(0, 0, 256, 64)
+  const neon = ['#ff4d6d', '#4dd2ff', '#ffd23f', '#7cff6b'][key % 4]
+  g.font = 'bold 40px monospace'
+  g.textAlign = 'center'
+  g.textBaseline = 'middle'
+  g.shadowColor = neon
+  g.shadowBlur = 18
+  g.fillStyle = neon
+  g.fillText(NEON_WORDS[key], 128, 34)
+  g.shadowBlur = 0
+  g.strokeStyle = neon
+  g.lineWidth = 2
+  g.strokeRect(6, 6, 244, 52)
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  neonCache.set(key, tex)
+  return tex
+}
+
+const NEON_WORDS = ['SPAETI', 'KIOSK', 'BIER', '24h', 'IMBISS', 'BACKSHOP']
+const neonCache = new Map<number, THREE.CanvasTexture>()
+
 // ------------------------------------------------- marker sprite textures
 
 let blobTex: THREE.CanvasTexture | null = null

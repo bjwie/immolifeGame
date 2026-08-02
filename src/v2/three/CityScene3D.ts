@@ -14,7 +14,10 @@ import type { BuildingKind } from '../world/buildingStyle'
 import { paintGround, paintLockOverlay } from './ground'
 import { AmbientLife } from './ambient'
 import { buildStreetProps } from './props'
-import { facadeTexture, dimsFor, ownedBadgeTexture, contactShadowTexture, gableGeometry, trimGeometry, trimColor } from './facade'
+import {
+  facadeTexture, dimsFor, ownedBadgeTexture, contactShadowTexture, gableGeometry,
+  trimGeometry, trimColor, scaffoldGeometry, neonSignTexture,
+} from './facade'
 import type { BuildingDims, Lot, Face } from './facade'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { buildMetrics, tileCenter, tileRect, tileAtWorld } from './metrics'
@@ -697,6 +700,30 @@ export class CityScene3D {
         trim.userData.filler = true
       }
 
+      // Dressing: roughly one lot in fourteen is under scaffolding, and shop
+      // ground floors get an illuminated Spaeti sign.
+      const scaffolded = batch.spots.filter(sp => hashTile(sp.tile) < 0.07)
+      let scaffold: THREE.InstancedMesh | null = null
+      if (scaffolded.length) {
+        scaffold = new THREE.InstancedMesh(
+          scaffoldGeometry(dims.w, dims.d, dims.bodyH),
+          CityScene3D.scaffoldMaterial(),
+          scaffolded.length,
+        )
+        scaffold.castShadow = true
+        scaffold.userData.filler = true
+      }
+      let neon: THREE.InstancedMesh | null = null
+      if (style.kind === 'shop') {
+        const signGeo = new THREE.BoxGeometry(Math.min(dims.w * 0.62, 4.4), 0.85, 0.22)
+        neon = new THREE.InstancedMesh(signGeo, new THREE.MeshStandardMaterial({
+          map: neonSignTexture(batch.seed), emissiveMap: neonSignTexture(batch.seed),
+          emissive: 0xffffff, emissiveIntensity: 1.5, roughness: 0.5,
+        }), n)
+        neon.userData.filler = true
+      }
+      let scaffoldIdx = 0
+
       batch.spots.forEach((sp, i) => {
         const cx = sp.x + sp.front.x * zOff
         const cz = sp.z + sp.front.z * zOff
@@ -713,6 +740,18 @@ export class CityScene3D {
         if (trim) {
           m.makeRotationY(sp.yaw).setPosition(cx, 0, cz)
           trim.setMatrixAt(i, m)
+        }
+        if (scaffold && hashTile(sp.tile) < 0.07) {
+          m.makeRotationY(sp.yaw).setPosition(cx, 0, cz)
+          scaffold.setMatrixAt(scaffoldIdx++, m)
+        }
+        if (neon) {
+          // hung above the shopfront, standing proud of the facade
+          const signY = style.groundHeight + 0.15
+          const outX = sp.front.x * (dims.d / 2 + 0.2)
+          const outZ = sp.front.z * (dims.d / 2 + 0.2)
+          m.makeRotationY(sp.yaw).setPosition(cx + outX, signY, cz + outZ)
+          neon.setMatrixAt(i, m)
         }
         const alongX = Math.abs(sp.front.z) > 0.5
         const hx = (alongX ? dims.w : dims.d) / 2
@@ -738,6 +777,8 @@ export class CityScene3D {
       body.computeBoundingSphere()
       this.fillerRoot.add(body)
       if (trim) { trim.computeBoundingSphere(); this.fillerRoot.add(trim) }
+      if (scaffold) { scaffold.computeBoundingSphere(); this.fillerRoot.add(scaffold) }
+      if (neon) { neon.computeBoundingSphere(); this.fillerRoot.add(neon) }
       if (blobs) { blobs.computeBoundingSphere(); this.fillerRoot.add(blobs) }
       for (const rp of roofPieces) {
         rp.mesh.computeBoundingSphere()
@@ -1147,30 +1188,24 @@ export class CityScene3D {
     this.byPropertyId.set(p.id, handle)
   }
 
-  /** Simple 3D scaffold: yellow corner poles + rails + grey tarp on the front. */
+  /** Baugeruest around a building under renovation — one merged mesh. */
   private addScaffold(group: THREE.Group, dims: BuildingDims) {
-    const poleMat = new THREE.MeshStandardMaterial({ color: 0xf2c94c })
-    const railMat = new THREE.MeshStandardMaterial({ color: 0xc89020 })
-    const h = dims.bodyH + 0.5
-    const hw = dims.w / 2 + 0.35, hd = dims.d / 2 + 0.35
-    const poleGeo = new THREE.CylinderGeometry(0.09, 0.09, h, 5)
-    for (const [px, pz] of [[-hw, hd], [hw, hd], [-hw, -hd], [hw, -hd]] as const) {
-      const pole = new THREE.Mesh(poleGeo, poleMat)
-      pole.position.set(px, h / 2, pz)
-      group.add(pole)
-    }
-    const railGeo = new THREE.BoxGeometry(dims.w + 0.7, 0.07, 0.07)
-    for (let y = 2; y < h; y += 2.8) {
-      const rail = new THREE.Mesh(railGeo, railMat)
-      rail.position.set(0, y, hd)
-      group.add(rail)
-    }
-    const tarp = new THREE.Mesh(
-      new THREE.PlaneGeometry(dims.w + 0.6, h * 0.85),
-      new THREE.MeshStandardMaterial({ color: 0xb0b0b0, transparent: true, opacity: 0.3, side: THREE.DoubleSide }),
+    const mesh = new THREE.Mesh(
+      scaffoldGeometry(dims.w, dims.d, dims.bodyH),
+      CityScene3D.scaffoldMaterial(),
     )
-    tarp.position.set(0, h * 0.45, hd + 0.05)
-    group.add(tarp)
+    mesh.castShadow = true
+    group.add(mesh)
+  }
+
+  private static scaffoldMat: THREE.MeshStandardMaterial | null = null
+  static scaffoldMaterial(): THREE.MeshStandardMaterial {
+    if (!this.scaffoldMat) {
+      this.scaffoldMat = new THREE.MeshStandardMaterial({
+        color: 0xd8b13c, roughness: 0.55, metalness: 0.55, envMapIntensity: 0.9,
+      })
+    }
+    return this.scaffoldMat
   }
 
   private disposeBuilding(handle: BuildingHandle) {
@@ -1678,6 +1713,15 @@ export class CityScene3D {
 }
 
 // ----------------------------------------------------------------- helpers
+
+/** stable 0..1 from a "x,y" tile key */
+function hashTile(tile: string): number {
+  const c = tile.indexOf(',')
+  const x = +tile.slice(0, c), y = +tile.slice(c + 1)
+  let h = (x * 73856093) ^ (y * 19349663)
+  h = (h ^ (h >>> 13)) * 1274126177
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296
+}
 
 const FILLER_KIND_INDEX: Record<BuildingKind, number> = {
   house: 0, apartment: 1, office: 2, shop: 3, tower: 4, villa: 5,
