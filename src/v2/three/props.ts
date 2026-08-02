@@ -17,6 +17,9 @@ const BIKE_W = 1.3
 
 const PARKED_COLORS = [0x9aa0a6, 0x2c3e50, 0xb03a2e, 0xe8e8e8, 0x1f6650, 0x34495e, 0x7d6608, 0x515a5a]
 
+/** Height of the tram contact wire — the pantograph reaches for this. */
+export const CATENARY_Y = 5.7
+
 export interface PropsResult {
   /** boxes the player should not walk through */
   colliders: Array<{ minX: number; maxX: number; minZ: number; maxZ: number; top: number }>
@@ -250,6 +253,157 @@ export function buildStreetProps(scene: THREE.Scene, layout: CityLayout, metrics
     scene.add(bodies, cabins, wheels)
   }
 
+  // ---- bus stops: shelter with a glass back, timetable case and the H sign
+  const stopSlots = kerbSlots.filter((_, i) => i % 17 === 9)
+  if (stopSlots.length) {
+    const frameParts: THREE.BufferGeometry[] = []
+    const fb = (bw: number, bh: number, bd: number, x: number, y: number, z: number) => {
+      const gg = new THREE.BoxGeometry(bw, bh, bd); gg.translate(x, y, z); frameParts.push(gg)
+    }
+    const SW = 3.6, SD = 1.5, SH = 2.5
+    for (const sx of [-SW / 2, SW / 2]) {
+      fb(0.09, SH, 0.09, sx, SH / 2, -SD / 2)
+      fb(0.09, SH, 0.09, sx, SH / 2, SD / 2)
+    }
+    fb(SW, 0.12, SD, 0, SH, 0)                    // roof
+    fb(SW, 0.09, 0.09, 0, SH - 0.4, -SD / 2)      // back rail
+    const stopFrame = mergeGeometries(frameParts, false)!
+    frameParts.forEach(p => p.dispose())
+    const frames = new THREE.InstancedMesh(stopFrame, new THREE.MeshStandardMaterial({
+      color: 0x3a4148, roughness: 0.45, metalness: 0.65, envMapIntensity: 0.9,
+    }), stopSlots.length)
+    frames.castShadow = true
+    const backGeo = new THREE.BoxGeometry(SW - 0.2, SH - 0.5, 0.06)
+    backGeo.translate(0, (SH - 0.5) / 2, -SD / 2)
+    const backs = new THREE.InstancedMesh(backGeo, new THREE.MeshStandardMaterial({
+      color: 0x7f929c, roughness: 0.08, metalness: 0.2, transparent: true, opacity: 0.42, envMapIntensity: 2.0,
+    }), stopSlots.length)
+    const benchGeo = new THREE.BoxGeometry(SW - 1.0, 0.1, 0.42)
+    benchGeo.translate(0, 0.5, -SD / 2 + 0.35)
+    const benches = new THREE.InstancedMesh(benchGeo, new THREE.MeshStandardMaterial({
+      color: 0x7a5230, roughness: 0.8,
+    }), stopSlots.length)
+    // timetable case + the yellow H sign on a post
+    const caseGeo = new THREE.BoxGeometry(0.7, 0.95, 0.1)
+    caseGeo.translate(SW / 2 - 0.5, 1.5, -SD / 2 + 0.1)
+    const cases = new THREE.InstancedMesh(caseGeo, new THREE.MeshStandardMaterial({
+      map: timetableTexture(), roughness: 0.5,
+    }), stopSlots.length)
+    const hPost = new THREE.CylinderGeometry(0.05, 0.05, 2.9, 6)
+    hPost.translate(0, 1.45, 0)
+    const hPosts = new THREE.InstancedMesh(hPost, new THREE.MeshStandardMaterial({
+      color: 0x2b3138, roughness: 0.5, metalness: 0.6,
+    }), stopSlots.length)
+    const hPlate = new THREE.BoxGeometry(0.66, 0.66, 0.07)
+    hPlate.translate(0, 3.05, 0)
+    const hPlates = new THREE.InstancedMesh(hPlate, new THREE.MeshStandardMaterial({
+      map: hSignTexture(), emissiveMap: hSignTexture(), emissive: 0xffffff, emissiveIntensity: 0.4, roughness: 0.55,
+    }), stopSlots.length)
+
+    stopSlots.forEach((s, i) => {
+      const yaw = Math.atan2(s.toRoad.x, s.toRoad.z) + Math.PI / 2
+      // shelter sits back from the kerb, sign stands at the kerb
+      const bx = s.x - s.toRoad.x * 0.5, bz = s.z - s.toRoad.z * 0.5
+      for (const mesh of [frames, backs, benches, cases]) place(mesh, i, bx, 0, bz, yaw)
+      const px = s.x + s.toRoad.x * 1.0, pz = s.z + s.toRoad.z * 1.0
+      place(hPosts, i, px, 0, pz, yaw)
+      place(hPlates, i, px, 0, pz, yaw)
+      colliders.push({ minX: bx - 2.0, maxX: bx + 2.0, minZ: bz - 1.1, maxZ: bz + 1.1, top: 2.6 })
+    })
+    for (const mesh of [frames, backs, benches, cases, hPosts, hPlates]) { mesh.computeBoundingSphere(); scene.add(mesh) }
+  }
+
+  // ---- bicycles locked to lamp posts and railings
+  const bikeSlots = kerbSlots.filter((_, i) => i % 5 === 2)
+  if (bikeSlots.length) {
+    const parts: THREE.BufferGeometry[] = []
+    const tube = (len: number, rx: number, ry: number, rz: number, x: number, y: number, z: number) => {
+      const gg = new THREE.CylinderGeometry(0.035, 0.035, len, 5)
+      gg.rotateX(rx); gg.rotateY(ry); gg.rotateZ(rz); gg.translate(x, y, z)
+      parts.push(gg)
+    }
+    // frame: down tube, seat tube, top tube, forks
+    tube(1.0, 0, 0, Math.PI / 2 - 0.5, 0, 0.55, 0)
+    tube(0.62, 0, 0, 0.22, 0.28, 0.72, 0)
+    tube(0.72, 0, 0, Math.PI / 2 - 0.12, -0.1, 0.92, 0)
+    tube(0.72, 0, 0, -0.3, -0.52, 0.6, 0)
+    tube(0.5, 0, 0, Math.PI / 2, -0.5, 1.02, 0)   // handlebar height bar
+    const saddle = new THREE.BoxGeometry(0.24, 0.07, 0.12)
+    saddle.translate(0.42, 1.02, 0)
+    parts.push(saddle)
+    const frameGeo = mergeGeometries(parts, false)!
+    parts.forEach(p => p.dispose())
+    const frames = new THREE.InstancedMesh(frameGeo, new THREE.MeshStandardMaterial({
+      color: 0x2e3a44, roughness: 0.45, metalness: 0.6, envMapIntensity: 1.0,
+    }), bikeSlots.length)
+    frames.castShadow = true
+    const wheelGeo = new THREE.TorusGeometry(0.34, 0.035, 6, 14)
+    const wheels = new THREE.InstancedMesh(wheelGeo, new THREE.MeshStandardMaterial({
+      color: 0x1a1d21, roughness: 0.8,
+    }), bikeSlots.length * 2)
+    bikeSlots.forEach((s, i) => {
+      const yaw = Math.atan2(s.toRoad.x, s.toRoad.z) + Math.PI / 2
+      const lean = 0.16
+      // leaning against whatever is at the kerb
+      const bx = s.x - s.toRoad.x * 0.15, bz = s.z - s.toRoad.z * 0.15
+      q.setFromAxisAngle(up, yaw)
+      const tilt = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), lean)
+      q.multiply(tilt)
+      m.compose(v.set(bx, 0, bz), q, one)
+      frames.setMatrixAt(i, m)
+      for (let k = 0; k < 2; k++) {
+        const along = k === 0 ? 0.55 : -0.55
+        const wq = new THREE.Quaternion().setFromAxisAngle(up, yaw)
+        wq.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2))
+        m.compose(
+          v.set(bx + Math.cos(yaw) * along, 0.36, bz - Math.sin(yaw) * along),
+          wq, one,
+        )
+        wheels.setMatrixAt(i * 2 + k, m)
+      }
+    })
+    frames.computeBoundingSphere(); wheels.computeBoundingSphere()
+    scene.add(frames, wheels)
+  }
+
+  // ---- wheelie bins tucked against the buildings
+  const binGroups = kerbSlots.filter((_, i) => i % 9 === 6)
+  if (binGroups.length) {
+    const bodyGeo = new THREE.BoxGeometry(0.62, 0.95, 0.55)
+    bodyGeo.translate(0, 0.5, 0)
+    const lidGeo = new THREE.BoxGeometry(0.66, 0.09, 0.6)
+    lidGeo.translate(0, 1.0, 0)
+    const perGroup = 3
+    const bodies = new THREE.InstancedMesh(bodyGeo, new THREE.MeshStandardMaterial({
+      color: 0xffffff, roughness: 0.7, envMapIntensity: 0.6,
+    }), binGroups.length * perGroup)
+    const lids = new THREE.InstancedMesh(lidGeo, new THREE.MeshStandardMaterial({
+      color: 0xffffff, roughness: 0.7,
+    }), binGroups.length * perGroup)
+    bodies.castShadow = true
+    // German kerbside separation: black, blue, brown, yellow
+    const BIN_COLORS = [0x2b2b2e, 0x1f4e8c, 0x6b4423, 0xd8b400]
+    const col = new THREE.Color()
+    let bi = 0
+    binGroups.forEach(s => {
+      const yaw = Math.atan2(s.toRoad.x, s.toRoad.z) + Math.PI / 2
+      const along = { x: Math.cos(yaw), z: -Math.sin(yaw) }
+      for (let k = 0; k < perGroup; k++) {
+        // pushed to the building side of the pavement, not the kerb
+        const bx = s.x - s.toRoad.x * 2.2 + along.x * (k - 1) * 0.72
+        const bz = s.z - s.toRoad.z * 2.2 + along.z * (k - 1) * 0.72
+        place(bodies, bi, bx, 0, bz, yaw)
+        place(lids, bi, bx, 0, bz, yaw)
+        col.setHex(BIN_COLORS[(bi + k) % BIN_COLORS.length])
+        bodies.setColorAt(bi, col)
+        lids.setColorAt(bi, col)
+        bi++
+      }
+    })
+    bodies.computeBoundingSphere(); lids.computeBoundingSphere()
+    scene.add(bodies, lids)
+  }
+
   // ---- U-Bahn entrances: balustrade, stairwell and the blue U
   const ubahnSlots: Slot[] = []
   const seenDistrictRow = new Set<number>()
@@ -354,11 +508,11 @@ export function buildStreetProps(scene: THREE.Scene, layout: CityLayout, metrics
     }
   }
   if (mastSlots.length) {
-    const mast = new THREE.CylinderGeometry(0.09, 0.13, 7.0, 8)
-    mast.translate(0, 3.5, 0)
+    const mast = new THREE.CylinderGeometry(0.09, 0.13, 6.4, 8)
+    mast.translate(0, 3.2, 0)
     const armLen = 3.4
     const arm = new THREE.BoxGeometry(0.09, 0.09, armLen)
-    arm.translate(0, 6.4, armLen / 2)
+    arm.translate(0, 5.9, armLen / 2)
     const geo = mergeGeometries([mast, arm], false)!
     mast.dispose(); arm.dispose()
     const mesh = new THREE.InstancedMesh(geo, new THREE.MeshStandardMaterial({
@@ -398,7 +552,7 @@ export function buildStreetProps(scene: THREE.Scene, layout: CityLayout, metrics
       }), wires.length)
       const wm = new THREE.Matrix4()
       wires.forEach((w, i) => {
-        wm.makeScale(w.len, 1, 1).setPosition(w.x, 6.3, w.z)
+        wm.makeScale(w.len, 1, 1).setPosition(w.x, CATENARY_Y, w.z)
         wireMesh.setMatrixAt(i, wm)
       })
       wireMesh.computeBoundingSphere()
@@ -407,6 +561,64 @@ export function buildStreetProps(scene: THREE.Scene, layout: CityLayout, metrics
   }
 
   return { colliders }
+}
+
+let hSignTex: THREE.CanvasTexture | null = null
+
+/** Green H on yellow — the German bus stop sign. */
+function hSignTexture(): THREE.CanvasTexture {
+  if (hSignTex) return hSignTex
+  const c = document.createElement('canvas')
+  c.width = 128
+  c.height = 128
+  const g = c.getContext('2d')!
+  g.fillStyle = '#f5c518'
+  g.fillRect(0, 0, 128, 128)
+  g.strokeStyle = '#1f6b3a'
+  g.lineWidth = 7
+  g.beginPath(); g.arc(64, 64, 52, 0, Math.PI * 2); g.stroke()
+  g.fillStyle = '#1f6b3a'
+  g.font = 'bold 74px Helvetica, Arial, sans-serif'
+  g.textAlign = 'center'
+  g.textBaseline = 'middle'
+  g.fillText('H', 64, 68)
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  hSignTex = tex
+  return tex
+}
+
+let timetableTex: THREE.CanvasTexture | null = null
+
+/** Backlit timetable case: a line header and rows of departures. */
+function timetableTexture(): THREE.CanvasTexture {
+  if (timetableTex) return timetableTex
+  const c = document.createElement('canvas')
+  c.width = 128
+  c.height = 176
+  const g = c.getContext('2d')!
+  g.fillStyle = '#f0ece2'
+  g.fillRect(0, 0, 128, 176)
+  g.fillStyle = '#c8102e'
+  g.fillRect(0, 0, 128, 26)
+  g.fillStyle = '#ffffff'
+  g.font = 'bold 15px monospace'
+  g.textAlign = 'left'
+  g.fillText('M10  BVG', 8, 18)
+  g.fillStyle = '#3a3a3a'
+  g.font = '11px monospace'
+  const rng = mulberry32(77)
+  for (let i = 0; i < 11; i++) {
+    const y = 42 + i * 12
+    g.fillText(String(5 + i).padStart(2, '0'), 8, y)
+    let s = ''
+    for (let k = 0; k < 4; k++) s += String(Math.floor(rng() * 60)).padStart(2, '0') + ' '
+    g.fillText(s, 32, y)
+  }
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  timetableTex = tex
+  return tex
 }
 
 let uSignTex: THREE.CanvasTexture | null = null

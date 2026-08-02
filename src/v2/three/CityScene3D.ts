@@ -16,7 +16,7 @@ import { AmbientLife } from './ambient'
 import { buildStreetProps } from './props'
 import {
   facadeTexture, dimsFor, ownedBadgeTexture, contactShadowTexture, gableGeometry,
-  trimGeometry, trimColor, scaffoldGeometry, neonSignTexture,
+  trimGeometry, trimColor, scaffoldGeometry, neonSignTexture, siteFenceGeometry,
 } from './facade'
 import type { BuildingDims, Lot, Face } from './facade'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
@@ -704,6 +704,7 @@ export class CityScene3D {
       // ground floors get an illuminated Spaeti sign.
       const scaffolded = batch.spots.filter(sp => hashTile(sp.tile) < 0.07)
       let scaffold: THREE.InstancedMesh | null = null
+      let fence: THREE.InstancedMesh | null = null
       if (scaffolded.length) {
         scaffold = new THREE.InstancedMesh(
           scaffoldGeometry(dims.w, dims.d, dims.bodyH),
@@ -712,6 +713,13 @@ export class CityScene3D {
         )
         scaffold.castShadow = true
         scaffold.userData.filler = true
+        fence = new THREE.InstancedMesh(
+          siteFenceGeometry(dims.w, dims.d),
+          CityScene3D.fenceMaterial(),
+          scaffolded.length,
+        )
+        fence.castShadow = true
+        fence.userData.filler = true
       }
       let neon: THREE.InstancedMesh | null = null
       if (style.kind === 'shop') {
@@ -743,7 +751,9 @@ export class CityScene3D {
         }
         if (scaffold && hashTile(sp.tile) < 0.07) {
           m.makeRotationY(sp.yaw).setPosition(cx, 0, cz)
-          scaffold.setMatrixAt(scaffoldIdx++, m)
+          scaffold.setMatrixAt(scaffoldIdx, m)
+          fence?.setMatrixAt(scaffoldIdx, m)
+          scaffoldIdx++
         }
         if (neon) {
           // hung above the shopfront, standing proud of the facade
@@ -778,6 +788,7 @@ export class CityScene3D {
       this.fillerRoot.add(body)
       if (trim) { trim.computeBoundingSphere(); this.fillerRoot.add(trim) }
       if (scaffold) { scaffold.computeBoundingSphere(); this.fillerRoot.add(scaffold) }
+      if (fence) { fence.computeBoundingSphere(); this.fillerRoot.add(fence) }
       if (neon) { neon.computeBoundingSphere(); this.fillerRoot.add(neon) }
       if (blobs) { blobs.computeBoundingSphere(); this.fillerRoot.add(blobs) }
       for (const rp of roofPieces) {
@@ -1196,6 +1207,16 @@ export class CityScene3D {
     )
     mesh.castShadow = true
     group.add(mesh)
+  }
+
+  private static fenceMat: THREE.MeshStandardMaterial | null = null
+  static fenceMaterial(): THREE.MeshStandardMaterial {
+    if (!this.fenceMat) {
+      this.fenceMat = new THREE.MeshStandardMaterial({
+        color: 0x9aa2a8, roughness: 0.45, metalness: 0.7, envMapIntensity: 1.0,
+      })
+    }
+    return this.fenceMat
   }
 
   private static scaffoldMat: THREE.MeshStandardMaterial | null = null

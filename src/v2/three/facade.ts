@@ -571,6 +571,38 @@ export function scaffoldGeometry(w: number, d: number, h: number): THREE.BufferG
   return merged
 }
 
+/** Bauzaun: mesh panels on feet, fencing off the street side of a site. */
+export function siteFenceGeometry(w: number, d: number): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = []
+  const box = (bw: number, bh: number, bd: number, x: number, y: number, z: number) => {
+    const g = new THREE.BoxGeometry(bw, bh, bd)
+    g.translate(x, y, z)
+    parts.push(g)
+  }
+  const zF = d / 2 + 1.35
+  const span = w + 2.4
+  const panels = Math.max(2, Math.round(span / 3.4))
+  const panelW = span / panels
+  for (let i = 0; i < panels; i++) {
+    const cx = -span / 2 + panelW * (i + 0.5)
+    // frame
+    box(panelW - 0.08, 0.07, 0.06, cx, 1.98, zF)
+    box(panelW - 0.08, 0.07, 0.06, cx, 0.32, zF)
+    box(0.07, 1.75, 0.06, cx - panelW / 2 + 0.06, 1.15, zF)
+    box(0.07, 1.75, 0.06, cx + panelW / 2 - 0.06, 1.15, zF)
+    // mesh infill, suggested with a few verticals
+    for (let k = 1; k < 5; k++) {
+      box(0.035, 1.6, 0.03, cx - panelW / 2 + (panelW * k) / 5, 1.15, zF)
+    }
+    box(0.035, 1.6, 0.03, cx, 1.15, zF)
+    // concrete foot
+    box(0.7, 0.16, 0.34, cx, 0.08, zF)
+  }
+  const merged = mergeGeometries(parts, false)!
+  for (const p of parts) p.dispose()
+  return merged
+}
+
 /** Illuminated Spaeti / Kiosk sign for shop ground floors. */
 export function neonSignTexture(seed: number): THREE.CanvasTexture {
   const key = seed % NEON_WORDS.length

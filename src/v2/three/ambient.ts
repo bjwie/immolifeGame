@@ -8,6 +8,8 @@ import type { CityLayout, TileKind } from '../world/cityLayout'
 import { mulberry32 } from '../world/cityLayout'
 import type { Metrics } from './metrics'
 import { tileAtWorld, tileRect } from './metrics'
+import { isTramRow, isTramColumn } from './ground'
+import { CATENARY_Y } from './props'
 
 const CAR_COLORS = [0xc0392b, 0x2980b9, 0xf1c40f, 0xe8e8e8, 0x2c3e50, 0x27ae60, 0x8e44ad, 0xd35400, 0x95a5a6, 0x16a085]
 const CLOTHES = [0xc0392b, 0x2980b9, 0xe67e22, 0x27ae60, 0x8e44ad, 0x34495e, 0xd35400, 0x7f8c8d, 0xf1c40f, 0x16a085]
@@ -30,6 +32,68 @@ interface Ped {
 
 const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]] as const
 
+interface Tram {
+  group: THREE.Group
+  x: number
+  dir: 1 | -1
+  speed: number
+  minX: number
+  maxX: number
+  /** seconds still to dwell at the end of the line */
+  dwell: number
+}
+
+/** One BVG-yellow articulated tram: three segments, glazing band, skirt and a
+ *  pantograph reaching for the contact wire. */
+function buildTram(): THREE.Group {
+  const group = new THREE.Group()
+  const yellow = new THREE.MeshStandardMaterial({ color: 0xf2c200, roughness: 0.42, metalness: 0.25, envMapIntensity: 1.0 })
+  const glass = new THREE.MeshStandardMaterial({ color: 0x2b3b47, roughness: 0.06, metalness: 0.3, envMapIntensity: 2.2 })
+  const dark = new THREE.MeshStandardMaterial({ color: 0x23272b, roughness: 0.7, metalness: 0.3 })
+  const SEG_L = 7.5, GAP = 0.7
+  for (const zc of [-(SEG_L + GAP), 0, SEG_L + GAP]) {
+    const body = new THREE.Mesh(new THREE.BoxGeometry(2.4, 2.2, SEG_L), yellow)
+    body.position.set(0, 2.1, zc)
+    body.castShadow = true
+    group.add(body)
+    const band = new THREE.Mesh(new THREE.BoxGeometry(2.46, 0.95, SEG_L - 0.7), glass)
+    band.position.set(0, 2.55, zc)
+    group.add(band)
+    const skirt = new THREE.Mesh(new THREE.BoxGeometry(2.26, 0.62, SEG_L - 0.2), dark)
+    skirt.position.set(0, 0.72, zc)
+    group.add(skirt)
+    // articulation bellows between segments
+    if (zc < SEG_L) {
+      const bellows = new THREE.Mesh(new THREE.BoxGeometry(2.15, 2.0, GAP + 0.2), dark)
+      bellows.position.set(0, 2.1, zc + (SEG_L + GAP) / 2)
+      group.add(bellows)
+    }
+  }
+  // rounded-ish nose caps
+  for (const [zc, sign] of [[-(SEG_L + GAP) - SEG_L / 2, -1], [(SEG_L + GAP) + SEG_L / 2, 1]] as const) {
+    const nose = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.9, 0.6), yellow)
+    nose.position.set(0, 2.0, zc + sign * 0.3)
+    group.add(nose)
+    const screen = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.9, 0.1), glass)
+    screen.position.set(0, 2.6, zc + sign * 0.62)
+    group.add(screen)
+  }
+  // pantograph: two arms folding up to the wire
+  const roofY = 3.2
+  const armMat = new THREE.MeshStandardMaterial({ color: 0x30363c, roughness: 0.45, metalness: 0.7 })
+  const armLen = CATENARY_Y - roofY
+  for (const s of [-1, 1]) {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.07, armLen, 0.07), armMat)
+    arm.position.set(s * 0.5, roofY + armLen / 2, 0)
+    arm.rotation.x = s * 0.18
+    group.add(arm)
+  }
+  const shoe = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.07, 0.14), armMat)
+  shoe.position.set(0, CATENARY_Y - 0.05, 0)
+  group.add(shoe)
+  return group
+}
+
 export class AmbientLife {
   private cars: Car[] = []
   private peds: Ped[] = []
@@ -38,6 +102,7 @@ export class AmbientLife {
   private carWheels: THREE.InstancedMesh
   private pedBody: THREE.InstancedMesh
   private pedHead: THREE.InstancedMesh
+  private trams: Tram[] = []
   private layout: CityLayout
   private metrics: Metrics
   private worldW: number
@@ -122,6 +187,29 @@ export class AmbientLife {
     this.peds.forEach((_, i) => this.pedBody.setColorAt(i, new THREE.Color(CLOTHES[i % CLOTHES.length])))
     scene.add(this.pedBody, this.pedHead)
 
+    // --- one tram shuttling along each tracked avenue
+    let firstTramCol = -1, lastTramCol = -1
+    for (let x = 0; x < layout.tilesW; x++) {
+      if (!isTramColumn(x)) continue
+      if (firstTramCol < 0) firstTramCol = x
+      lastTramCol = x
+    }
+    if (firstTramCol >= 0) {
+      const minX = metrics.colX[firstTramCol] + 14
+      const maxX = metrics.colX[lastTramCol + 1] - 14
+      for (let ty = 0; ty < layout.tilesH; ty++) {
+        if (!isTramRow(layout, ty)) continue
+        const r = tileRect(metrics, 0, ty)
+        const group = buildTram()
+        group.position.set(minX + rng() * (maxX - minX), 0, r.z + r.d / 2)
+        scene.add(group)
+        this.trams.push({
+          group, x: group.position.x, dir: rng() > 0.5 ? 1 : -1,
+          speed: 7 + rng() * 4, minX, maxX, dwell: 0,
+        })
+      }
+    }
+
     this.update(0)
   }
 
@@ -203,5 +291,15 @@ export class AmbientLife {
     }
     this.pedBody.instanceMatrix.needsUpdate = true
     this.pedHead.instanceMatrix.needsUpdate = true
+
+    // trams shuttle up and down their line, pausing at each terminus
+    for (const t of this.trams) {
+      if (t.dwell > 0) { t.dwell -= dt; continue }
+      t.x += t.dir * t.speed * dt
+      if (t.x >= t.maxX) { t.x = t.maxX; t.dir = -1; t.dwell = 3 }
+      else if (t.x <= t.minX) { t.x = t.minX; t.dir = 1; t.dwell = 3 }
+      t.group.position.x = t.x
+      t.group.rotation.y = t.dir > 0 ? Math.PI / 2 : -Math.PI / 2
+    }
   }
 }
