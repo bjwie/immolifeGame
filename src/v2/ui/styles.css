@@ -1165,6 +1165,60 @@ canvas#nw-chart { background: var(--bg-2); border-radius: 6px; }
 .marker-chip.vacant { background: #c02040; color: #fff; border: 1px solid #fff; }
 .marker-chip.nomad { background: var(--gold); color: #2a2200; border: 1px solid #6b3b00; }
 
+/* =========== Besichtigung (interior tour) =========== */
+
+#tour-panel {
+  position: absolute; left: 18px; bottom: 18px;
+  width: min(360px, 44vw);
+  background: rgba(13, 20, 29, 0.94);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  z-index: 6200;
+  box-shadow: 0 10px 34px rgba(0,0,0,0.55);
+}
+#tour-panel .tour-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+}
+#tour-panel .tour-title { font-weight: 800; font-size: 15px; }
+#tour-panel .tour-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+#tour-panel .tour-sub span { color: var(--text); font-weight: 700; }
+#tour-panel .tour-head button { padding: 7px 10px; font-size: 12px; white-space: nowrap; }
+#tour-panel .tour-defects {
+  list-style: none; margin: 10px 0 0; padding: 0;
+  max-height: 132px; overflow-y: auto;
+}
+#tour-panel .tour-defects li {
+  display: flex; justify-content: space-between; gap: 10px;
+  padding: 5px 8px; border-radius: 6px; font-size: 12px;
+  border-left: 3px solid var(--muted); margin-bottom: 4px;
+  background: rgba(255,255,255,0.03);
+}
+#tour-panel .tour-defects li.bad { border-left-color: var(--bad); }
+#tour-panel .tour-defects li.warn { border-left-color: var(--gold); }
+#tour-panel .tour-defects li.ok { border-left-color: var(--good); }
+#tour-panel .tour-defects li span { color: var(--muted); font-variant-numeric: tabular-nums; }
+#tour-panel .tour-total { margin-top: 8px; font-size: 13px; }
+#tour-panel .tour-total b { color: var(--gold); }
+#tour-panel .tour-hint { margin-top: 8px; color: var(--muted); font-size: 11px; }
+
+/* Defect marker floating at the damage itself (CSS2D) */
+.defect-marker {
+  width: 190px;
+  background: rgba(13, 20, 29, 0.92);
+  border: 1px solid var(--gold);
+  border-left-width: 3px;
+  border-radius: 7px;
+  padding: 6px 9px;
+  font-size: 11px; color: var(--text);
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+}
+.defect-marker.bad { border-color: var(--bad); }
+.defect-marker b { display: block; font-size: 12px; margin-bottom: 2px; }
+.defect-marker span { display: block; color: var(--muted); line-height: 1.35; }
+.defect-marker em { display: block; margin-top: 3px; color: var(--gold); font-style: normal; font-weight: 700; }
+
 /* District banner floating over the district centre (CSS2D) */
 .district-banner-3d {
   --banner-color: #444;

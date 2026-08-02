@@ -56,6 +56,9 @@ export class DealSheet {
   setRentalModal(rm: RentalModal) { this.rentalModal = rm }
   setRenovationModal(rm: RenovationModal) { this.renovationModal = rm }
   setWegModal(wm: WEGModal) { this.wegModal = wm }
+  /** Wired by the scene: walk the player through the flat and its cellar. */
+  setTourHandler(fn: (p: Property) => void) { this.onTour = fn }
+  private onTour: ((p: Property) => void) | null = null
   private rentalModal: RentalModal | null = null
   private renovationModal: RenovationModal | null = null
   private wegModal: WEGModal | null = null
@@ -196,8 +199,13 @@ export class DealSheet {
         <input id="ltv-slider" type="range" min="20" max="85" step="5" value="${this.ltvSlider?.value ?? '70'}" ${this.bankOverride ? 'disabled' : ''}>
         <div id="financing-summary"></div>
       </div>
+      <button id="ds-tour" class="ghost big">🔎 Besichtigung — Wohnung ansehen</button>
       <button id="ds-buy" class="primary big">${this.selectedBankId ? 'Mit Hypothek kaufen' : 'Bar kaufen'} (${formatEuro(effectivePrice)})</button>
     `
+    this.root.querySelector('#ds-tour')?.addEventListener('click', () => {
+      const p = this.current
+      if (p && this.onTour) { this.close(); this.onTour(p) }
+    })
     this.ltvSlider = this.root.querySelector('#ltv-slider') as HTMLInputElement | null
     this.ltvSlider?.addEventListener('input', () => this.refreshFinancing())
     this.refreshFinancing()
@@ -643,6 +651,7 @@ export class DealSheet {
         ${renoHtml}
         ${umlageHtml}
         <div class="quick-actions">
+          <button class="ghost" data-tour>🔎 Besichtigen</button>
           ${vacantUnits > 0 ? `<button class="ghost" data-tab-jump="tenant">👥 Mieter suchen</button>` : ''}
           ${!reno ? `<button class="ghost" data-tab-jump="reno">🔨 Renovieren</button>` : ''}
           <button class="ghost" data-tab-jump="finance">💰 Finanzen / Verkaufen</button>
@@ -676,6 +685,11 @@ export class DealSheet {
         ${tabContentHtml}
       </div>
     `
+
+    this.root.querySelector('[data-tour]')?.addEventListener('click', () => {
+      const p = this.current
+      if (p && this.onTour) { this.close(); this.onTour(p) }
+    })
 
     // Tab-switching
     this.root.querySelectorAll<HTMLElement>('[data-tab]').forEach(b => {

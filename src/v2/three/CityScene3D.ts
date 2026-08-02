@@ -14,6 +14,7 @@ import type { BuildingKind } from '../world/buildingStyle'
 import { paintGround, paintLockOverlay } from './ground'
 import { AmbientLife } from './ambient'
 import { buildStreetProps } from './props'
+import { InteriorTour } from './InteriorTour'
 import {
   facadeTexture, dimsFor, ownedBadgeTexture, contactShadowTexture, gableGeometry,
   trimGeometry, trimColor, scaffoldGeometry, neonSignTexture, siteFenceGeometry,
@@ -151,6 +152,10 @@ export class CityScene3D {
   private fovTarget = 72
   private ambient!: AmbientLife
   private clouds: Array<{ sprite: THREE.Sprite; speed: number }> = []
+  /** Besichtigung: while set, we render the flat instead of the street. */
+  private tour: InteriorTour | null = null
+  private tourReturn: { x: number; z: number; yaw: number; pitch: number; speed: ReturnType<Engine['getSpeed']> } | null = null
+  private tourPanel: HTMLDivElement | null = null
 
   constructor(container: HTMLElement) {
     this.layout = generateCityLayout(48, 4242)
@@ -276,6 +281,7 @@ export class CityScene3D {
     this.deal.setRentalModal(rentalModal)
     this.deal.setRenovationModal(renovationModal)
     this.deal.setWegModal(wegModal)
+    this.deal.setTourHandler(p => this.openTour(p))
     this.menu = new MenuModal(this.engine, overlay, () => this.refreshProperties())
 
     this.hoverDiv = document.createElement('div')
@@ -326,6 +332,66 @@ export class CityScene3D {
     }, 400)
 
     this.loop()
+  }
+
+  // ------------------------------------------------------ Besichtigung
+
+  /** Walk into the flat. The street stays exactly as it was; we just render a
+   *  different scene and swap which colliders the player bumps into. */
+  openTour(p: Property) {
+    if (this.tour) this.closeTour()
+    this.tour = new InteriorTour(p)
+    this.tourReturn = { x: this.pos.x, z: this.pos.z, yaw: this.yaw, pitch: this.pitch, speed: this.engine.getSpeed() }
+    this.engine.setSpeed(0)          // the market can wait while you view
+    this.pos.set(this.tour.spawn.x, EYE, this.tour.spawn.z)
+    this.yaw = this.tour.spawn.yaw
+    this.pitch = 0
+    this.hideTooltip()
+    this.hoveredPropertyId = null
+    this.mountTourPanel(p)
+  }
+
+  closeTour() {
+    if (!this.tour) return
+    this.tour.dispose()
+    this.tour = null
+    this.tourPanel?.remove()
+    this.tourPanel = null
+    const r = this.tourReturn
+    if (r) {
+      this.pos.set(r.x, EYE, r.z)
+      this.yaw = r.yaw
+      this.pitch = r.pitch
+      this.engine.setSpeed(r.speed)
+    }
+    this.tourReturn = null
+  }
+
+  private mountTourPanel(p: Property) {
+    const overlay = (window as any).__overlayRoot as HTMLElement
+    const el = document.createElement('div')
+    el.id = 'tour-panel'
+    const t = this.tour!
+    const total = t.defects.reduce((a, d) => a + d.cost, 0)
+    const rows = t.defects.length
+      ? t.defects.map(d => `<li class="${d.severity}"><b>${escapeHtml(d.label)}</b><span>${formatEuro(d.cost)}</span></li>`).join('')
+      : `<li class="ok"><b>Keine wesentlichen Maengel gefunden</b></li>`
+    el.innerHTML = `
+      <div class="tour-head">
+        <div>
+          <div class="tour-title">🔎 Besichtigung — ${escapeHtml(this.engine.nameFor(p))}</div>
+          <div class="tour-sub">Zustand ${Math.round(p.condition)}% · <span id="tour-room">Flur</span></div>
+        </div>
+        <button class="primary" data-tour-exit>Besichtigung beenden</button>
+      </div>
+      <ul class="tour-defects">${rows}</ul>
+      ${rows && t.defects.length ? `<div class="tour-total">Geschaetzter Instandsetzungsbedarf: <b>${formatEuro(total)}</b></div>` : ''}
+      <div class="tour-hint">WASD laufen · Maus ziehen zum Umsehen · Gang nach Osten fuehrt in den Keller</div>
+    `
+    el.style.pointerEvents = 'auto'
+    el.querySelector('[data-tour-exit]')?.addEventListener('click', () => this.closeTour())
+    overlay.appendChild(el)
+    this.tourPanel = el
   }
 
   /** Sky/ground gradient prefiltered into an irradiance map — gives every
@@ -1343,8 +1409,10 @@ export class CityScene3D {
       if (e.code === 'Escape') {
         // ModalManager handles ESC when modals are open (capture phase).
         // While pointer-locked the browser consumes ESC for the unlock, so this
-        // only fires unlocked: open the main menu — parity with the 2D scene.
-        if (ModalManager.get().size() === 0 && !this.locked) this.menu.open()
+        // only fires unlocked: leave the flat, else open the main menu.
+        if (ModalManager.get().size() > 0) return
+        if (this.tour) this.closeTour()
+        else if (!this.locked) this.menu.open()
       }
     })
     document.addEventListener('keyup', (e) => this.keys.delete(e.code))
@@ -1364,7 +1432,7 @@ export class CityScene3D {
   }
 
   private handleHit(hit: { property?: string; lockedDistrict?: DistrictId; filler?: boolean } | null) {
-    if (!hit) return
+    if (!hit || this.tour) return
     if (hit.property) {
       const handle = this.byPropertyId.get(hit.property)
       if (!handle) return
@@ -1518,6 +1586,12 @@ export class CityScene3D {
   }
 
   private blockedAt(x: number, z: number): 'building' | 'locked' | null {
+    if (this.tour) {
+      for (const c of this.tour.colliders) {
+        if (x > c.minX - PLAYER_RADIUS && x < c.maxX + PLAYER_RADIUS && z > c.minZ - PLAYER_RADIUS && z < c.maxZ + PLAYER_RADIUS) return 'building'
+      }
+      return null
+    }
     for (const c of this.colliders) {
       if (x > c.minX - PLAYER_RADIUS && x < c.maxX + PLAYER_RADIUS && z > c.minZ - PLAYER_RADIUS && z < c.maxZ + PLAYER_RADIUS) return 'building'
     }
@@ -1546,8 +1620,6 @@ export class CityScene3D {
     const dx = (dirX / len) * speed * dt
     const dz = (dirZ / len) * speed * dt
 
-    const worldW = this.metrics.width
-    const worldH = this.metrics.depth
     // axis-separated slide
     let nx = this.pos.x + dx
     let blocked = this.blockedAt(nx, this.pos.z)
@@ -1555,6 +1627,13 @@ export class CityScene3D {
     let nz = this.pos.z + dz
     blocked = this.blockedAt(nx, nz)
     if (blocked) { if (blocked === 'locked') this.bumpLocked(nx, nz); nz = this.pos.z }
+    if (this.tour) {
+      this.pos.x = nx
+      this.pos.z = nz
+      return true
+    }
+    const worldW = this.metrics.width
+    const worldH = this.metrics.depth
     this.pos.x = Math.max(1, Math.min(worldW - 1, nx))
     this.pos.z = Math.max(1, Math.min(worldH - 1, nz))
     return true
@@ -1567,8 +1646,8 @@ export class CityScene3D {
 
   private updateHudChrome() {
     const modalOpen = ModalManager.get().size() > 0
-    this.crosshair.style.display = this.locked && !modalOpen ? 'block' : 'none'
-    this.hint.style.display = !this.locked && !modalOpen ? 'block' : 'none'
+    this.crosshair.style.display = this.locked && !modalOpen && !this.tour ? 'block' : 'none'
+    this.hint.style.display = !this.locked && !modalOpen && !this.tour ? 'block' : 'none'
     if (this.fallbackLook) {
       this.hint.innerHTML = `🖱 <b>Ziehen</b>: Umsehen · <b>Klick auf Gebaeude</b>: Details · <b>WASD</b> Laufen · <b>Shift</b> Sprint · <b>Leertaste</b> Pause · <b>ESC</b> Menue`
     }
@@ -1616,9 +1695,10 @@ export class CityScene3D {
       this.camera.updateProjectionMatrix()
     }
 
-    // camera from player state
+    // camera from player state — indoors the floor steps down to the cellar
     this.camera.position.copy(this.pos)
-    this.camera.position.y = EYE + Math.sin(this.bobPhase) * 0.055 * this.bobAmount
+    const floorY = this.tour ? this.tour.floorAt(this.pos.x) : 0
+    this.camera.position.y = floorY + EYE + Math.sin(this.bobPhase) * 0.055 * this.bobAmount
     this.camera.rotation.set(0, 0, 0)
     this.camera.rotateY(this.yaw)
     this.camera.rotateX(this.pitch)
@@ -1630,7 +1710,7 @@ export class CityScene3D {
     // aim raycast: tooltip + highlight. Pointer-locked -> crosshair centre;
     // fallback mode -> hover under the visible cursor (like the 2D scene).
     const modalOpen = ModalManager.get().size() > 0
-    const canAim = !modalOpen && (this.locked || (this.fallbackLook && !this.drag?.dragged))
+    const canAim = !modalOpen && !this.tour && (this.locked || (this.fallbackLook && !this.drag?.dragged))
     if (canAim) {
       const hit = this.locked
         ? this.aimcast()
@@ -1655,8 +1735,17 @@ export class CityScene3D {
     this.updateHudChrome()
     this.fadeLabelsByDistance()
 
-    this.renderer.render(this.scene, this.camera)
-    this.css2d.render(this.scene, this.camera)
+    if (this.tour) {
+      const room = this.tour.roomAt(this.pos.x, this.pos.z)
+      const label = this.tourPanel?.querySelector('#tour-room')
+      if (label && room) label.textContent = room
+      this.tour.updateLabels(this.pos.x, this.pos.z)
+      this.renderer.render(this.tour.scene, this.camera)
+      this.css2d.render(this.tour.scene, this.camera)
+    } else {
+      this.renderer.render(this.scene, this.camera)
+      this.css2d.render(this.scene, this.camera)
+    }
   }
 
   /** Distance-fade CSS2D labels so far-away banners/tags don't pile up on the
@@ -1677,6 +1766,7 @@ export class CityScene3D {
       el.style.opacity = String(o)
       el.style.visibility = o <= 0.02 ? 'hidden' : 'visible'
     }
+    if (this.tour) return   // interior labels are placed by the tour itself
     for (const b of this.banners.values()) fade(b.el, b.pos, 150, 320, null)
     const world = new THREE.Vector3()
     for (const h of this.byPropertyId.values()) {
