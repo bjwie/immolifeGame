@@ -119,6 +119,26 @@ export class DealSheet {
     else this.renderBuyActions(p)
   }
 
+  /** Notes from the Besichtigung, and the leverage they buy. */
+  private viewingHtml(p: Property): string {
+    const v = this.engine.viewingFor(p.id)
+    if (!v) return ''
+    const missed = v.total - v.found
+    const lever = Math.min(Math.round(v.cost * 0.6), Math.round(p.price * 0.12))
+    const canClaim = !v.discountTaken && v.cost > 0 && lever >= 100
+    return `
+      <div class="viewing-box">
+        <div class="vb-head">📋 Besichtigungsprotokoll${v.surveyor ? ' · mit Gutachter' : ''}</div>
+        <div class="vb-line">${v.found} von ${v.total} Maengeln dokumentiert${missed > 0 ? ` · ${missed} nicht erfasst` : ' · vollstaendig'}</div>
+        <div class="vb-line">Dokumentierter Instandsetzungsbedarf: <b>${formatEuro(v.cost)}</b></div>
+        ${v.discountTaken
+          ? `<div class="vb-done">✓ Preisnachlass bereits durchgesetzt</div>`
+          : canClaim
+            ? `<button id="ds-claim" class="ghost">Preisnachlass fordern (−${formatEuro(lever)})</button>`
+            : `<div class="vb-line micro">Zu wenig dokumentiert fuer einen Nachlass.</div>`}
+      </div>`
+  }
+
   /** maintenance helper (mirror of Engine.maintenanceCost — kept private there) */
   private _maint(p: Property): number {
     const baseline = p.baseRent * 0.12
@@ -199,12 +219,20 @@ export class DealSheet {
         <input id="ltv-slider" type="range" min="20" max="85" step="5" value="${this.ltvSlider?.value ?? '70'}" ${this.bankOverride ? 'disabled' : ''}>
         <div id="financing-summary"></div>
       </div>
+      ${this.viewingHtml(p)}
       <button id="ds-tour" class="ghost big">🔎 Besichtigung — Wohnung ansehen</button>
       <button id="ds-buy" class="primary big">${this.selectedBankId ? 'Mit Hypothek kaufen' : 'Bar kaufen'} (${formatEuro(effectivePrice)})</button>
     `
     this.root.querySelector('#ds-tour')?.addEventListener('click', () => {
       const p = this.current
       if (p && this.onTour) { this.close(); this.onTour(p) }
+    })
+    this.root.querySelector('#ds-claim')?.addEventListener('click', () => {
+      const p = this.current
+      if (!p) return
+      const res = this.engine.claimViewingDiscount(p)
+      if (!res.ok) (this.engine as any).emit?.('toast', { kind: 'error', text: res.reason ?? 'Nicht moeglich' })
+      this.render()
     })
     this.ltvSlider = this.root.querySelector('#ltv-slider') as HTMLInputElement | null
     this.ltvSlider?.addEventListener('input', () => this.refreshFinancing())

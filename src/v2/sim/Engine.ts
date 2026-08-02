@@ -101,7 +101,61 @@ export class Engine {
       rngSeed: Math.floor(Math.random() * 1_000_000),
       unlockedDistricts: this.layout.districts.filter(d => !d.locked).map(d => d.id),
       city: generateCityBuildings(this.layout),
+      viewings: {},
     }
+  }
+
+  // ============ BESICHTIGUNG ============
+
+  viewingFor(propertyId: string) {
+    return this.state.viewings?.[propertyId]
+  }
+
+  /** Store what a viewing turned up. Overwrites an earlier visit only when the
+   *  new one documented more, so a sloppy second look can't erase good notes. */
+  recordViewing(propertyId: string, found: number, total: number, cost: number, surveyor: boolean) {
+    if (!this.state.viewings) this.state.viewings = {}
+    const prev = this.state.viewings[propertyId]
+    if (prev && prev.cost >= cost) return
+    this.state.viewings[propertyId] = {
+      propertyId, found, total, cost,
+      month: this.state.time.total,
+      discountTaken: prev?.discountTaken ?? false,
+      surveyor: surveyor || (prev?.surveyor ?? false),
+    }
+    this.emit('viewing', { propertyId })
+  }
+
+  /** Hire a surveyor during a viewing. Flat fee, scaled a little by the asking
+   *  price — a Gutachter for a villa costs more than for a one-bed. */
+  surveyorFee(p: Property): number {
+    return Math.round(Math.max(450, Math.min(1800, p.price * 0.0035)) / 10) * 10
+  }
+
+  paySurveyor(p: Property): { ok: boolean; reason?: string; fee: number } {
+    const fee = this.surveyorFee(p)
+    if (this.state.player.cash < fee) return { ok: false, reason: 'Nicht genug Bargeld', fee }
+    this.state.player.cash -= fee
+    this.emit('financial', { kind: 'surveyor', amount: -fee })
+    return { ok: true, fee }
+  }
+
+  /** Documented defects are leverage. Once per property, they knock a chunk off
+   *  the asking price — capped so a wreck can't be talked down to nothing. */
+  claimViewingDiscount(p: Property): { ok: boolean; reason?: string; amount: number } {
+    const v = this.viewingFor(p.id)
+    if (!v) return { ok: false, reason: 'Noch nicht besichtigt', amount: 0 }
+    if (v.discountTaken) return { ok: false, reason: 'Nachlass bereits gewaehrt', amount: 0 }
+    if (v.cost <= 0) return { ok: false, reason: 'Keine Maengel dokumentiert', amount: 0 }
+    // a seller concedes roughly 60% of documented cost, never more than 12%
+    const raw = Math.round(v.cost * 0.6)
+    const amount = Math.min(raw, Math.round(p.price * 0.12))
+    if (amount < 100) return { ok: false, reason: 'Zu geringfuegig', amount: 0 }
+    p.price = Math.max(1000, p.price - amount)
+    v.discountTaken = true
+    this.emit('toast', { kind: 'success', text: `Preisnachlass durchgesetzt: ${formatEuro(amount)}` })
+    this.emit('viewing', { propertyId: p.id })
+    return { ok: true, amount }
   }
 
   /** Run the standing city forward one month and tell the renderer which lots
@@ -2301,6 +2355,7 @@ export class Engine {
       if (!Array.isArray(this.state.city) || this.state.city.length === 0) {
         this.state.city = generateCityBuildings(this.layout)
       }
+      if (!this.state.viewings || typeof this.state.viewings !== 'object') this.state.viewings = {}
       this._cityIndex = null
       // sanity defaults
       if (!Array.isArray(this.state.player.netWorthHistory)) this.state.player.netWorthHistory = []

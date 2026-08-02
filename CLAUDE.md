@@ -107,6 +107,15 @@ Party-wall flanks render as blank Brandmauern (`facadeTexture(..., 'firewall', .
 - **Never raycast the scene per frame.** `Raycaster.intersectObjects` walks every instance of ~500 batched `InstancedMesh`es triangle by triangle. Label occlusion did this and cost ~1.4 ms *per visible label* — with a dozen tags on screen the frame budget was gone. It now tests the building `Collider` AABBs by hand (`rayHitsBox`), which is ~0.04 ms for all labels together. The crosshair `aimcast` is fine because it runs once per frame.
 - **Fillers are built once, never rebuilt per market change.** `buildFillers()` covers *every* buildable lot; `syncFillerOccupancy()` then zero-scales the instances of lots the market took over and restores them when a listing disappears. A full rebuild costs ~30–120 ms and used to fire on every `month`/`bought`/`sold`; the incremental sync is ~0.05 ms. Only a district unlock (which changes filler styles) sets `fillerBuilt = false` for a genuine rebuild.
 
+### Besichtigung (interior tour)
+`three/InteriorTour.ts` builds a **separate `THREE.Scene`** per viewing; while inside, the street is not rendered at all. Supporting modules:
+- `three/plan.ts` — four floor-plan topologies picked from the build year (Flurwohnung, Durchgangszimmer, offener Grundriss, Kompakt). Walls are *derived* from the room rectangles: an edge two rooms share becomes an interior wall with a door, an edge nobody touches becomes envelope and can take a window. Add a new archetype there, not in the tour.
+- `three/defects.ts` — the defect catalogue with per-entry condition threshold, probability, surface and cost.
+- `three/seller.ts` — the agent/owner Q&A. The rule that makes it read true: **they never volunteer a defect the player has not found**; a private owner leaks one ~⅓ of the time.
+- `three/kit.ts` — our own parametric furniture; `three/models.ts` lets a `.glb` in `public/assets/v2/furniture/` override any builder by name.
+
+Defects are discovered, not listed: the clue sits in the room, and looking at it from under 3.6 m within ~25° for 0.35 s identifies it. Findings are recorded on the Engine (`recordViewing`) and become leverage — `claimViewingDiscount` knocks 60% of documented cost off the asking price, capped at 12%, once per property. A paid surveyor (`paySurveyor`) reveals half of what was missed.
+
 ### CSS2D labels
 Price tags / chips / district banners are `CSS2DObject`s. Two rules:
 - **Never animate `transform` in CSS on the mounted element** — `CSS2DRenderer` writes `transform` to position it, and a CSS animation silently overrides that, parking every label in the screen corner. Animate an inner element instead (see `.price-tag-3d .ptg-inner`).

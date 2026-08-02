@@ -1165,6 +1165,22 @@ canvas#nw-chart { background: var(--bg-2); border-radius: 6px; }
 .marker-chip.vacant { background: #c02040; color: #fff; border: 1px solid #fff; }
 .marker-chip.nomad { background: var(--gold); color: #2a2200; border: 1px solid #6b3b00; }
 
+/* Viewing notes in the DealSheet */
+.viewing-box {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--gold);
+  border-radius: 8px;
+  padding: 9px 11px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.viewing-box .vb-head { font-weight: 800; margin-bottom: 4px; }
+.viewing-box .vb-line { color: var(--muted); margin: 2px 0; }
+.viewing-box .vb-line b { color: var(--text); }
+.viewing-box .vb-done { color: var(--good); margin-top: 4px; font-weight: 700; }
+.viewing-box button { margin-top: 7px; width: 100%; }
+
 /* =========== Besichtigung (interior tour) =========== */
 
 #tour-panel {
@@ -1212,6 +1228,18 @@ canvas#nw-chart { background: var(--bg-2); border-radius: 6px; }
   font-size: 12px;
 }
 #tour-panel .tour-prompt b { color: var(--gold); }
+#tour-panel .tour-meter {
+  display: flex; align-items: center; gap: 8px; margin-top: 8px;
+  font-size: 11px; color: var(--muted);
+}
+#tour-panel .tm-bar {
+  flex: 1; height: 7px; border-radius: 4px; background: var(--bg-3);
+  overflow: hidden; border: 1px solid var(--line);
+}
+#tour-panel .tm-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .12s linear; }
+#tour-panel .tm-read { min-width: 84px; text-align: right; color: var(--text); }
+#tour-panel #tour-surveyor { margin-top: 8px; width: 100%; }
+#tour-panel #tour-surveyor:disabled { opacity: 0.5; cursor: default; }
 
 /* the agent / owner showing you round */
 #seller-panel {

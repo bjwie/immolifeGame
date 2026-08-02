@@ -556,6 +556,33 @@ export class InteriorTour {
     return found
   }
 
+  /** A paid surveyor spots roughly half of what you missed — the obvious half.
+   *  Returns what he wrote down. */
+  surveyorSweep(): Finding[] {
+    const open = this.findings.filter(f => !f.found)
+    // he starts with the serious ones; that is what you are paying for
+    open.sort((a, b) => (b.def.severity === 'bad' ? 1 : 0) - (a.def.severity === 'bad' ? 1 : 0) || b.cost - a.cost)
+    const take = Math.ceil(open.length / 2)
+    const out = open.slice(0, take)
+    for (const f of out) {
+      f.found = true
+      f.el.style.visibility = 'visible'
+    }
+    return out
+  }
+
+  /** Distance to the closest thing you have not identified yet — drives the
+   *  damp meter, so searching is a skill rather than a sweep of every wall. */
+  nearestUndiscovered(x: number, z: number): number | null {
+    let best: number | null = null
+    for (const f of this.findings) {
+      if (f.found) continue
+      const d = Math.hypot(f.pos.x - x, f.pos.z - z)
+      if (best === null || d < best) best = d
+    }
+    return best
+  }
+
   /** Keep identified labels from cluttering the whole flat. */
   updateLabels(px: number, pz: number) {
     for (const f of this.findings) {

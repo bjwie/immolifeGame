@@ -164,6 +164,8 @@ export class CityScene3D {
   private dialoguePanel: HTMLDivElement | null = null
   private torch: THREE.SpotLight | null = null
   private torchOn = false
+  private meterOn = false
+  private surveyorHired = false
 
   constructor(container: HTMLElement) {
     this.layout = generateCityLayout(48, 4242)
@@ -376,6 +378,11 @@ export class CityScene3D {
     const found = this.tour.findings.filter(f => f.found)
     const missed = this.tour.findings.length - found.length
     const total = found.reduce((a, f) => a + f.cost, 0)
+    // the notes survive the visit — they are what you negotiate with
+    this.engine.recordViewing(
+      this.tour.property.id, found.length, this.tour.findings.length, total, this.surveyorHired,
+    )
+    this.surveyorHired = false
     this.tour.dispose()
     this.tour = null
     this.torch = null
@@ -411,13 +418,34 @@ export class CityScene3D {
         <button class="primary" data-tour-exit>Beenden</button>
       </div>
       <div id="tour-body"></div>
+      <div class="tour-meter" id="tour-meter" style="display:none">
+        <span class="tm-label">Feuchtemessgeraet</span>
+        <span class="tm-bar"><i id="tm-fill"></i></span>
+        <span class="tm-read" id="tm-read">—</span>
+      </div>
       <div class="tour-prompt" id="tour-prompt" style="display:none">Taste <b>E</b> — ${escapeHtml(this.tourDialogue?.name ?? 'Verkaeufer')} ansprechen</div>
-      <div class="tour-hint">Nah rangehen und genau hinschauen identifiziert einen Mangel · <b>F</b> Taschenlampe · Gang nach Osten fuehrt in den Keller</div>
+      <button class="ghost small" id="tour-surveyor">🔬 Gutachter hinzuziehen (${formatEuro(this.engine.surveyorFee(p))})</button>
+      <div class="tour-hint">Nah rangehen und hinschauen identifiziert einen Mangel · <b>F</b> Taschenlampe · <b>M</b> Feuchtemessgeraet · Gang nach Osten fuehrt in den Keller</div>
     `
     el.style.pointerEvents = 'auto'
     el.querySelector('[data-tour-exit]')?.addEventListener('click', () => this.closeTour())
+    el.querySelector('#tour-surveyor')?.addEventListener('click', () => this.hireSurveyor(p))
     overlay.appendChild(el)
     this.tourPanel = el
+    this.refreshTourPanel()
+  }
+
+  private hireSurveyor(p: Property) {
+    if (!this.tour || this.surveyorHired) return
+    const res = this.engine.paySurveyor(p)
+    if (!res.ok) { this.hud.toast(res.reason ?? 'Geht nicht', 'error'); return }
+    this.surveyorHired = true
+    const found = this.tour.surveyorSweep()
+    const btn = this.tourPanel?.querySelector('#tour-surveyor') as HTMLButtonElement | null
+    if (btn) { btn.disabled = true; btn.textContent = `🔬 Gutachter war da (${formatEuro(res.fee)})` }
+    this.hud.toast(found.length
+      ? `Gutachter dokumentiert ${found.length} weitere Maengel`
+      : 'Gutachter findet nichts Zusaetzliches', found.length ? 'warning' : 'info')
     this.refreshTourPanel()
   }
 
@@ -1496,6 +1524,11 @@ export class CityScene3D {
         this.torchOn = !this.torchOn
         this.hud.toast(this.torchOn ? 'Taschenlampe an' : 'Taschenlampe aus', 'info')
       }
+      if (this.tour && e.code === 'KeyM') {
+        this.meterOn = !this.meterOn
+        const m = this.tourPanel?.querySelector('#tour-meter') as HTMLElement | null
+        if (m) m.style.display = this.meterOn ? '' : 'none'
+      }
       if (e.code === 'Escape') {
         // ModalManager handles ESC when modals are open (capture phase).
         // While pointer-locked the browser consumes ESC for the unlock, so this
@@ -1838,6 +1871,22 @@ export class CityScene3D {
         this.torch.target.position.copy(this.camera.position).addScaledVector(dir, 6)
         this.torch.target.updateMatrixWorld()
       }
+      // damp meter: warmer the closer you are to something unidentified
+      if (this.meterOn) {
+        const d = this.tour.nearestUndiscovered(this.pos.x, this.pos.z)
+        const fill = this.tourPanel?.querySelector('#tm-fill') as HTMLElement | null
+        const read = this.tourPanel?.querySelector('#tm-read') as HTMLElement | null
+        const pct = d === null ? 0 : Math.max(0, Math.min(1, 1 - d / 12))
+        if (fill) {
+          fill.style.width = `${Math.round(pct * 100)}%`
+          fill.style.background = pct > 0.75 ? 'var(--bad)' : pct > 0.45 ? 'var(--gold)' : 'var(--accent)'
+        }
+        if (read) {
+          read.textContent = d === null ? 'alles erfasst'
+            : pct > 0.8 ? 'sehr hoch' : pct > 0.6 ? 'erhoeht' : pct > 0.35 ? 'leicht erhoeht' : 'unauffaellig'
+        }
+      }
+
       // prompt when you are next to the agent
       const nearSeller = this.pos.distanceTo(this.tour.sellerPos) < 3.2
       const prompt = this.tourPanel?.querySelector('#tour-prompt') as HTMLElement | null

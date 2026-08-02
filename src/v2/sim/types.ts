@@ -517,6 +517,23 @@ export interface GameState {
    *  start and then evolving (Aufstockung, Sanierung, weathering). Listings
    *  adopt the identity of the building already standing on their lot. */
   city: import('../world/cityBuildings').CityBuilding[]
+  /** What the player documented during a Besichtigung, per property. Findings
+   *  are leverage: documented defects buy a price reduction, once. */
+  viewings: Record<string, ViewingRecord>
+}
+
+export interface ViewingRecord {
+  propertyId: string
+  /** defects the player identified */
+  found: number
+  /** how many were actually there */
+  total: number
+  /** documented repair cost */
+  cost: number
+  month: number
+  discountTaken: boolean
+  /** a surveyor was paid to help */
+  surveyor: boolean
 }
 
 export type Difficulty = 'easy' | 'standard' | 'hardcore'
