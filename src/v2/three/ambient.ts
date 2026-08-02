@@ -79,15 +79,15 @@ export class AmbientLife {
     }
 
     const n = Math.max(1, this.cars.length)
-    const bodyGeo = new THREE.BoxGeometry(1.72, 0.52, 3.9)
-    const cabinGeo = new THREE.BoxGeometry(1.5, 0.46, 1.8)
+    const bodyGeo = new THREE.BoxGeometry(1.78, 0.72, 4.1)
+    const cabinGeo = new THREE.BoxGeometry(1.56, 0.58, 1.95)
     // clear-coat car paint and dark glass — the biggest single readability win
     // for traffic, because the highlights make the shapes legible at distance
     this.carBody = new THREE.InstancedMesh(bodyGeo, new THREE.MeshStandardMaterial({
       color: 0xffffff, roughness: 0.28, metalness: 0.55, envMapIntensity: 1.2,
     }), n)
     this.carCabin = new THREE.InstancedMesh(cabinGeo, new THREE.MeshStandardMaterial({
-      color: 0x121a24, roughness: 0.08, metalness: 0.35, envMapIntensity: 1.6,
+      color: 0x46525f, roughness: 0.06, metalness: 0.25, envMapIntensity: 2.4,
     }), n)
     const wheelGeo = new THREE.CylinderGeometry(0.33, 0.33, 0.22, 10)
     wheelGeo.rotateZ(Math.PI / 2)   // axis across the car
@@ -154,12 +154,12 @@ export class AmbientLife {
         heading = c.dir > 0 ? 0 : Math.PI
       }
       this.q.setFromAxisAngle(this.v.set(0, 1, 0), heading)
-      this.m.compose(this.v.set(x, 0.44, z), this.q, this.s)
+      this.m.compose(this.v.set(x, 0.52, z), this.q, this.s)
       this.carBody.setMatrixAt(i, this.m)
       const backOff = 0.35
       const cabX = c.axis === 'x' ? x - c.dir * backOff : x
       const cabZ = c.axis === 'z' ? z - c.dir * backOff : z
-      this.m.compose(this.v.set(cabX, 0.92, cabZ), this.q, this.s)
+      this.m.compose(this.v.set(cabX, 1.17, cabZ), this.q, this.s)
       this.carCabin.setMatrixAt(i, this.m)
       // four wheels, offset along the car's own axes
       const alongX = c.axis === 'x'

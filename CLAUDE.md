@@ -82,6 +82,15 @@ rows    (period 4):  road 11m | walk 4.5m | build 22m | walk 4.5m
 
 That yields a ~20 m facade-to-facade street and a 15 × 22 m lot — Berlin Blockrand proportions. Never convert tiles to metres by multiplying; always go through `tileCenter` / `tileRect` / `tileAtWorld`. World size is ~661 × 270 m.
 
+The street surface (`three/ground.ts`, `PPM` px per metre) is painted to those same widths:
+
+```
+sidewalk 4.5 m:  kerb 0.35 | Radweg 1.3 (red) | Gehwegplatten rest
+road    11.0 m:  parking bay 2.0 | lane 3.5 | lane 3.5 | parking bay 2.0
+```
+
+Surface detail comes from repeating `CanvasPattern`s (pavement slabs, Radweg, asphalt grain, Kopfsteinpflaster), **not** per-slab fills — 0.5 m slabs across a 660 m city would be hundreds of thousands of `fillRect` calls. Patterns anchor to the canvas origin so paving runs continuously across tile borders; the whole ground bakes in ~15 ms. Street furniture (Litfasssaeulen, BSR bins, bollards, traffic lights, parked cars) lives in `three/props.ts` as static instanced meshes built once at boot.
+
 **Footprints come from the lot, never from the style.** `dimsFor(style, lot)` sizes the body from the lot it stands on: party-wall kinds fill their lot exactly (so neighbours butt together and both streets get a flush facade), detached kinds (house/villa) keep gardens. Buildings therefore *cannot* interpenetrate, whatever the style rolls. `BuildingStyle` carries storeys + storey height, not pixel dimensions; total height is `bodyHeight(style)`.
 
 Party-wall flanks render as blank Brandmauern (`facadeTexture(..., 'firewall', ...)`), which is what you see where a neighbour is shorter. Faces are `front` (+z, street), `back` (−z), `side`/`firewall` (±x).

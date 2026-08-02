@@ -13,6 +13,7 @@ import { rollStyle, mixColor } from '../world/buildingStyle'
 import type { BuildingKind } from '../world/buildingStyle'
 import { paintGround, paintLockOverlay } from './ground'
 import { AmbientLife } from './ambient'
+import { buildStreetProps } from './props'
 import { facadeTexture, dimsFor, ownedBadgeTexture, contactShadowTexture, gableGeometry, trimGeometry, trimColor } from './facade'
 import type { BuildingDims, Lot, Face } from './facade'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
@@ -239,6 +240,9 @@ export class CityScene3D {
     this.scene.add(apron)
     this.plantTrees(ground.treeSpots)
     this.plantStreetLamps()
+    // Litfasssaeulen, BSR bins, bollards, traffic lights, parked cars
+    const props = buildStreetProps(this.scene, this.layout, this.metrics)
+    this.staticColliders.push(...props.colliders)
 
     this.scene.add(this.buildingsRoot)
     this.scene.add(this.fillerRoot)
