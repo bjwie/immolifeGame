@@ -15,6 +15,7 @@ import { paintGround, paintLockOverlay } from './ground'
 import { AmbientLife } from './ambient'
 import { buildStreetProps } from './props'
 import { InteriorTour } from './InteriorTour'
+import { preloadFurniture } from './models'
 import {
   facadeTexture, dimsFor, ownedBadgeTexture, contactShadowTexture, gableGeometry,
   trimGeometry, trimColor, scaffoldGeometry, neonSignTexture, siteFenceGeometry,
@@ -252,6 +253,8 @@ export class CityScene3D {
     // Litfasssaeulen, BSR bins, bollards, traffic lights, parked cars
     const props = buildStreetProps(this.scene, this.layout, this.metrics)
     this.staticColliders.push(...props.colliders)
+    // hand-modelled furniture, if any was supplied — see three/models.ts
+    preloadFurniture()
 
     this.scene.add(this.buildingsRoot)
     this.scene.add(this.fillerRoot)
@@ -1766,7 +1769,13 @@ export class CityScene3D {
       el.style.opacity = String(o)
       el.style.visibility = o <= 0.02 ? 'hidden' : 'visible'
     }
-    if (this.tour) return   // interior labels are placed by the tour itself
+    // Indoors the city's CSS2D labels must be hidden outright. They live in the
+    // street scene, which we stop rendering, so nothing would ever update them
+    // again — they'd hang in the flat wherever they were last projected.
+    if (this.tour) {
+      this.setCityLabelsVisible(false)
+      return
+    }
     for (const b of this.banners.values()) fade(b.el, b.pos, 150, 320, null)
     const world = new THREE.Vector3()
     for (const h of this.byPropertyId.values()) {
@@ -1774,6 +1783,20 @@ export class CityScene3D {
         if (!(child as any).isCSS2DObject) continue
         child.getWorldPosition(world)
         fade((child as CSS2DObject).element, world, 200, 360, h.prop.id)
+      }
+    }
+  }
+
+  /** Show/hide every label that belongs to the street scene. */
+  private setCityLabelsVisible(v: boolean) {
+    const set = (el: HTMLElement) => {
+      el.style.visibility = v ? 'visible' : 'hidden'
+      if (!v) el.style.opacity = '0'
+    }
+    for (const b of this.banners.values()) set(b.el)
+    for (const h of this.byPropertyId.values()) {
+      for (const child of h.group.children) {
+        if ((child as any).isCSS2DObject) set((child as CSS2DObject).element)
       }
     }
   }

@@ -16,6 +16,9 @@ import { CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js'
 import type { Property } from '../sim/types'
 import { mulberry32 } from '../world/cityLayout'
 import { formatEuro } from '../sim/Engine'
+import * as kit from './kit'
+import type { MatKey, Builder } from './kit'
+import { getModel } from './models'
 
 export interface TourCollider { minX: number; maxX: number; minZ: number; maxZ: number }
 
@@ -139,6 +142,7 @@ export class InteriorTour {
     // Shuffle a little so the same size doesn't always land in the same order
     const order = specs.slice().sort(() => rng() - 0.5)
 
+    const depthWish: Record<'n' | 's', number> = { n: 0, s: 0 }
     for (const spec of order) {
       const area = Math.max(5.5, sqm * spec.share * (0.85 + rng() * 0.3))
       let depth = Math.max(2.6, Math.min(6.4, Math.sqrt(area) * (0.9 + rng() * 0.35)))
@@ -147,17 +151,38 @@ export class InteriorTour {
       const side: 'n' | 's' = cursor.n <= cursor.s ? 'n' : 's'
       const x0 = cursor[side]
       const x1 = x0 + width
-      cursor[side] = x1 + 0.35 + rng() * 0.5      // party wall between rooms
-      const z0 = side === 'n' ? halfWidth : -halfWidth - depth
-      const z1 = side === 'n' ? halfWidth + depth : -halfWidth
+      // Rooms on a side share party walls — a gap between them would leave an
+      // open slot you can see straight through into the neighbouring room.
+      cursor[side] = x1
+      depthWish[side] = Math.max(depthWish[side], depth)
       const doorC = x0 + width * (0.3 + rng() * 0.4)
       rooms.push({
-        id: spec.id, name: spec.name, x0, z0, x1, z1, floor: spec.floor, side,
+        id: spec.id, name: spec.name, x0, z0: 0, x1, z1: 0, floor: spec.floor, side,
         doorFrom: doorC - 0.55, doorTo: doorC + 0.55,
       })
     }
 
+    // A flat is a rectangle: give each side one depth and stretch the last room
+    // to the end of the hallway, so the envelope closes with no leftover voids.
     const corridorLen = Math.max(cursor.n, cursor.s) + 0.4
+    for (const side of ['n', 's'] as const) {
+      const mine = rooms.filter(r => r.side === side)
+      if (!mine.length) continue
+      const depth = depthWish[side]
+      for (const r of mine) {
+        r.z0 = side === 'n' ? halfWidth : -halfWidth - depth
+        r.z1 = side === 'n' ? halfWidth + depth : -halfWidth
+      }
+      mine.sort((a, b) => a.x0 - b.x0)
+      mine[0].x0 = 0
+      mine[mine.length - 1].x1 = corridorLen
+      for (const r of mine) {
+        const w = r.x1 - r.x0
+        const doorC = r.x0 + w * 0.5
+        r.doorFrom = doorC - 0.55
+        r.doorTo = doorC + 0.55
+      }
+    }
     this.corridor = {
       id: 'flur', name: 'Flur', x0: 0, z0: -halfWidth, x1: corridorLen, z1: halfWidth,
       floor: 'wood', side: 'corridor',
@@ -307,6 +332,49 @@ export class InteriorTour {
     return this._wallMat
   }
 
+  private _palette: Record<MatKey, THREE.MeshStandardMaterial> | null = null
+  private palette(): Record<MatKey, THREE.MeshStandardMaterial> {
+    if (!this._palette) {
+      this._palette = {
+        wood: this.mat(0x8a6038, 0.72),
+        fabric: this.mat(0x556579, 0.95),
+        white: this.mat(0xf2f1ec, 0.5),
+        steel: this.mat(0xa8aeb4, 0.3, 0.75),
+        dark: this.mat(0x24282d, 0.6),
+        stone: this.mat(0x3c4046, 0.35, 0.2),
+        glass: new THREE.MeshStandardMaterial({ color: 0xc3d8e4, roughness: 0.05, metalness: 0.5, envMapIntensity: 1 }),
+      }
+      this.disposables.push(this._palette.glass)
+    }
+    return this._palette
+  }
+
+  /**
+   * Place a piece of furniture. A hand-modelled `.glb` of the same name wins
+   * if one was supplied; otherwise the parametric builder in kit.ts is used.
+   */
+  private put(name: string, builder: Builder, x: number, y: number, z: number, yaw = 0, size?: number) {
+    const model = getModel(name)
+    if (model) {
+      model.position.set(x, y, z)
+      model.rotation.y = yaw
+      this.scene.add(model)
+      return
+    }
+    const piece = builder(this.furnishRng, size)
+    const pal = this.palette()
+    for (const part of piece.parts) {
+      const mesh = new THREE.Mesh(part.geo, pal[part.mat])
+      mesh.position.set(x, y, z)
+      mesh.rotation.y = yaw
+      mesh.castShadow = true
+      this.scene.add(mesh)
+      this.disposables.push(part.geo)
+    }
+  }
+
+  private furnishRng: () => number = Math.random
+
   private buildShell() {
     const woodMat = this.mat(0x8a6240, 0.85)
     const tileMat = this.mat(0xd8dbd8, 0.6)
@@ -395,109 +463,67 @@ export class InteriorTour {
   }
 
   private furnish(rng: () => number) {
-    const wood = this.mat(0x7a5230, 0.8)
-    const fabric = this.mat(0x4a5a6a, 0.95)
-    const white = this.mat(0xf4f4f2, 0.5)
-    const steel = this.mat(0x9aa0a6, 0.35, 0.8)
-    const cx = (r: PlanRoom) => (r.x0 + r.x1) / 2
-    const cz = (r: PlanRoom) => (r.z0 + r.z1) / 2
+    this.furnishRng = rng
+    const cxc = (r: PlanRoom) => (r.x0 + r.x1) / 2
+    const czc = (r: PlanRoom) => (r.z0 + r.z1) / 2
 
     for (const r of this.rooms) {
       if (r.side !== 'n' && r.side !== 's') continue
-      const inner = r.side === 'n' ? 1 : -1
+      const inner = r.side === 'n' ? 1 : -1          // +1 means "away from the hallway"
+      const far = r.side === 'n' ? r.z1 : r.z0        // the window wall
+      const span = r.x1 - r.x0
+      const depth = r.z1 - r.z0
+      // face the room: pieces against the window wall look back at the hallway
+      const faceIn = r.side === 'n' ? Math.PI : 0
+
       if (r.id.startsWith('schlaf')) {
-        this.addBox(new THREE.BoxGeometry(1.85, 0.45, 2.05), wood, cx(r), 0.22, cz(r))
-        this.addBox(new THREE.BoxGeometry(1.75, 0.22, 1.95), white, cx(r), 0.55, cz(r))
-        this.addBox(new THREE.BoxGeometry(1.3, 2.0, 0.58), wood, r.x0 + 0.85, 1.0, cz(r) - inner * ((r.z1 - r.z0) / 2 - 0.5))
+        this.put('bed', kit.bed, cxc(r), 0, czc(r) + inner * 0.15, faceIn, Math.min(1.8, span - 1.4))
+        this.put('wardrobe', kit.wardrobe, r.x0 + 0.85, 0, far - inner * 0.34,
+          r.side === 'n' ? Math.PI : 0, Math.min(1.5, span * 0.5))
       } else if (r.id === 'wohnen') {
-        this.addBox(new THREE.BoxGeometry(2.3, 0.45, 0.9), fabric, cx(r), 0.22, cz(r) - inner * 0.8)
-        this.addBox(new THREE.BoxGeometry(2.3, 0.5, 0.25), fabric, cx(r), 0.7, cz(r) - inner * 1.12)
-        this.addBox(new THREE.BoxGeometry(1.1, 0.06, 0.55), wood, cx(r), 0.42, cz(r) + inner * 0.5)
-        this.addBox(new THREE.BoxGeometry(0.38, 1.7, 1.4), wood, r.x1 - 0.4, 0.85, cz(r))
+        this.put('sofa', kit.sofa, cxc(r) - 0.2, 0, czc(r) - inner * (depth * 0.22), faceIn, span > 4.4 ? 3 : 2)
+        this.put('couchTable', kit.couchTable, cxc(r) - 0.2, 0, czc(r) + inner * 0.35)
+        this.put('shelf', kit.shelf, r.x1 - 0.55, 0, czc(r), r.side === 'n' ? -Math.PI / 2 : Math.PI / 2, 4)
       } else if (r.id === 'kueche') {
-        const far = r.side === 'n' ? r.z1 - 0.35 : r.z0 + 0.35
-        this.addBox(new THREE.BoxGeometry(r.x1 - r.x0 - 0.6, 0.9, 0.62), wood, cx(r), 0.45, far)
-        this.addBox(new THREE.BoxGeometry(r.x1 - r.x0 - 0.6, 0.06, 0.66), steel, cx(r), 0.92, far)
-        this.addBox(new THREE.BoxGeometry((r.x1 - r.x0) * 0.55, 0.7, 0.35), white, cx(r), 1.8, far - inner * 0.12)
-        this.addBox(new THREE.BoxGeometry(0.6, 1.7, 0.6), white, r.x1 - 0.5, 0.85, far)
+        this.put('kitchenRun', kit.kitchenRun, cxc(r) - 0.35, 0, far - inner * 0.34,
+          r.side === 'n' ? Math.PI : 0, Math.min(3.2, span - 1.0))
+        this.put('fridge', kit.fridge, r.x1 - 0.45, 0, far - inner * 0.36, r.side === 'n' ? Math.PI : 0)
       } else if (r.id === 'bad' || r.id === 'gaeste') {
-        const far = r.side === 'n' ? r.z1 - 0.45 : r.z0 + 0.45
         if (r.id === 'bad') {
-          this.addBox(new THREE.BoxGeometry(Math.min(1.7, r.x1 - r.x0 - 0.5), 0.55, 0.75), white, cx(r) - 0.2, 0.27, far)
+          this.put('bathtub', kit.bathtub, cxc(r) - 0.15, 0, far - inner * 0.42,
+            r.side === 'n' ? Math.PI : 0, Math.min(1.7, span - 0.7))
         }
-        this.addBox(new THREE.BoxGeometry(0.55, 0.18, 0.42), white, r.x1 - 0.55, 0.85, far)
-        this.addBox(new THREE.BoxGeometry(0.36, 0.42, 0.58), white, r.x1 - 0.5, 0.21, cz(r) + inner * 0.6)
-        this.addBox(new THREE.BoxGeometry(0.34, 0.48, 0.2), white, r.x1 - 0.5, 0.65, cz(r) + inner * 0.85)
+        this.put('basin', kit.basin, r.x1 - 0.55, 0, far - inner * 0.3, r.side === 'n' ? Math.PI : 0)
+        this.put('mirror', kit.mirror, r.x1 - 0.55, 1.55, far - inner * 0.12, r.side === 'n' ? Math.PI : 0)
+        this.put('toilet', kit.toilet, r.x1 - 0.45, 0, czc(r) + inner * 0.35, r.side === 'n' ? -Math.PI / 2 : Math.PI / 2)
       } else {
-        this.addBox(new THREE.BoxGeometry(1.4, 0.72, 0.7), wood, cx(r), 0.36, cz(r))
-        this.addBox(new THREE.BoxGeometry(0.5, 0.9, 0.5), fabric, cx(r) + 0.9, 0.45, cz(r))
+        this.put('desk', kit.desk, cxc(r), 0, far - inner * 0.45, r.side === 'n' ? Math.PI : 0)
+        this.put('chair', kit.chair, cxc(r), 0, far - inner * 1.05, faceIn)
+        this.put('shelf', kit.shelf, r.x1 - 0.5, 0, czc(r) + inner * 0.6, r.side === 'n' ? -Math.PI / 2 : Math.PI / 2, 3)
+      }
+
+      // radiator under the window, a door leaf in the doorway, a ceiling light
+      this.put('radiator', kit.radiator, cxc(r), 0, far - inner * 0.16, 0, Math.min(1.5, span * 0.42))
+      this.put('ceilingLamp', kit.ceilingLamp, cxc(r), this.wallH - 0.06, czc(r))
+      if (r.doorFrom !== undefined) {
+        this.put('doorLeaf', kit.doorLeaf, r.doorFrom + 0.12, 0,
+          (r.side === 'n' ? r.z0 : r.z1) + inner * 0.48, r.side === 'n' ? -1.2 : 1.2)
       }
     }
 
-    // radiator under every window, a door leaf in every doorway, a ceiling
-    // fixture in every room — the things you notice by their absence
-    const rad = this.mat(0xf0eee8, 0.55, 0.15)
-    const doorMat = this.mat(0xe8e2d6, 0.7)
-    const fixture = this.mat(0xfaf6ea, 0.4)
-    for (const r of this.rooms) {
-      if (r.side !== 'n' && r.side !== 's') continue
-      const far = r.side === 'n' ? r.z1 - 0.22 : r.z0 + 0.22
-      const rw = Math.min(1.5, (r.x1 - r.x0) * 0.42)
-      this.addBox(new THREE.BoxGeometry(rw, 0.58, 0.1), rad, (r.x0 + r.x1) / 2, 0.42, far)
-      for (let i = 0; i < 5; i++) {
-        this.addBox(new THREE.BoxGeometry(rw / 6, 0.5, 0.06), rad,
-          (r.x0 + r.x1) / 2 - rw / 2 + rw * ((i + 0.5) / 5), 0.42, far + (r.side === 'n' ? -0.05 : 0.05))
-      }
-      // door leaf, swung open into the room
-      if (r.doorFrom !== undefined && r.doorTo !== undefined) {
-        const leaf = new THREE.Mesh(new THREE.BoxGeometry(1.02, DOOR_H - 0.06, 0.045), doorMat)
-        const hinge = r.side === 'n' ? r.z1 : r.z0
-        void hinge
-        leaf.position.set(r.doorFrom + 0.1, (DOOR_H - 0.06) / 2, (r.side === 'n' ? r.z0 : r.z1) + (r.side === 'n' ? 0.5 : -0.5))
-        leaf.rotation.y = r.side === 'n' ? -1.15 : 1.15
-        this.scene.add(leaf)
-        this.disposables.push(leaf.geometry)
-      }
-      // ceiling fixture
-      this.addBox(new THREE.CylinderGeometry(0.16, 0.22, 0.14, 10), fixture,
-        (r.x0 + r.x1) / 2, this.wallH - 0.2, (r.z0 + r.z1) / 2)
-    }
-    // corridor fixture
-    this.addBox(new THREE.CylinderGeometry(0.14, 0.2, 0.12, 10), fixture, this.corridor.x1 / 2, this.wallH - 0.18, 0)
+    this.put('ceilingLamp', kit.ceilingLamp, this.corridor.x1 / 2, this.wallH - 0.06, 0)
 
-    // kitchen extras: sink basin and hob rings on the worktop
-    const kitchen = this.room('kueche')
-    if (kitchen) {
-      const far = kitchen.side === 'n' ? kitchen.z1 - 0.35 : kitchen.z0 + 0.35
-      const kx = (kitchen.x0 + kitchen.x1) / 2
-      this.addBox(new THREE.BoxGeometry(0.5, 0.05, 0.4), steel, kx - 0.75, 0.94, far)
-      this.addBox(new THREE.CylinderGeometry(0.02, 0.02, 0.28, 6), steel, kx - 0.75, 1.08, far - 0.14)
-      for (let i = 0; i < 4; i++) {
-        this.addBox(new THREE.CylinderGeometry(0.08, 0.08, 0.012, 12), this.mat(0x1c1f22, 0.4),
-          kx + 0.45 + (i % 2) * 0.24, 0.955, far - 0.12 + Math.floor(i / 2) * 0.24)
-      }
-    }
-
-    // bathroom mirror above the basin
-    const bath = this.room('bad')
-    if (bath) {
-      const far = bath.side === 'n' ? bath.z1 - 0.12 : bath.z0 + 0.12
-      this.addBox(new THREE.BoxGeometry(0.62, 0.7, 0.04),
-        this.mat(0xbcd2dd, 0.05, 0.6), bath.x1 - 0.55, 1.55, far)
-    }
-
-    // cellar: boiler, meter board, shelving, junk, Steigstrang
+    // cellar: boiler, meter board, shelving, junk and the Steigstrang
     const k = this.cellar
-    this.addBox(new THREE.BoxGeometry(0.7, 1.5, 0.5), steel, k.x0 + 1.2, CELLAR_Y + 0.75, k.z0 + 0.6)
-    this.addBox(new THREE.BoxGeometry(1.3, 0.85, 0.12), this.mat(0x35404a, 0.7), k.x0 + 3.2, CELLAR_Y + 1.45, k.z0 + 0.12)
-    for (let i = 0; i < 4; i++) {
-      this.addBox(new THREE.BoxGeometry(2.4, 0.06, 0.5), wood, k.x1 - 1.6, CELLAR_Y + 0.4 + i * 0.48, k.z1 - 0.4)
-    }
+    this.put('boiler', kit.boiler, k.x0 + 1.3, CELLAR_Y, k.z0 + 0.45, 0)
+    this.put('meterBoard', kit.meterBoard, k.x0 + 3.3, CELLAR_Y + 1.45, k.z0 + 0.1, 0)
+    this.put('shelf', kit.shelf, k.x1 - 0.5, CELLAR_Y, k.z1 - 1.2, -Math.PI / 2, 4)
     for (let i = 0; i < 6; i++) {
-      const s = 0.32 + rng() * 0.36
-      this.addBox(new THREE.BoxGeometry(s, s, s), wood,
-        k.x0 + 1 + rng() * (k.x1 - k.x0 - 2), CELLAR_Y + s / 2, k.z0 + 1 + rng() * (k.z1 - k.z0 - 2))
+      this.put('cartonBox', kit.cartonBox,
+        k.x0 + 1.2 + rng() * (k.x1 - k.x0 - 2.4), CELLAR_Y,
+        k.z0 + 1.0 + rng() * (k.z1 - k.z0 - 2.0), rng() * Math.PI)
     }
+    const steel = this.palette().steel
     this.addBox(new THREE.CylinderGeometry(0.06, 0.06, 2.3, 8), steel, k.x0 + 0.45, CELLAR_Y + 1.15, k.z1 - 0.5)
   }
 
