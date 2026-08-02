@@ -513,6 +513,10 @@ export interface GameState {
    *  Steglitz, Lichtenberg, Marzahn) start excluded and get added when their
    *  UnlockCondition is met. Always includes the 6 originally-playable ones. */
   unlockedDistricts: DistrictId[]
+  /** The standing city: one building per buildable lot, generated once at game
+   *  start and then evolving (Aufstockung, Sanierung, weathering). Listings
+   *  adopt the identity of the building already standing on their lot. */
+  city: import('../world/cityBuildings').CityBuilding[]
 }
 
 export type Difficulty = 'easy' | 'standard' | 'hardcore'

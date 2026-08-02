@@ -1,5 +1,7 @@
 import type { Applicant, Bank, BankNegotiationState, BankOfferTerms, Broker, CapexEvent, CapexKind, ContractorOffer, ContractorTier, GameState, GameTime, GewerkKind, GewerkStep, Lawsuit, Loan, MarketEvent, Player, Property, PropertyType, RenovationContract, RenovationScope, SellerNegotiationState, Speed, Tenant, Unit, WEGProposal } from './types'
 import type { CityLayout, DistrictDef, DistrictId } from '../world/cityLayout'
+import type { CityBuilding } from '../world/cityBuildings'
+import { generateCityBuildings, evolveCity, cityKey } from '../world/cityBuildings'
 import { generateApplicants, pickPropertyName, pickSeller } from './names'
 import { UNLOCK_CONDITIONS, type UnlockCondition } from './UnlockConditions'
 
@@ -98,7 +100,37 @@ export class Engine {
       difficulty,
       rngSeed: Math.floor(Math.random() * 1_000_000),
       unlockedDistricts: this.layout.districts.filter(d => !d.locked).map(d => d.id),
+      city: generateCityBuildings(this.layout),
     }
+  }
+
+  /** Run the standing city forward one month and tell the renderer which lots
+   *  changed, so it can patch those instead of rebuilding the whole city. */
+  private advanceCity() {
+    if (!Array.isArray(this.state.city) || this.state.city.length === 0) return
+    const changes = evolveCity(this.state.city, this.rng(31), id => this.districtById(id).name)
+    if (changes.length === 0) return
+    this.emit('cityChanged', { keys: changes.map(c => c.key) })
+    for (const c of changes) {
+      if (!c.note) continue
+      this.emit('toast', { kind: 'info', text: c.note })
+    }
+  }
+
+  /** The standing building on a lot, if the city has been generated. */
+  cityBuildingAt(tileX: number, tileY: number): CityBuilding | undefined {
+    return this.cityIndex().get(cityKey(tileX, tileY))
+  }
+
+  private _cityIndex: Map<string, CityBuilding> | null = null
+  private _cityIndexFor: CityBuilding[] | null = null
+  private cityIndex(): Map<string, CityBuilding> {
+    if (this._cityIndex && this._cityIndexFor === this.state.city) return this._cityIndex
+    const m = new Map<string, CityBuilding>()
+    for (const b of this.state.city ?? []) m.set(cityKey(b.tileX, b.tileY), b)
+    this._cityIndex = m
+    this._cityIndexFor = this.state.city
+    return m
   }
 
   private rng(salt = 0): () => number {
@@ -259,10 +291,15 @@ export class Engine {
     if (candidates.length === 0) return null
     const spot = candidates[Math.floor(rng() * candidates.length)]
 
-    const type = this.propertyTypeForDistrict(rng, d)
+    // The lot already has a building on it — a flat coming free in *that* house
+    // must not silently turn it into a different building.
+    const standing = this.cityBuildingAt(spot.tileX, spot.tileY)
+    const type = standing?.kind ?? this.propertyTypeForDistrict(rng, d)
     const ageYears = Math.floor(rng() * 60)
     const yearBuilt = this.state.time.year - ageYears
-    const condition = Math.max(20, 100 - ageYears * 1.1 + (rng() * 25))
+    const condition = standing
+      ? Math.max(20, Math.min(100, standing.condition + (rng() * 20 - 10)))
+      : Math.max(20, 100 - ageYears * 1.1 + (rng() * 25))
     const base = this.basePriceFor(type)
     const variance = 0.75 + rng() * 0.5
     const price = Math.round(base * districtDef.priceMultiplier * variance * (0.6 + condition / 200))
@@ -408,6 +445,9 @@ export class Engine {
 
     // District unlocks fire at month boundaries; emits 'districtUnlocked'
     this.checkDistrictUnlocks()
+
+    // The city builds and weathers around the player
+    this.advanceCity()
 
     // age listings off market & age stale lifetime
     const remaining: Property[] = []
@@ -2230,7 +2270,7 @@ export class Engine {
     try {
       const slim = {
         state: this.state,
-        v: 4,
+        v: 5,
         ts: Date.now(),
       }
       localStorage.setItem(SAVE_KEY, JSON.stringify(slim))
@@ -2245,7 +2285,7 @@ export class Engine {
       // world with locked districts) and v=4 (adds player.unlockedDistricts).
       // v=2 saves get property tile coords shifted +12; v<4 saves get
       // unlockedDistricts seeded from the layout.
-      if ((data.v !== 2 && data.v !== 3 && data.v !== 4) || !data.state) return false
+      if (![2, 3, 4, 5].includes(data.v) || !data.state) return false
       this.state = data.state as GameState
       const fromV2 = data.v === 2
       if (fromV2) {
@@ -2256,6 +2296,12 @@ export class Engine {
       if (!Array.isArray(this.state.unlockedDistricts) || this.state.unlockedDistricts.length === 0) {
         this.state.unlockedDistricts = this.layout.districts.filter(d => !d.locked).map(d => d.id)
       }
+      // v<5 saves predate the persistent standing city — generate it once so
+      // old games keep their skyline from here on instead of a fresh one each boot.
+      if (!Array.isArray(this.state.city) || this.state.city.length === 0) {
+        this.state.city = generateCityBuildings(this.layout)
+      }
+      this._cityIndex = null
       // sanity defaults
       if (!Array.isArray(this.state.player.netWorthHistory)) this.state.player.netWorthHistory = []
       if (!Array.isArray(this.state.player.achievements)) this.state.player.achievements = []

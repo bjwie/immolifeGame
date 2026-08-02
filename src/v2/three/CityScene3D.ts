@@ -21,6 +21,7 @@ import {
 import type { BuildingDims, Lot, Face } from './facade'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { buildMetrics, tileCenter, tileRect, tileAtWorld } from './metrics'
+import { cityKey } from '../world/cityBuildings'
 import type { Metrics } from './metrics'
 import { Engine, formatEuro } from '../sim/Engine'
 import type { Property } from '../sim/types'
@@ -298,7 +299,9 @@ export class CityScene3D {
     this.engine.on('renovationDone', () => this.refreshProperties())
     this.engine.on('leaseSigned', () => this.refreshProperties())
     this.engine.on('month', () => { this.refreshProperties(); this.refreshLockProgress() })
-    this.engine.on('reset', () => { this.resyncLockVisuals(); this.refreshProperties(); this.refreshLockProgress() })
+    this.engine.on('reset', () => { this.resyncLockVisuals(); this.fillerBuilt = false; this.refreshProperties(); this.refreshLockProgress() })
+    // a building gained a storey / went under scaffolding — re-batch the city
+    this.engine.on('cityChanged', () => { this.fillerBuilt = false; this.refreshProperties() })
     this.engine.on('districtUnlocked', (data: { id: string; name: string; label: string }) => {
       this.unlockDistrictVisual(data.id as DistrictId, true)
       this.hud.toast(`${data.name} freigeschaltet!`, 'success')
@@ -619,42 +622,43 @@ export class CityScene3D {
       district: string | undefined
       seed: number
       lot: Lot
+      floors: number
+      condition: number
+      works: boolean
       spots: Array<{ x: number; z: number; yaw: number; front: THREE.Vector3; tile: string }>
     }
     // Batched per (block, style): keeping a batch inside one city block keeps
     // its bounding sphere small, so the frustum can cull whole blocks that are
     // behind the player instead of drawing the entire city every frame.
     const batches = new Map<string, Batch>()
-    const districtIndex = new Map(this.layout.districts.map((d, i) => [d.id, i]))
 
-    for (const spot of this.layout.buildableSpots) {
-      const d = this.layout.districts.find(dd => dd.id === spot.district)!
-      const locked = !this.engine.isDistrictUnlocked(d.id)
-      const rng = mulberry32(((spot.tileX * 73856093) ^ (spot.tileY * 19349663)) >>> 0)
-      const kind = pickFillerKind(spot.district, locked, rng())
-      const variant = Math.floor(rng() * 3)
-      const base = (locked ? 999 * 1013 : districtIndex.get(d.id)! * 1013) + FILLER_KIND_INDEX[kind] * 211
-      const seed = base + variant * 57
-      const district = locked ? undefined : spot.district
-      const front = this.frontDirForTile(spot.tileX, spot.tileY)
-      const lot = this.lotFor(spot.tileX, spot.tileY, front)
-      const block = `${Math.floor(spot.tileX / 12)},${Math.floor(spot.tileY / 4)}`
-      const key = `${block}|${kind}|${seed}|${district ?? '-'}|${lot.w.toFixed(1)}x${lot.d.toFixed(1)}`
+    // The standing city comes from the save, not from a fresh roll — a lot's
+    // building keeps its identity across sessions and can grow storeys.
+    for (const cb of this.engine.state.city) {
+      const front = this.frontDirForTile(cb.tileX, cb.tileY)
+      const lot = this.lotFor(cb.tileX, cb.tileY, front)
+      const block = `${Math.floor(cb.tileX / 12)},${Math.floor(cb.tileY / 4)}`
+      const cond = Math.round(cb.condition / 10) * 10
+      const key = `${block}|${cb.kind}|${cb.seed}|${cb.district}|${cb.floors}|${cond}|${cb.works ? 'W' : '-'}|${lot.w.toFixed(1)}x${lot.d.toFixed(1)}`
       let batch = batches.get(key)
       if (!batch) {
-        batch = { kind, district, seed, lot, spots: [] }
+        batch = {
+          kind: cb.kind, district: cb.district, seed: cb.seed, lot, spots: [],
+          floors: cb.floors, condition: cond, works: !!cb.works,
+        }
         batches.set(key, batch)
       }
-      const c = tileCenter(this.metrics, spot.tileX, spot.tileY)
+      const c = tileCenter(this.metrics, cb.tileX, cb.tileY)
       batch.spots.push({
         x: c.x, z: c.z, yaw: Math.atan2(front.x, front.z), front,
-        tile: spot.tileX + ',' + spot.tileY,
+        tile: cityKey(cb.tileX, cb.tileY),
       })
     }
 
     const m = new THREE.Matrix4()
     for (const batch of batches.values()) {
-      const style = rollStyle(batch.kind, batch.seed, 90, batch.district)
+      const style = rollStyle(batch.kind, batch.seed, batch.condition, batch.district)
+      style.floors = batch.floors      // storeys are city state, not a style roll
       const dims = dimsFor(style, batch.lot)
       const zOff = (batch.lot.d - dims.d) / 2 - dims.setback
       const n = batch.spots.length
@@ -702,7 +706,7 @@ export class CityScene3D {
 
       // Dressing: roughly one lot in fourteen is under scaffolding, and shop
       // ground floors get an illuminated Spaeti sign.
-      const scaffolded = batch.spots.filter(sp => hashTile(sp.tile) < 0.07)
+      const scaffolded = batch.works ? batch.spots : []
       let scaffold: THREE.InstancedMesh | null = null
       let fence: THREE.InstancedMesh | null = null
       if (scaffolded.length) {
@@ -749,7 +753,7 @@ export class CityScene3D {
           m.makeRotationY(sp.yaw).setPosition(cx, 0, cz)
           trim.setMatrixAt(i, m)
         }
-        if (scaffold && hashTile(sp.tile) < 0.07) {
+        if (scaffold) {
           m.makeRotationY(sp.yaw).setPosition(cx, 0, cz)
           scaffold.setMatrixAt(scaffoldIdx, m)
           fence?.setMatrixAt(scaffoldIdx, m)
@@ -1734,41 +1738,6 @@ export class CityScene3D {
 }
 
 // ----------------------------------------------------------------- helpers
-
-/** stable 0..1 from a "x,y" tile key */
-function hashTile(tile: string): number {
-  const c = tile.indexOf(',')
-  const x = +tile.slice(0, c), y = +tile.slice(c + 1)
-  let h = (x * 73856093) ^ (y * 19349663)
-  h = (h ^ (h >>> 13)) * 1274126177
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967296
-}
-
-const FILLER_KIND_INDEX: Record<BuildingKind, number> = {
-  house: 0, apartment: 1, office: 2, shop: 3, tower: 4, villa: 5,
-}
-
-/** Deterministic backdrop mix per district — apartment-heavy with local flavour. */
-function pickFillerKind(district: DistrictId, locked: boolean, r: number): BuildingKind {
-  const pick = (weights: Array<[BuildingKind, number]>): BuildingKind => {
-    let acc = 0
-    for (const [kind, w] of weights) {
-      acc += w
-      if (r < acc) return kind
-    }
-    return weights[weights.length - 1][0]
-  }
-  if (locked) return pick([['apartment', 0.5], ['house', 0.3], ['shop', 0.2]])
-  switch (district) {
-    case 'mitte': return pick([['apartment', 0.45], ['office', 0.25], ['tower', 0.15], ['shop', 0.15]])
-    case 'prenzlauer': return pick([['apartment', 0.6], ['shop', 0.2], ['house', 0.1], ['villa', 0.1]])
-    case 'charlottenburg': return pick([['apartment', 0.45], ['villa', 0.25], ['office', 0.15], ['shop', 0.15]])
-    case 'kreuzberg': return pick([['apartment', 0.6], ['shop', 0.25], ['office', 0.15]])
-    case 'wedding': return pick([['apartment', 0.55], ['shop', 0.2], ['house', 0.15], ['office', 0.1]])
-    case 'neukoelln': return pick([['apartment', 0.55], ['shop', 0.25], ['house', 0.2]])
-    default: return pick([['apartment', 0.6], ['house', 0.2], ['shop', 0.2]])
-  }
-}
 
 function capitalize(s: string) { return s.slice(0, 1).toUpperCase() + s.slice(1) }
 function escapeHtml(s: string) { return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!)) }
