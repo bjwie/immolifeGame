@@ -1,18 +1,26 @@
 /**
  * Pure building-style rolls — no renderer dependencies.
- * Extracted from the old Phaser BuildingRenderer so the Three.js facade
- * painter can reuse the exact same deterministic style system.
+ * A style describes what a building *is* (kind, storeys, storey height, roof,
+ * palette); its footprint comes from the lot it stands on, so buildings can
+ * never overlap their neighbours.
  */
 import { mulberry32 } from './cityLayout'
 
 export type BuildingKind = 'house' | 'apartment' | 'office' | 'shop' | 'tower' | 'villa'
 export type ApartmentSubtype = 'altbau' | 'plattenbau' | 'neubau'
+export type RoofKind = 'gable' | 'hip' | 'flat'
 
 export interface BuildingStyle {
   kind: BuildingKind
-  width: number      // 2D elevation px — the 3D scene maps px -> meters
-  height: number
+  /** number of storeys above ground */
   floors: number
+  /** metres per storey — Altbau are tall, Plattenbau are squat */
+  floorHeight: number
+  /** ground-floor height (shops/lobbies are taller) */
+  groundHeight: number
+  roof: RoofKind
+  /** freestanding (garden + windows on all sides) vs Blockrand party wall */
+  detached: boolean
   wallColor: number
   roofColor: number
   windowColor: number
@@ -25,7 +33,9 @@ export interface BuildingStyle {
   subtype?: ApartmentSubtype
 }
 
-const PALETTES: Record<BuildingKind, Array<Omit<BuildingStyle, 'kind' | 'width' | 'height' | 'floors' | 'condition' | 'litWindows' | 'hasSign' | 'signColor'>>> = {
+type Palette = Pick<BuildingStyle, 'wallColor' | 'roofColor' | 'windowColor' | 'trimColor' | 'accentColor'>
+
+const PALETTES: Record<BuildingKind, Palette[]> = {
   house: [
     { wallColor: 0xf2d7b6, roofColor: 0x8b3a2f, windowColor: 0x6ec6ff, trimColor: 0x5a3825, accentColor: 0x3d2418 },
     { wallColor: 0xe5c79a, roofColor: 0x6b2c20, windowColor: 0xfff3a6, trimColor: 0x4a3320, accentColor: 0x2a1810 },
@@ -35,6 +45,7 @@ const PALETTES: Record<BuildingKind, Array<Omit<BuildingStyle, 'kind' | 'width' 
     { wallColor: 0xc5b89a, roofColor: 0x4a4a4a, windowColor: 0xffd866, trimColor: 0x3a3a3a, accentColor: 0xa08562 },
     { wallColor: 0xd4c0a0, roofColor: 0x5a4a3a, windowColor: 0x88c8ff, trimColor: 0x6b5440, accentColor: 0xa48868 },
     { wallColor: 0xb89c7d, roofColor: 0x3d3530, windowColor: 0xffd84d, trimColor: 0x2c241e, accentColor: 0x8a6f54 },
+    { wallColor: 0xe0d3bb, roofColor: 0x54494a, windowColor: 0xa8d8ff, trimColor: 0x4a4038, accentColor: 0xb09878 },
   ],
   office: [
     { wallColor: 0x9aa6b0, roofColor: 0x5a6573, windowColor: 0x4eb4e0, trimColor: 0x3d4854, accentColor: 0x6e7a86 },
@@ -59,12 +70,12 @@ export function rollStyle(kind: BuildingKind, seed: number, condition: number = 
   const rng = mulberry32(seed)
   const palette = PALETTES[kind]
   const p = palette[Math.floor(rng() * palette.length)]
-  const sizeProfile = sizeFor(kind, rng)
   const subtype = kind === 'apartment' ? rollApartmentSubtype(rng, district) : undefined
+  const massing = massingFor(kind, subtype, rng)
   return {
     kind,
     ...p,
-    ...sizeProfile,
+    ...massing,
     condition,
     litWindows: rng() > 0.4,
     hasSign: kind === 'shop' || (kind === 'office' && rng() > 0.6),
@@ -93,15 +104,37 @@ function rollApartmentSubtype(rng: () => number, district?: string): ApartmentSu
   return 'neubau'
 }
 
-function sizeFor(kind: BuildingKind, rng: () => number) {
+type Massing = Pick<BuildingStyle, 'floors' | 'floorHeight' | 'groundHeight' | 'roof' | 'detached'>
+
+/** Storey counts are tuned so a street wall lands near Berlin's 22 m Traufhoehe. */
+function massingFor(kind: BuildingKind, subtype: ApartmentSubtype | undefined, rng: () => number): Massing {
   switch (kind) {
-    case 'house': return { width: 56, height: 60, floors: 1 + Math.floor(rng() * 2) }
-    case 'villa': return { width: 76, height: 72, floors: 2 }
-    case 'apartment': return { width: 64, height: 90, floors: 3 + Math.floor(rng() * 3) }
-    case 'shop': return { width: 64, height: 56, floors: 1 }
-    case 'office': return { width: 64, height: 92, floors: 4 + Math.floor(rng() * 2) }
-    case 'tower': return { width: 56, height: 130, floors: 7 + Math.floor(rng() * 4) }
+    case 'house':
+      return { floors: 2 + (rng() > 0.55 ? 1 : 0), floorHeight: 2.9, groundHeight: 3.1, roof: 'gable', detached: true }
+    case 'villa':
+      return { floors: 2 + (rng() > 0.7 ? 1 : 0), floorHeight: 3.3, groundHeight: 3.6, roof: 'hip', detached: true }
+    case 'apartment':
+      switch (subtype) {
+        case 'altbau':
+          return { floors: 5 + Math.floor(rng() * 2), floorHeight: 3.5, groundHeight: 4.2, roof: 'gable', detached: false }
+        case 'plattenbau':
+          return { floors: 5 + Math.floor(rng() * 6), floorHeight: 2.75, groundHeight: 2.9, roof: 'flat', detached: false }
+        default:
+          return { floors: 4 + Math.floor(rng() * 4), floorHeight: 3.05, groundHeight: 3.6, roof: 'flat', detached: false }
+      }
+    case 'shop':
+      // Ladenlokal on the ground floor with flats above — never a lone pavilion.
+      return { floors: 2 + Math.floor(rng() * 3), floorHeight: 3.2, groundHeight: 4.4, roof: 'flat', detached: false }
+    case 'office':
+      return { floors: 5 + Math.floor(rng() * 5), floorHeight: 3.6, groundHeight: 4.6, roof: 'flat', detached: false }
+    case 'tower':
+      return { floors: 12 + Math.floor(rng() * 11), floorHeight: 3.35, groundHeight: 4.8, roof: 'flat', detached: false }
   }
+}
+
+/** Total height above ground in metres. */
+export function bodyHeight(s: BuildingStyle): number {
+  return s.groundHeight + (s.floors - 1) * s.floorHeight
 }
 
 export function mixColor(a: number, b: number, t: number): number {

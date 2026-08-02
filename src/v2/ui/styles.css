@@ -1133,15 +1133,19 @@ canvas#nw-chart { background: var(--bg-2); border-radius: 6px; }
 }
 #fp-hint b { color: var(--gold); }
 
-/* Floating price tag above for-sale buildings (CSS2D) */
-.price-tag-3d {
+/* Floating price tag above for-sale buildings (CSS2D).
+   CSS2DRenderer owns `transform` on the mounted element, so the bob has to
+   live on an inner span — animating transform here would override the
+   renderer's positioning and park every tag in the corner. */
+.price-tag-3d { white-space: nowrap; }
+.price-tag-3d .ptg-inner {
+  display: inline-block;
   background: rgba(19, 28, 40, 0.95);
   border: 1px solid var(--accent);
   border-radius: 5px;
   padding: 2px 8px;
   font-family: monospace;
   font-size: 12px; font-weight: 700; color: #fff;
-  white-space: nowrap;
   animation: tag-bob 2.4s ease-in-out infinite;
   text-shadow: 0 1px 2px rgba(0,0,0,0.8);
 }

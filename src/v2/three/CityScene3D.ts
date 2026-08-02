@@ -9,12 +9,14 @@ import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRe
 import { Sky } from 'three/examples/jsm/objects/Sky.js'
 import { generateCityLayout, formatProgress, mulberry32 } from '../world/cityLayout'
 import type { CityLayout, DistrictDef, DistrictId } from '../world/cityLayout'
-import { rollStyle } from '../world/buildingStyle'
+import { rollStyle, mixColor } from '../world/buildingStyle'
 import type { BuildingKind } from '../world/buildingStyle'
 import { paintGround, paintLockOverlay } from './ground'
 import { AmbientLife } from './ambient'
-import { facadeTexture, dimsFor, ownedBadgeTexture, contactShadowTexture } from './facade'
-import type { BuildingDims } from './facade'
+import { facadeTexture, dimsFor, ownedBadgeTexture, contactShadowTexture, gableGeometry } from './facade'
+import type { BuildingDims, Lot, Face } from './facade'
+import { buildMetrics, tileCenter, tileRect, tileAtWorld } from './metrics'
+import type { Metrics } from './metrics'
 import { Engine, formatEuro } from '../sim/Engine'
 import type { Property } from '../sim/types'
 import { HUD } from '../ui/HUD'
@@ -27,13 +29,10 @@ import { WEGModal } from '../ui/WEGModal'
 import { ActivityLog } from '../ui/ActivityLog'
 import { ModalManager } from '../ui/ModalManager'
 
-/** meters per tile (ground canvas paints 48px per tile) */
-const TILE_M = 12
-const GROUND_PX_PER_TILE = 48
 const EYE = 1.7
-const WALK_SPEED = 14
-const SPRINT_SPEED = 28
-const PLAYER_RADIUS = 0.6
+const WALK_SPEED = 9
+const SPRINT_SPEED = 18
+const PLAYER_RADIUS = 0.45
 
 interface BuildingHandle {
   group: THREE.Group
@@ -43,7 +42,7 @@ interface BuildingHandle {
   dims: BuildingDims
   frontDir: THREE.Vector3
   center: THREE.Vector3
-  priceLabel?: { obj: CSS2DObject; el: HTMLDivElement }
+  priceLabel?: { obj: CSS2DObject; el: HTMLDivElement; textEl: HTMLElement }
   meshes: THREE.Mesh[]
 }
 
@@ -52,6 +51,7 @@ interface Collider { minX: number; maxX: number; minZ: number; maxZ: number }
 export class CityScene3D {
   readonly engine: Engine
   private layout: CityLayout
+  private metrics: Metrics
 
   private renderer: THREE.WebGLRenderer
   private css2d: CSS2DRenderer
@@ -99,6 +99,9 @@ export class CityScene3D {
   private cursor = { x: 0, y: 0 }
 
   private raycaster = new THREE.Raycaster()
+  /** separate ray so label occlusion never clobbers the crosshair ray's state */
+  private labelRay = new THREE.Raycaster()
+  private occluderSkip: THREE.Object3D | null = null
   private clock = new THREE.Clock()
   private particles: Array<{ mesh: THREE.Mesh; vel: THREE.Vector3; life: number }> = []
   private disposed = false
@@ -111,6 +114,7 @@ export class CityScene3D {
 
   constructor(container: HTMLElement) {
     this.layout = generateCityLayout(48, 4242)
+    this.metrics = buildMetrics(this.layout)
 
     // Engine — pick up the difficulty chosen at the start screen (only relevant
     // for a fresh game; on continue, the saved difficulty wins via tryLoad).
@@ -135,7 +139,9 @@ export class CityScene3D {
     this.css2d.domElement.style.pointerEvents = 'none'
     container.appendChild(this.css2d.domElement)
 
-    this.camera = new THREE.PerspectiveCamera(72, window.innerWidth / window.innerHeight, 0.1, 900)
+    // The far plane doubles as the cheapest possible occlusion budget: the
+    // frustum discards whole city blocks past it, and the fog hides the cut.
+    this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 380)
 
     // --- sky, fog, lights: late-afternoon Berlin light
     const sky = new Sky()
@@ -145,30 +151,34 @@ export class CityScene3D {
     skyU.rayleigh.value = 1.1
     skyU.mieCoefficient.value = 0.0035
     skyU.mieDirectionalG.value = 0.8
-    this.sunDir.setFromSphericalCoords(1, THREE.MathUtils.degToRad(90 - 38), THREE.MathUtils.degToRad(205))
+    // Every lot fronts +z, so the sun has to sit on the +z side or every single
+    // street facade in the city would be permanently in its own shadow.
+    this.sunDir.setFromSphericalCoords(1, THREE.MathUtils.degToRad(90 - 44), THREE.MathUtils.degToRad(34))
     skyU.sunPosition.value.copy(this.sunDir)
     this.scene.add(sky)
-    this.scene.fog = new THREE.Fog(0xcfe0ef, 200, 750)
-    this.scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x6a8a5e, 1.35))
-    this.scene.add(new THREE.AmbientLight(0x8ea4c0, 0.35))
-    this.sun = new THREE.DirectionalLight(0xfff0d5, 2.2)
+    this.scene.fog = new THREE.Fog(0xcfe0ef, 70, 350)
+    this.scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x6a8a5e, 1.4))
+    this.scene.add(new THREE.AmbientLight(0x93a8c4, 0.5))
+    this.sun = new THREE.DirectionalLight(0xfff0d5, 2.1)
     this.sun.castShadow = true
     this.sun.shadow.mapSize.set(2048, 2048)
     this.sun.shadow.bias = -0.0004
+    // Shadow casting ignores the view frustum, so every metre of this box costs
+    // draw calls every frame. Keep it tight around the player — that is the only
+    // place contact shadows read anyway.
     const sc = this.sun.shadow.camera
-    sc.left = -110; sc.right = 110; sc.top = 110; sc.bottom = -110
-    sc.near = 10; sc.far = 500
+    sc.left = -48; sc.right = 48; sc.top = 48; sc.bottom = -48
+    sc.near = 10; sc.far = 380
     this.scene.add(this.sun)
     this.scene.add(this.sun.target)
 
     // --- ground + trees
-    const ground = paintGround(this.layout)
+    const ground = paintGround(this.layout, this.metrics)
     const groundTex = new THREE.CanvasTexture(ground.canvas)
     groundTex.colorSpace = THREE.SRGBColorSpace
     groundTex.anisotropy = 8
-    groundTex.magFilter = THREE.NearestFilter
-    const worldW = this.layout.tilesW * TILE_M
-    const worldH = this.layout.tilesH * TILE_M
+    const worldW = this.metrics.width
+    const worldH = this.metrics.depth
     const groundMesh = new THREE.Mesh(
       new THREE.PlaneGeometry(worldW, worldH),
       new THREE.MeshLambertMaterial({ map: groundTex }),
@@ -190,7 +200,9 @@ export class CityScene3D {
 
     this.scene.add(this.buildingsRoot)
     this.scene.add(this.fillerRoot)
-    this.ambient = new AmbientLife(this.scene, this.layout, 60, 150)
+    // spawn first so ambient life can keep clear of the camera on frame one
+    this.spawnPlayer()
+    this.ambient = new AmbientLife(this.scene, this.layout, this.metrics, 60, 150, this.pos)
     this.mountPlazaFountain()
     this.mountClouds()
 
@@ -249,9 +261,6 @@ export class CityScene3D {
     this.resyncLockVisuals()
     this.refreshLockProgress()
 
-    // --- player spawn: on the central plaza in Mitte
-    this.pos.set(worldW / 2, EYE, worldH / 4)
-    this.yaw = Math.PI * 0.25
 
     this.refreshProperties()
     this.setupInput()
@@ -267,13 +276,36 @@ export class CityScene3D {
     this.loop()
   }
 
+  /** Stand the player on the Mitte sidewalk closest to the middle of the
+   *  district, looking down the street rather than at a wall. */
+  private spawnPlayer() {
+    const mitte = this.layout.districts.find(d => d.id === 'mitte') ?? this.layout.districts[1]
+    const { tilesW, tiles } = this.layout
+    const target = this.districtRect(mitte)
+    let best: { x: number; z: number; dist: number } | null = null
+    for (let ty = mitte.bounds.y; ty < mitte.bounds.y + mitte.bounds.h; ty++) {
+      if (this.metrics.rowKind[ty] !== 'walk') continue
+      for (let tx = mitte.bounds.x; tx < mitte.bounds.x + mitte.bounds.w; tx++) {
+        if (tiles[ty * tilesW + tx] !== 'sidewalk') continue
+        if (this.metrics.colKind[tx] !== 'build') continue
+        const c = tileCenter(this.metrics, tx, ty)
+        const dist = Math.hypot(c.x - target.cx, c.z - target.cz)
+        if (!best || dist < best.dist) best = { x: c.x, z: c.z, dist }
+      }
+    }
+    this.pos.set(best?.x ?? this.metrics.width / 2, EYE, best?.z ?? this.metrics.depth / 2)
+    this.yaw = Math.PI / 2   // look east, along the street
+    this.pitch = 0
+  }
+
   // ------------------------------------------------------------------ trees
 
-  private plantTrees(spots: Array<{ px: number; py: number; park: boolean }>) {
+  private plantTrees(spots: Array<{ x: number; z: number; park: boolean }>) {
     if (spots.length === 0) return
-    const px2m = TILE_M / GROUND_PX_PER_TILE
-    const trunkGeo = new THREE.CylinderGeometry(0.22, 0.3, 2.4, 6)
-    const crownGeo = new THREE.IcosahedronGeometry(1.6, 1)
+    // Street trees: slim trunk, crown starting above head height so you can
+    // walk under them without the canopy clipping the camera.
+    const trunkGeo = new THREE.CylinderGeometry(0.16, 0.24, 4.2, 6)
+    const crownGeo = new THREE.IcosahedronGeometry(1.9, 1)
     const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6b4226 })
     const crownMat = new THREE.MeshLambertMaterial({ color: 0x2e7a26 })
     const crown2Mat = new THREE.MeshLambertMaterial({ color: 0x46b042 })
@@ -284,15 +316,16 @@ export class CityScene3D {
     crowns.castShadow = true
     const m = new THREE.Matrix4()
     spots.forEach((sp, i) => {
-      const x = sp.px * px2m, z = sp.py * px2m
-      const scale = sp.park ? 1.25 : 1.0
-      m.makeScale(scale, scale, scale).setPosition(x, 1.2 * scale, z)
+      const rng = mulberry32(Math.round(sp.x * 31 + sp.z * 17))
+      const scale = (sp.park ? 1.3 : 0.95) + rng() * 0.25
+      m.makeScale(1, scale, 1).setPosition(sp.x, 2.1 * scale, sp.z)
       trunks.setMatrixAt(i, m)
-      m.makeScale(scale, scale, scale).setPosition(x, 3.4 * scale, z)
+      m.makeScale(scale, scale * 0.95, scale).setPosition(sp.x, 5.2 * scale, sp.z)
       crowns.setMatrixAt(i, m)
-      m.makeScale(scale * 0.55, scale * 0.55, scale * 0.55).setPosition(x - 0.7 * scale, 4.1 * scale, z + 0.3 * scale)
+      m.makeScale(scale * 0.6, scale * 0.6, scale * 0.6).setPosition(sp.x - 0.8 * scale, 6.1 * scale, sp.z + 0.4 * scale)
       crowns2.setMatrixAt(i, m)
     })
+    trunks.computeBoundingSphere(); crowns.computeBoundingSphere(); crowns2.computeBoundingSphere()
     this.scene.add(trunks, crowns, crowns2)
 
     // bushes around park trees
@@ -302,16 +335,16 @@ export class CityScene3D {
       const bushes = new THREE.InstancedMesh(bushGeo, new THREE.MeshLambertMaterial({ color: 0x3c8f30 }), parkSpots.length * 3)
       let bi = 0
       parkSpots.forEach((sp, i) => {
-        const x = sp.px * px2m, z = sp.py * px2m
         const rng = mulberry32(i * 7919 + 13)
         for (let k = 0; k < 3; k++) {
           const ang = rng() * Math.PI * 2
           const dist = 2.5 + rng() * 2.4
           const s2 = 0.7 + rng() * 0.6
-          m.makeScale(s2, s2 * 0.8, s2).setPosition(x + Math.cos(ang) * dist, 0.35 * s2, z + Math.sin(ang) * dist)
+          m.makeScale(s2, s2 * 0.8, s2).setPosition(sp.x + Math.cos(ang) * dist, 0.35 * s2, sp.z + Math.sin(ang) * dist)
           bushes.setMatrixAt(bi++, m)
         }
       })
+      bushes.computeBoundingSphere()
       this.scene.add(bushes)
     }
   }
@@ -324,7 +357,8 @@ export class CityScene3D {
       for (let tx = 0; tx < tilesW; tx++) {
         if (at(tx, ty) !== 'plaza') continue
         if (at(tx - 1, ty) !== 'plaza' || at(tx + 1, ty) !== 'plaza' || at(tx, ty - 1) !== 'plaza' || at(tx, ty + 1) !== 'plaza') continue
-        const cx = tx * TILE_M + TILE_M / 2, cz = ty * TILE_M + TILE_M / 2
+        const c0 = tileCenter(this.metrics, tx, ty)
+        const cx = c0.x, cz = c0.z
         const stone = new THREE.MeshLambertMaterial({ color: 0xcfc6ae })
         const water = new THREE.MeshLambertMaterial({ color: 0x4a9fd8, emissive: 0x1a4a6e, emissiveIntensity: 0.35 })
         const basin = new THREE.Mesh(new THREE.CylinderGeometry(4.4, 4.6, 0.9, 20), stone)
@@ -384,8 +418,8 @@ export class CityScene3D {
     }
     const tex = new THREE.CanvasTexture(c)
     tex.colorSpace = THREE.SRGBColorSpace
-    const worldW = this.layout.tilesW * TILE_M
-    const worldH = this.layout.tilesH * TILE_M
+    const worldW = this.metrics.width
+    const worldH = this.metrics.depth
     const rng2 = mulberry32(1312)
     for (let i = 0; i < 14; i++) {
       const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.45 + rng2() * 0.3, depthWrite: false })
@@ -398,23 +432,34 @@ export class CityScene3D {
     }
   }
 
-  /** Warm-bulb street lamps on sidewalk corners next to every crossing. */
+  /** Warm-bulb street lamps standing at the kerb along every sidewalk strip. */
   private plantStreetLamps() {
     const { tilesW, tilesH, tiles } = this.layout
     const spots: Array<{ x: number; z: number }> = []
+    const isRoad = (tx: number, ty: number) => {
+      if (tx < 0 || tx >= tilesW || ty < 0 || ty >= tilesH) return false
+      const t = tiles[ty * tilesW + tx]
+      return t === 'road_h' || t === 'road_v' || t === 'road_x'
+    }
     for (let ty = 0; ty < tilesH; ty++) {
       for (let tx = 0; tx < tilesW; tx++) {
-        if (tiles[ty * tilesW + tx] !== 'road_x') continue
-        // lamp on the south-east sidewalk corner of the crossing
-        const cx = tx + 1, cy = ty + 1
-        if (cx >= tilesW || cy >= tilesH) continue
-        if (tiles[cy * tilesW + cx] !== 'sidewalk') continue
-        spots.push({ x: cx * TILE_M + 1.2, z: cy * TILE_M + 1.2 })
+        if (tiles[ty * tilesW + tx] !== 'sidewalk') continue
+        // one lamp per two lots, offset from the tree rhythm
+        if (((tx * 91 + ty * 53) & 0xff) % 3 !== 1) continue
+        const r = tileRect(this.metrics, tx, ty)
+        const inset = 1.3
+        let x = r.x + r.w / 2, z = r.z + r.d / 2
+        if (isRoad(tx, ty - 1)) z = r.z + inset
+        else if (isRoad(tx, ty + 1)) z = r.z + r.d - inset
+        else if (isRoad(tx - 1, ty)) x = r.x + inset
+        else if (isRoad(tx + 1, ty)) x = r.x + r.w - inset
+        else continue
+        spots.push({ x, z })
       }
     }
     if (spots.length === 0) return
-    const poleGeo = new THREE.CylinderGeometry(0.09, 0.13, 5.2, 6)
-    const headGeo = new THREE.SphereGeometry(0.34, 8, 6)
+    const poleGeo = new THREE.CylinderGeometry(0.08, 0.13, 6.0, 6)
+    const headGeo = new THREE.SphereGeometry(0.3, 8, 6)
     const poleMat = new THREE.MeshLambertMaterial({ color: 0x2c343c })
     const headMat = new THREE.MeshLambertMaterial({ color: 0xffe9b0, emissive: 0xcf9a30, emissiveIntensity: 0.65 })
     const poles = new THREE.InstancedMesh(poleGeo, poleMat, spots.length)
@@ -422,11 +467,12 @@ export class CityScene3D {
     poles.castShadow = true
     const m = new THREE.Matrix4()
     spots.forEach((sp, i) => {
-      m.identity().setPosition(sp.x, 2.6, sp.z)
+      m.identity().setPosition(sp.x, 3.0, sp.z)
       poles.setMatrixAt(i, m)
-      m.identity().setPosition(sp.x, 5.3, sp.z)
+      m.identity().setPosition(sp.x, 6.1, sp.z)
       heads.setMatrixAt(i, m)
     })
+    poles.computeBoundingSphere(); heads.computeBoundingSphere()
     this.scene.add(poles, heads)
   }
 
@@ -455,12 +501,15 @@ export class CityScene3D {
     this.fillerColliders = []
 
     interface Batch {
-      styleKey: string
       kind: BuildingKind
       district: string | undefined
       seed: number
-      spots: Array<{ x: number; z: number; yaw: number }>
+      lot: Lot
+      spots: Array<{ x: number; z: number; yaw: number; front: THREE.Vector3 }>
     }
+    // Batched per (block, style): keeping a batch inside one city block keeps
+    // its bounding sphere small, so the frustum can cull whole blocks that are
+    // behind the player instead of drawing the entire city every frame.
     const batches = new Map<string, Batch>()
     const districtIndex = new Map(this.layout.districts.map((d, i) => [d.id, i]))
 
@@ -474,89 +523,146 @@ export class CityScene3D {
       const base = (locked ? 999 * 1013 : districtIndex.get(d.id)! * 1013) + FILLER_KIND_INDEX[kind] * 211
       const seed = base + variant * 57
       const district = locked ? undefined : spot.district
-      const styleKey = `${kind}|${seed}|${district ?? '-'}`
-      let batch = batches.get(styleKey)
-      if (!batch) {
-        batch = { styleKey, kind, district, seed, spots: [] }
-        batches.set(styleKey, batch)
-      }
       const front = this.frontDirForTile(spot.tileX, spot.tileY)
-      batch.spots.push({
-        x: spot.tileX * TILE_M + TILE_M / 2,
-        z: spot.tileY * TILE_M + TILE_M / 2,
-        yaw: Math.atan2(front.x, front.z),
-      })
+      const lot = this.lotFor(spot.tileX, spot.tileY, front)
+      const block = `${Math.floor(spot.tileX / 12)},${Math.floor(spot.tileY / 4)}`
+      const key = `${block}|${kind}|${seed}|${district ?? '-'}|${lot.w.toFixed(1)}x${lot.d.toFixed(1)}`
+      let batch = batches.get(key)
+      if (!batch) {
+        batch = { kind, district, seed, lot, spots: [] }
+        batches.set(key, batch)
+      }
+      const c = tileCenter(this.metrics, spot.tileX, spot.tileY)
+      batch.spots.push({ x: c.x, z: c.z, yaw: Math.atan2(front.x, front.z), front })
     }
 
     const m = new THREE.Matrix4()
     for (const batch of batches.values()) {
       const style = rollStyle(batch.kind, batch.seed, 90, batch.district)
-      const dims = dimsFor(style)
-      // fillers stay inside their tile so dense blocks don't interpenetrate
-      const scale = Math.min(1, (TILE_M - 0.6) / Math.max(dims.w, dims.d))
-      const w = dims.w * scale, dep = dims.d * scale
-      const frontTex = facadeTexture(style, batch.district, 'front')
-      const sideTex = facadeTexture(style, batch.district, 'side')
-      const mats = [
-        new THREE.MeshLambertMaterial({ map: sideTex }),
-        new THREE.MeshLambertMaterial({ map: sideTex }),
-        new THREE.MeshLambertMaterial({ color: style.roofColor }),
-        new THREE.MeshLambertMaterial({ color: 0x333333 }),
-        new THREE.MeshLambertMaterial({ map: frontTex }),
-        new THREE.MeshLambertMaterial({ map: sideTex }),
-      ]
-      const body = new THREE.InstancedMesh(new THREE.BoxGeometry(w, dims.bodyH, dep), mats, batch.spots.length)
+      const dims = dimsFor(style, batch.lot)
+      const zOff = (batch.lot.d - dims.d) / 2 - dims.setback
+      const n = batch.spots.length
+
+      const body = new THREE.InstancedMesh(
+        new THREE.BoxGeometry(dims.w, dims.bodyH, dims.d),
+        this.facadeMaterials(style, batch.district, dims),
+        n,
+      )
       body.castShadow = true
       body.receiveShadow = true
       body.userData.filler = true
-      const blobGeo = new THREE.PlaneGeometry(w * 1.45, dep * 1.45)
-      blobGeo.rotateX(-Math.PI / 2)
-      const blobs = new THREE.InstancedMesh(
-        blobGeo,
-        new THREE.MeshBasicMaterial({ map: contactShadowTexture(), transparent: true, depthWrite: false }),
-        batch.spots.length,
-      )
-      batch.spots.forEach((sp, i) => {
-        m.makeRotationY(sp.yaw).setPosition(sp.x, dims.bodyH / 2, sp.z)
-        body.setMatrixAt(i, m)
-        m.makeRotationY(sp.yaw).setPosition(sp.x, 0.03, sp.z)
-        blobs.setMatrixAt(i, m)
-        const swap = Math.abs(Math.sin(sp.yaw)) > 0.5
-        const hw = (swap ? dep : w) / 2, hd = (swap ? w : dep) / 2
-        this.fillerColliders.push({ minX: sp.x - hw, maxX: sp.x + hw, minZ: sp.z - hd, maxZ: sp.z + hd })
-      })
-      this.fillerRoot.add(body)
-      this.fillerRoot.add(blobs)
 
-      if (dims.roof === 'pyramid' || dims.roof === 'hip') {
-        const roofGeo = new THREE.ConeGeometry(Math.SQRT1_2, 1, 4)
-        roofGeo.rotateY(Math.PI / 4)
-        roofGeo.scale(w * 1.08, dims.roofH, dep * 1.08)
-        const roof = new THREE.InstancedMesh(roofGeo, new THREE.MeshLambertMaterial({ color: style.roofColor }), batch.spots.length)
-        roof.castShadow = true
-        roof.userData.filler = true
-        batch.spots.forEach((sp, i) => {
-          m.makeRotationY(sp.yaw).setPosition(sp.x, dims.bodyH + dims.roofH / 2, sp.z)
-          roof.setMatrixAt(i, m)
-        })
-        this.fillerRoot.add(roof)
+      // Only freestanding buildings need a contact blob — a Blockrand body
+      // covers its whole lot, so the blob would sit entirely underneath it.
+      let blobs: THREE.InstancedMesh | null = null
+      if (style.detached) {
+        const blobGeo = new THREE.PlaneGeometry(dims.w * 1.4, dims.d * 1.4)
+        blobGeo.rotateX(-Math.PI / 2)
+        blobs = new THREE.InstancedMesh(
+          blobGeo,
+          new THREE.MeshBasicMaterial({ map: contactShadowTexture(), transparent: true, depthWrite: false }),
+          n,
+        )
+      }
+
+      const roofPieces = this.roofPieces(style, dims).map(piece => {
+        const mesh = new THREE.InstancedMesh(piece.geo, new THREE.MeshLambertMaterial({ color: piece.color }), n)
+        mesh.castShadow = true
+        mesh.userData.filler = true
+        return { mesh, y: piece.y }
+      })
+
+      batch.spots.forEach((sp, i) => {
+        const cx = sp.x + sp.front.x * zOff
+        const cz = sp.z + sp.front.z * zOff
+        m.makeRotationY(sp.yaw).setPosition(cx, dims.bodyH / 2, cz)
+        body.setMatrixAt(i, m)
+        if (blobs) {
+          m.makeRotationY(sp.yaw).setPosition(cx, 0.03, cz)
+          blobs.setMatrixAt(i, m)
+        }
+        for (const rp of roofPieces) {
+          m.makeRotationY(sp.yaw).setPosition(cx, rp.y, cz)
+          rp.mesh.setMatrixAt(i, m)
+        }
+        const alongX = Math.abs(sp.front.z) > 0.5
+        const hx = (alongX ? dims.w : dims.d) / 2
+        const hz = (alongX ? dims.d : dims.w) / 2
+        this.fillerColliders.push({ minX: cx - hx, maxX: cx + hx, minZ: cz - hz, maxZ: cz + hz })
+      })
+
+      body.computeBoundingSphere()
+      this.fillerRoot.add(body)
+      if (blobs) { blobs.computeBoundingSphere(); this.fillerRoot.add(blobs) }
+      for (const rp of roofPieces) {
+        rp.mesh.computeBoundingSphere()
+        this.fillerRoot.add(rp.mesh)
       }
     }
   }
 
+  /** Lot extents expressed in the building's local axes (w runs along the
+   *  facade, d runs back from the street). */
+  private lotFor(tileX: number, tileY: number, frontDir: THREE.Vector3): Lot {
+    const r = tileRect(this.metrics, tileX, tileY)
+    return Math.abs(frontDir.x) > 0.5 ? { w: r.d, d: r.w } : { w: r.w, d: r.d }
+  }
+
+  /** Box face materials: street facade at +z, courtyard facade at -z, and
+   *  blank Brandmauern on the party-wall sides (windowed flanks if detached). */
+  private facadeMaterials(style: ReturnType<typeof rollStyle>, district: string | undefined, dims: BuildingDims) {
+    const tex = (f: Face) => facadeTexture(style, district, f, dims)
+    const flank = tex(style.detached ? 'side' : 'firewall')
+    const roofTop = new THREE.MeshLambertMaterial({ color: mixColor(style.roofColor, 0x000000, 0.15) })
+    return [
+      new THREE.MeshLambertMaterial({ map: flank }),
+      new THREE.MeshLambertMaterial({ map: flank }),
+      roofTop,
+      new THREE.MeshLambertMaterial({ color: 0x333333 }),
+      new THREE.MeshLambertMaterial({ map: tex('front') }),
+      new THREE.MeshLambertMaterial({ map: tex('back') }),
+    ]
+  }
+
+  /** Roof geometry pieces with their local Y centre, shared by market
+   *  buildings and instanced fillers. */
+  private roofPieces(style: ReturnType<typeof rollStyle>, dims: BuildingDims): Array<{ geo: THREE.BufferGeometry; color: number; y: number }> {
+    if (dims.roof === 'gable' && dims.roofH > 0.5) {
+      // gableGeometry sits with its eaves at y = 0
+      return [{ geo: gableGeometry(dims.w * 1.02, dims.d * 1.04, dims.roofH), color: style.roofColor, y: dims.bodyH }]
+    }
+    if (dims.roof === 'hip' && dims.roofH > 0.5) {
+      const geo = new THREE.ConeGeometry(Math.SQRT1_2, 1, 4)
+      geo.rotateY(Math.PI / 4)
+      geo.scale(dims.w * 1.08, dims.roofH, dims.d * 1.08)
+      return [{ geo, color: style.roofColor, y: dims.bodyH + dims.roofH / 2 }]
+    }
+    // flat roof: a parapet band reads much better than a bare box top
+    const geo = new THREE.BoxGeometry(dims.w + 0.25, 0.75, dims.d + 0.25)
+    return [{ geo, color: mixColor(style.roofColor, 0xffffff, 0.1), y: dims.bodyH + 0.2 }]
+  }
+
   // ------------------------------------------- district lock visuals
 
+  /** World-space rect of a district, derived from the metric column/row edges. */
+  private districtRect(d: DistrictDef) {
+    const x0 = this.metrics.colX[d.bounds.x]
+    const x1 = this.metrics.colX[Math.min(d.bounds.x + d.bounds.w, this.layout.tilesW)]
+    const z0 = this.metrics.rowZ[d.bounds.y]
+    const z1 = this.metrics.rowZ[Math.min(d.bounds.y + d.bounds.h, this.layout.tilesH)]
+    return { x0, z0, w: x1 - x0, d: z1 - z0, cx: (x0 + x1) / 2, cz: (z0 + z1) / 2 }
+  }
+
   private mountLockOverlay(d: DistrictDef) {
-    const wPx = d.bounds.w * GROUND_PX_PER_TILE
-    const hPx = d.bounds.h * GROUND_PX_PER_TILE
-    const tex = new THREE.CanvasTexture(paintLockOverlay(wPx, hPx))
+    const r = this.districtRect(d)
+    const tex = new THREE.CanvasTexture(paintLockOverlay(r.w, r.d))
     tex.colorSpace = THREE.SRGBColorSpace
     const mesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(d.bounds.w * TILE_M, d.bounds.h * TILE_M),
+      new THREE.PlaneGeometry(r.w, r.d),
       new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }),
     )
     mesh.rotation.x = -Math.PI / 2
-    mesh.position.set((d.bounds.x + d.bounds.w / 2) * TILE_M, 0.08, (d.bounds.y + d.bounds.h / 2) * TILE_M)
+    mesh.position.set(r.cx, 0.08, r.cz)
     mesh.userData.lockedDistrict = d.id
     this.lockOverlays.set(d.id, mesh)
     this.scene.add(mesh)
@@ -573,8 +679,9 @@ export class CityScene3D {
     subEl.className = 'db-sub'
     el.appendChild(nameEl)
     el.appendChild(subEl)
+    const r = this.districtRect(d)
     const obj = new CSS2DObject(el)
-    const pos = new THREE.Vector3((d.bounds.x + d.bounds.w / 2) * TILE_M, 30, (d.bounds.y + d.bounds.h / 2) * TILE_M)
+    const pos = new THREE.Vector3(r.cx, 34, r.cz)
     obj.position.copy(pos)
     this.scene.add(obj)
     this.banners.set(d.id, { el, nameEl, subEl, pos })
@@ -700,7 +807,7 @@ export class CityScene3D {
           if (isOwned) { existing.priceLabel.el.style.display = 'none' }
           else {
             existing.priceLabel.el.style.display = ''
-            existing.priceLabel.el.textContent = formatEuro(p.price)
+            existing.priceLabel.textEl.textContent = formatEuro(p.price)
           }
         }
       } else {
@@ -729,22 +836,22 @@ export class CityScene3D {
 
   private spawnBuilding(p: Property, isOwned: boolean, key: string) {
     const style = rollStyle(p.type, p.styleSeed, Math.round(p.condition / 5) * 5, p.district)
-    const dims = dimsFor(style)
-    const group = new THREE.Group()
-    const center = new THREE.Vector3(p.tileX * TILE_M + TILE_M / 2, 0, p.tileY * TILE_M + TILE_M / 2)
-    group.position.copy(center)
     const frontDir = this.frontDirForTile(p.tileX, p.tileY)
+    const lot = this.lotFor(p.tileX, p.tileY, frontDir)
+    const dims = dimsFor(style, lot)
+    // push the body forward so its street facade lands on the pavement edge
+    const zOff = (lot.d - dims.d) / 2 - dims.setback
+
+    const group = new THREE.Group()
+    const tc = tileCenter(this.metrics, p.tileX, p.tileY)
+    const center = new THREE.Vector3(tc.x + frontDir.x * zOff, 0, tc.z + frontDir.z * zOff)
+    group.position.copy(center)
     group.rotation.y = Math.atan2(frontDir.x, frontDir.z)
 
     const meshes: THREE.Mesh[] = []
-    const frontTex = facadeTexture(style, p.district, 'front')
-    const sideTex = facadeTexture(style, p.district, 'side')
-    const mkMat = (tex: THREE.CanvasTexture) => new THREE.MeshLambertMaterial({ map: tex })
-    const roofMat = new THREE.MeshLambertMaterial({ color: style.roofColor })
-    const bottomMat = new THREE.MeshLambertMaterial({ color: 0x333333 })
     const body = new THREE.Mesh(
       new THREE.BoxGeometry(dims.w, dims.bodyH, dims.d),
-      [mkMat(sideTex), mkMat(sideTex), roofMat, bottomMat, mkMat(frontTex), mkMat(sideTex)],
+      this.facadeMaterials(style, p.district, dims),
     )
     body.position.y = dims.bodyH / 2
     body.castShadow = true
@@ -753,28 +860,27 @@ export class CityScene3D {
     meshes.push(body)
 
     // roof
-    if (dims.roof === 'pyramid' || dims.roof === 'hip') {
-      const cone = new THREE.Mesh(new THREE.ConeGeometry(Math.SQRT1_2, 1, 4), new THREE.MeshLambertMaterial({ color: style.roofColor }))
-      cone.rotation.y = Math.PI / 4
-      cone.scale.set(dims.w * 1.08, dims.roofH, dims.d * 1.08)
-      cone.position.y = dims.bodyH + dims.roofH / 2
-      cone.castShadow = true
-      group.add(cone)
-      meshes.push(cone)
-      if (style.kind === 'house') {
-        const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.6, 0.7), new THREE.MeshLambertMaterial({ color: style.trimColor }))
-        chimney.position.set(dims.w * 0.28, dims.bodyH + 1.0, dims.d * 0.12)
-        group.add(chimney)
-        meshes.push(chimney)
-      }
+    for (const piece of this.roofPieces(style, dims)) {
+      const mesh = new THREE.Mesh(piece.geo, new THREE.MeshLambertMaterial({ color: piece.color }))
+      mesh.position.y = piece.y
+      mesh.castShadow = true
+      group.add(mesh)
+      meshes.push(mesh)
+    }
+    if (dims.roof !== 'flat' && dims.roofH > 0.5) {
+      const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.8, 2.2, 0.8), new THREE.MeshLambertMaterial({ color: style.trimColor }))
+      chimney.position.set(dims.w * 0.3, dims.bodyH + dims.roofH * 0.8, -dims.d * 0.18)
+      chimney.castShadow = true
+      group.add(chimney)
+      meshes.push(chimney)
     } else if (style.kind === 'office' || style.kind === 'tower') {
-      const mech = new THREE.Mesh(new THREE.BoxGeometry(dims.w * 0.3, 1.1, dims.d * 0.25), new THREE.MeshLambertMaterial({ color: 0x707880 }))
-      mech.position.set(-dims.w * 0.2, dims.bodyH + 0.55, -dims.d * 0.15)
+      const mech = new THREE.Mesh(new THREE.BoxGeometry(dims.w * 0.3, 1.4, dims.d * 0.25), new THREE.MeshLambertMaterial({ color: 0x707880 }))
+      mech.position.set(-dims.w * 0.2, dims.bodyH + 1.1, -dims.d * 0.15)
       group.add(mech)
       meshes.push(mech)
       if (style.kind === 'tower') {
-        const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 3.4, 4), new THREE.MeshLambertMaterial({ color: style.accentColor }))
-        antenna.position.y = dims.bodyH + 1.7
+        const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 4.2, 4), new THREE.MeshLambertMaterial({ color: style.accentColor }))
+        antenna.position.y = dims.bodyH + 2.5
         group.add(antenna)
         meshes.push(antenna)
       }
@@ -782,7 +888,7 @@ export class CityScene3D {
 
     // contact shadow blob
     const blob = new THREE.Mesh(
-      new THREE.PlaneGeometry(dims.w * 1.45, dims.d * 1.45),
+      new THREE.PlaneGeometry(dims.w * 1.3, dims.d * 1.3),
       new THREE.MeshBasicMaterial({ map: contactShadowTexture(), transparent: true, depthWrite: false }),
     )
     blob.rotation.x = -Math.PI / 2
@@ -808,11 +914,16 @@ export class CityScene3D {
     if (!isOwned) {
       const el = document.createElement('div')
       el.className = 'price-tag-3d'
-      el.textContent = formatEuro(p.price)
+      const textEl = document.createElement('span')
+      textEl.className = 'ptg-inner'
+      textEl.textContent = formatEuro(p.price)
+      el.appendChild(textEl)
       const obj = new CSS2DObject(el)
-      obj.position.y = topY + 2.6
+      // hang it over the street-facing eave, not the roof centre, so the sight
+      // line from the pavement doesn't pass through the building itself
+      obj.position.set(0, topY + 2.2, dims.d / 2)
       group.add(obj)
-      handle.priceLabel = { obj, el }
+      handle.priceLabel = { obj, el, textEl }
     }
 
     // occupancy markers — parity with the old OccupancyMarkerLayer
@@ -821,7 +932,7 @@ export class CityScene3D {
       el.className = 'marker-chip vacant'
       el.textContent = 'ZU VERMIETEN'
       const obj = new CSS2DObject(el)
-      obj.position.y = topY + 1.2 + (isOwned ? 1.6 : 0)
+      obj.position.set(0, topY + 1.2 + (isOwned ? 1.6 : 0), dims.d / 2)
       group.add(obj)
     }
     if (this.isNomadOuted(p)) {
@@ -829,7 +940,7 @@ export class CityScene3D {
       el.className = 'marker-chip nomad'
       el.textContent = '⚠ Mietnomade'
       const obj = new CSS2DObject(el)
-      obj.position.y = topY + 3.0
+      obj.position.set(0, topY + 3.4, dims.d / 2)
       group.add(obj)
     }
 
@@ -1088,13 +1199,15 @@ export class CityScene3D {
   focusProperty(propertyId: string) {
     const handle = this.byPropertyId.get(propertyId)
     if (!handle) return
-    const dist = Math.max(handle.dims.w, handle.dims.d) / 2 + 9
+    // stand across the street, far enough back that the whole facade fits
+    const standoff = Math.max(14, handle.dims.bodyH * 0.75)
+    const dist = handle.dims.d / 2 + standoff
     const target = handle.center.clone().addScaledVector(handle.frontDir, dist)
     this.pos.set(target.x, EYE, target.z)
     const dx = handle.center.x - this.pos.x
     const dz = handle.center.z - this.pos.z
     this.yaw = Math.atan2(-dx, -dz)
-    this.pitch = Math.atan2(handle.dims.bodyH * 0.5, Math.hypot(dx, dz)) * 0.6
+    this.pitch = Math.atan2(handle.dims.bodyH * 0.45, standoff)
     const all = [...this.engine.state.listings, ...this.engine.state.owned]
     const p = all.find(pp => pp.id === propertyId)
     if (!p) return
@@ -1108,7 +1221,7 @@ export class CityScene3D {
     const handle = this.byPropertyId.get(p.id)
     const base = handle
       ? handle.center.clone().setY(handle.dims.bodyH * 0.6)
-      : new THREE.Vector3(p.tileX * TILE_M + TILE_M / 2, 4, p.tileY * TILE_M + TILE_M / 2)
+      : (() => { const c = tileCenter(this.metrics, p.tileX, p.tileY); return new THREE.Vector3(c.x, 4, c.z) })()
     const geo = new THREE.SphereGeometry(0.22, 6, 5)
     for (let i = 0; i < 12; i++) {
       const mat = new THREE.MeshBasicMaterial({ color: 0xf1c40f, transparent: true })
@@ -1139,7 +1252,7 @@ export class CityScene3D {
   // ------------------------------------------------------------- main loop
 
   private districtAt(x: number, z: number): DistrictDef | null {
-    const tx = Math.floor(x / TILE_M), ty = Math.floor(z / TILE_M)
+    const { tx, ty } = tileAtWorld(this.metrics, x, z)
     return this.layout.districts.find(d =>
       tx >= d.bounds.x && tx < d.bounds.x + d.bounds.w && ty >= d.bounds.y && ty < d.bounds.y + d.bounds.h) ?? null
   }
@@ -1173,8 +1286,8 @@ export class CityScene3D {
     const dx = (dirX / len) * speed * dt
     const dz = (dirZ / len) * speed * dt
 
-    const worldW = this.layout.tilesW * TILE_M
-    const worldH = this.layout.tilesH * TILE_M
+    const worldW = this.metrics.width
+    const worldH = this.metrics.depth
     // axis-separated slide
     let nx = this.pos.x + dx
     let blocked = this.blockedAt(nx, this.pos.z)
@@ -1227,7 +1340,7 @@ export class CityScene3D {
     const moving = this.move(dt)
     this.updateParticles(dt)
     this.ambient.update(dt)
-    const cloudWrap = this.layout.tilesW * TILE_M + 300
+    const cloudWrap = this.metrics.width + 300
     for (const cl of this.clouds) {
       cl.sprite.position.x += cl.speed * dt
       if (cl.sprite.position.x > cloudWrap) cl.sprite.position.x = -300
@@ -1251,7 +1364,7 @@ export class CityScene3D {
     this.camera.rotateX(this.pitch)
 
     // sun follows player so the shadow box stays useful
-    this.sun.position.copy(this.pos).addScaledVector(this.sunDir, 220)
+    this.sun.position.copy(this.pos).addScaledVector(this.sunDir, 140)
     this.sun.target.position.set(this.pos.x, 0, this.pos.z)
 
     // aim raycast: tooltip + highlight. Pointer-locked -> crosshair centre;
@@ -1287,23 +1400,47 @@ export class CityScene3D {
   }
 
   /** Distance-fade CSS2D labels so far-away banners/tags don't pile up on the
-   *  horizon. District banners fade earlier than gameplay price tags. */
+   *  horizon, and hard-hide any that project outside the viewport — otherwise
+   *  CSS2DRenderer parks them against the screen edge. */
   private fadeLabelsByDistance() {
-    const fade = (el: HTMLElement, d: number, near: number, far: number) => {
-      const o = d < near ? 1 : Math.max(0, 1 - (d - near) / (far - near))
+    const ndc = new THREE.Vector3()
+    const dir = new THREE.Vector3()
+    const fade = (el: HTMLElement, world: THREE.Vector3, near: number, far: number, occlude: boolean) => {
+      const d = Math.hypot(world.x - this.pos.x, world.z - this.pos.z)
+      let o = d < near ? 1 : Math.max(0, 1 - (d - near) / (far - near))
+      ndc.copy(world).project(this.camera)
+      const onScreen = ndc.z < 1 && Math.abs(ndc.x) < 1.05 && Math.abs(ndc.y) < 1.05
+      if (!onScreen) o = 0
+      // CSS2D labels have no depth test, so a tag on the far side of a block
+      // would otherwise read as if it were stuck on the wall in front of it.
+      if (o > 0.02 && occlude && this.isOccluded(world, dir)) o = 0
       el.style.opacity = String(o)
       el.style.visibility = o <= 0.02 ? 'hidden' : 'visible'
     }
-    for (const b of this.banners.values()) {
-      const d = Math.hypot(b.pos.x - this.pos.x, b.pos.z - this.pos.z)
-      fade(b.el, d, 150, 320)
-    }
+    for (const b of this.banners.values()) fade(b.el, b.pos, 150, 320, false)
+    const world = new THREE.Vector3()
     for (const h of this.byPropertyId.values()) {
-      const d = Math.hypot(h.center.x - this.pos.x, h.center.z - this.pos.z)
       for (const child of h.group.children) {
-        if ((child as any).isCSS2DObject) fade((child as CSS2DObject).element, d, 240, 440)
+        if (!(child as any).isCSS2DObject) continue
+        child.getWorldPosition(world)
+        this.occluderSkip = h.group
+        fade((child as CSS2DObject).element, world, 200, 360, true)
       }
     }
+  }
+
+  /** Is another building between the camera and this world point? Hits on the
+   *  label's own building don't count — a tag hanging over its own eave is
+   *  meant to be readable from the pavement below. */
+  private isOccluded(world: THREE.Vector3, scratch: THREE.Vector3): boolean {
+    scratch.copy(world).sub(this.camera.position)
+    const dist = scratch.length()
+    if (dist < 2) return false
+    this.labelRay.set(this.camera.position, scratch.normalize())
+    this.labelRay.far = dist - 1.0
+    const hits = this.labelRay.intersectObjects([this.buildingsRoot, this.fillerRoot], true)
+    const own = this.occluderSkip
+    return hits.some(h => !own || !isDescendantOf(h.object, own))
   }
 
   private onResize = () => {
@@ -1355,6 +1492,15 @@ function pickFillerKind(district: DistrictId, locked: boolean, r: number): Build
     case 'neukoelln': return pick([['apartment', 0.55], ['shop', 0.25], ['house', 0.2]])
     default: return pick([['apartment', 0.6], ['house', 0.2], ['shop', 0.2]])
   }
+}
+
+function isDescendantOf(node: THREE.Object3D, ancestor: THREE.Object3D): boolean {
+  let cur: THREE.Object3D | null = node
+  while (cur) {
+    if (cur === ancestor) return true
+    cur = cur.parent
+  }
+  return false
 }
 
 function capitalize(s: string) { return s.slice(0, 1).toUpperCase() + s.slice(1) }

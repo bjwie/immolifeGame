@@ -6,25 +6,24 @@
 import * as THREE from 'three'
 import type { CityLayout, TileKind } from '../world/cityLayout'
 import { mulberry32 } from '../world/cityLayout'
-
-const TILE_M = 12
+import type { Metrics } from './metrics'
+import { tileAtWorld, tileRect } from './metrics'
 
 const CAR_COLORS = [0xc0392b, 0x2980b9, 0xf1c40f, 0xe8e8e8, 0x2c3e50, 0x27ae60, 0x8e44ad, 0xd35400, 0x95a5a6, 0x16a085]
 const CLOTHES = [0xc0392b, 0x2980b9, 0xe67e22, 0x27ae60, 0x8e44ad, 0x34495e, 0xd35400, 0x7f8c8d, 0xf1c40f, 0x16a085]
-const LANE_OFFSET = 2.7
 
 interface Car {
   axis: 'x' | 'z'
-  lane: number      // fixed world coord on the other axis
+  lane: number
   dir: 1 | -1
-  pos: number       // world coord along the axis
+  pos: number
   speed: number
 }
 
 interface Ped {
   x: number
   z: number
-  dir: number       // 0=+x 1=+z 2=-x 3=-z
+  dir: number
   speed: number
   phase: number
 }
@@ -39,67 +38,73 @@ export class AmbientLife {
   private pedBody: THREE.InstancedMesh
   private pedHead: THREE.InstancedMesh
   private layout: CityLayout
+  private metrics: Metrics
   private worldW: number
-  private worldH: number
+  private worldD: number
   private m = new THREE.Matrix4()
   private q = new THREE.Quaternion()
   private v = new THREE.Vector3()
   private s = new THREE.Vector3(1, 1, 1)
 
-  constructor(scene: THREE.Scene, layout: CityLayout, carCount = 44, pedCount = 80) {
+  constructor(scene: THREE.Scene, layout: CityLayout, metrics: Metrics, carCount = 60, pedCount = 150, avoid?: THREE.Vector3) {
     this.layout = layout
-    this.worldW = layout.tilesW * TILE_M
-    this.worldH = layout.tilesH * TILE_M
+    this.metrics = metrics
+    this.worldW = metrics.width
+    this.worldD = metrics.depth
     const rng = mulberry32(20260801)
 
-    // --- cars on every avenue, right-hand traffic
-    const hRows: number[] = []
-    const vCols: number[] = []
-    for (let ty = 0; ty < layout.tilesH; ty += 4) hRows.push(ty)
-    for (let tx = 0; tx < layout.tilesW; tx += 6) vCols.push(tx)
+    // --- cars: one lane each way on every avenue, right-hand traffic
+    const roadRows: number[] = []
+    const roadCols: number[] = []
+    for (let y = 0; y < layout.tilesH; y++) if (metrics.rowKind[y] === 'road') roadRows.push(y)
+    for (let x = 0; x < layout.tilesW; x++) if (metrics.colKind[x] === 'road') roadCols.push(x)
+
     for (let i = 0; i < carCount; i++) {
       const horizontal = rng() > 0.45
       const dir: 1 | -1 = rng() > 0.5 ? 1 : -1
-      if (horizontal) {
-        const row = hRows[Math.floor(rng() * hRows.length)]
-        const center = row * TILE_M + TILE_M / 2
-        this.cars.push({ axis: 'x', lane: center + dir * LANE_OFFSET, dir, pos: rng() * this.worldW, speed: 8 + rng() * 6 })
-      } else {
-        const col = vCols[Math.floor(rng() * vCols.length)]
-        const center = col * TILE_M + TILE_M / 2
-        this.cars.push({ axis: 'z', lane: center - dir * LANE_OFFSET, dir, pos: rng() * this.worldH, speed: 8 + rng() * 6 })
+      if (horizontal && roadRows.length) {
+        const ty = roadRows[Math.floor(rng() * roadRows.length)]
+        const r = tileRect(metrics, 0, ty)
+        const centre = r.z + r.d / 2
+        const laneOff = r.d * 0.22
+        this.cars.push({ axis: 'x', lane: centre + dir * laneOff, dir, pos: rng() * this.worldW, speed: 9 + rng() * 7 })
+      } else if (roadCols.length) {
+        const tx = roadCols[Math.floor(rng() * roadCols.length)]
+        const r = tileRect(metrics, tx, 0)
+        const centre = r.x + r.w / 2
+        const laneOff = r.w * 0.22
+        this.cars.push({ axis: 'z', lane: centre - dir * laneOff, dir, pos: rng() * this.worldD, speed: 9 + rng() * 7 })
       }
     }
 
     const bodyGeo = new THREE.BoxGeometry(1.72, 0.52, 3.9)
     const cabinGeo = new THREE.BoxGeometry(1.5, 0.44, 1.7)
-    this.carBody = new THREE.InstancedMesh(bodyGeo, new THREE.MeshLambertMaterial({ color: 0xffffff }), this.cars.length)
-    this.carCabin = new THREE.InstancedMesh(cabinGeo, new THREE.MeshLambertMaterial({ color: 0x1a232e }), this.cars.length)
+    this.carBody = new THREE.InstancedMesh(bodyGeo, new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, this.cars.length))
+    this.carCabin = new THREE.InstancedMesh(cabinGeo, new THREE.MeshLambertMaterial({ color: 0x1a232e }), Math.max(1, this.cars.length))
     this.carBody.castShadow = true
     this.cars.forEach((_, i) => this.carBody.setColorAt(i, new THREE.Color(CAR_COLORS[i % CAR_COLORS.length])))
     scene.add(this.carBody, this.carCabin)
 
     // --- pedestrians on sidewalks
-    const sidewalks: Array<{ tx: number; ty: number }> = []
+    const walkTiles: Array<{ tx: number; ty: number }> = []
     for (let ty = 0; ty < layout.tilesH; ty++) {
       for (let tx = 0; tx < layout.tilesW; tx++) {
-        if (layout.tiles[ty * layout.tilesW + tx] === 'sidewalk') sidewalks.push({ tx, ty })
+        const t = layout.tiles[ty * layout.tilesW + tx]
+        if (t === 'sidewalk' || t === 'plaza') walkTiles.push({ tx, ty })
       }
     }
-    for (let i = 0; i < pedCount && sidewalks.length > 0; i++) {
-      const t = sidewalks[Math.floor(rng() * sidewalks.length)]
-      this.peds.push({
-        x: t.tx * TILE_M + 2 + rng() * (TILE_M - 4),
-        z: t.ty * TILE_M + 2 + rng() * (TILE_M - 4),
-        dir: Math.floor(rng() * 4),
-        speed: 1.1 + rng() * 1.1,
-        phase: rng() * Math.PI * 2,
-      })
+    for (let i = 0; i < pedCount && walkTiles.length > 0; i++) {
+      const t = walkTiles[Math.floor(rng() * walkTiles.length)]
+      const r = tileRect(metrics, t.tx, t.ty)
+      const x = r.x + 0.9 + rng() * Math.max(0.2, r.w - 1.8)
+      const z = r.z + 0.9 + rng() * Math.max(0.2, r.d - 1.8)
+      if (avoid && Math.hypot(x - avoid.x, z - avoid.z) < 8) continue
+      this.peds.push({ x, z, dir: Math.floor(rng() * 4), speed: 1.1 + rng() * 1.1, phase: rng() * Math.PI * 2 })
     }
     const pedGeo = new THREE.CapsuleGeometry(0.26, 0.72, 2, 6)
     const headGeo = new THREE.SphereGeometry(0.19, 6, 5)
-    this.pedBody = new THREE.InstancedMesh(pedGeo, new THREE.MeshLambertMaterial({ color: 0xffffff }), this.peds.length)
-    this.pedHead = new THREE.InstancedMesh(headGeo, new THREE.MeshLambertMaterial({ color: 0xe8c39e }), this.peds.length)
+    this.pedBody = new THREE.InstancedMesh(pedGeo, new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, this.peds.length))
+    this.pedHead = new THREE.InstancedMesh(headGeo, new THREE.MeshLambertMaterial({ color: 0xe8c39e }), Math.max(1, this.peds.length))
     this.pedBody.castShadow = true
     this.peds.forEach((_, i) => this.pedBody.setColorAt(i, new THREE.Color(CLOTHES[i % CLOTHES.length])))
     scene.add(this.pedBody, this.pedHead)
@@ -107,19 +112,19 @@ export class AmbientLife {
     this.update(0)
   }
 
-  private tileAt(x: number, z: number): TileKind | null {
-    const tx = Math.floor(x / TILE_M), ty = Math.floor(z / TILE_M)
+  private tileKindAt(x: number, z: number): TileKind | null {
+    const { tx, ty } = tileAtWorld(this.metrics, x, z)
     if (tx < 0 || tx >= this.layout.tilesW || ty < 0 || ty >= this.layout.tilesH) return null
     return this.layout.tiles[ty * this.layout.tilesW + tx]
   }
 
   private walkable(x: number, z: number): boolean {
-    const t = this.tileAt(x, z)
+    if (x < 0 || z < 0 || x > this.worldW || z > this.worldD) return false
+    const t = this.tileKindAt(x, z)
     return t === 'sidewalk' || t === 'plaza' || t === 'park'
   }
 
   update(dt: number) {
-    // cars
     for (let i = 0; i < this.cars.length; i++) {
       const c = this.cars[i]
       c.pos += c.dir * c.speed * dt
@@ -130,15 +135,14 @@ export class AmbientLife {
         x = c.pos; z = c.lane
         heading = c.dir > 0 ? Math.PI / 2 : -Math.PI / 2
       } else {
-        if (c.pos > this.worldH + 4) c.pos = -4
-        if (c.pos < -4) c.pos = this.worldH + 4
+        if (c.pos > this.worldD + 4) c.pos = -4
+        if (c.pos < -4) c.pos = this.worldD + 4
         x = c.lane; z = c.pos
         heading = c.dir > 0 ? 0 : Math.PI
       }
       this.q.setFromAxisAngle(this.v.set(0, 1, 0), heading)
       this.m.compose(this.v.set(x, 0.44, z), this.q, this.s)
       this.carBody.setMatrixAt(i, this.m)
-      // cabin sits slightly toward the rear
       const backOff = 0.35
       const cabX = c.axis === 'x' ? x - c.dir * backOff : x
       const cabZ = c.axis === 'z' ? z - c.dir * backOff : z
@@ -148,21 +152,17 @@ export class AmbientLife {
     this.carBody.instanceMatrix.needsUpdate = true
     this.carCabin.instanceMatrix.needsUpdate = true
 
-    // pedestrians
     for (let i = 0; i < this.peds.length; i++) {
       const p = this.peds[i]
       p.phase += dt * p.speed * 4.2
       const step = p.speed * dt
       const [dx, dz] = DIRS[p.dir]
-      const aheadX = p.x + dx * (step + 0.5)
-      const aheadZ = p.z + dz * (step + 0.5)
-      if (!this.walkable(aheadX, aheadZ)) {
-        // try left / right / back, deterministic-ish preference
+      if (!this.walkable(p.x + dx * (step + 0.6), p.z + dz * (step + 0.6))) {
         const options = [(p.dir + 1) % 4, (p.dir + 3) % 4, (p.dir + 2) % 4]
         let turned = false
         for (const o of options) {
           const [ox, oz] = DIRS[o]
-          if (this.walkable(p.x + ox * 0.9, p.z + oz * 0.9)) { p.dir = o; turned = true; break }
+          if (this.walkable(p.x + ox * 1.0, p.z + oz * 1.0)) { p.dir = o; turned = true; break }
         }
         if (!turned) p.dir = (p.dir + 2) % 4
       } else {

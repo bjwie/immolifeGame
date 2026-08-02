@@ -34,9 +34,10 @@ When the user asks for game changes, always work in `src/v2/`.
 main.ts              boot, start screen, CityScene3D construction
   └─ three/CityScene3D   first-person Three.js scene — camera, world, input, engine wiring
        ├─ world/cityLayout     pure 60×24 tile grid + 10 districts (6 playable + 4 locked)
-       ├─ world/buildingStyle  pure deterministic style rolls (palettes, sizes, subtypes)
-       ├─ three/ground         paints the 2D tile art onto the ground-plane canvas
-       ├─ three/facade         canvas facade textures for building boxes (cached by style key)
+       ├─ world/buildingStyle  pure deterministic style rolls (palette, storeys, roof, subtype)
+       ├─ three/metrics        tile grid → metres (variable column/row widths)
+       ├─ three/ground         paints the tile art onto the ground canvas at true scale
+       ├─ three/facade         lot-fitted massing + canvas facade textures (cached by style key)
        ├─ three/ambient        instanced cars + pedestrians
        └─ Engine               game state + simulation loop (no renderer deps)
             ├─ HUD                 \
@@ -71,8 +72,37 @@ Click the canvas → pointer lock (mouse look + WASD/arrows, Shift sprint, cross
 ### Districts and types
 The 10 Berlin districts (6 playable + 4 locked edge teasers) are defined in `world/cityLayout.ts` with `priceMultiplier` / `rentMultiplier` / `trend`. IDs are ASCII: `mitte | prenzlauer | kreuzberg | charlottenburg | wedding | neukoelln` + locked `spandau | steglitz | lichtenberg | marzahn`. Building kinds: `house | apartment | office | shop | tower | villa` — the `BuildingKind` type from `world/buildingStyle.ts` is re-exported via `types.ts` as `PropertyType`.
 
+### World scale (`three/metrics.ts`) — read this before touching geometry
+The tile grid is uniform, but **metres are not**. A uniform tile size makes a sidewalk as wide as a boulevard and forces buildings to overlap their neighbours, which is exactly what `metrics.ts` exists to prevent. Columns and rows get widths by what they carry:
+
+```
+columns (period 6):  road 11m | walk 4.5m | build 15m ×3 | walk 4.5m
+rows    (period 4):  road 11m | walk 4.5m | build 22m | walk 4.5m
+```
+
+That yields a ~20 m facade-to-facade street and a 15 × 22 m lot — Berlin Blockrand proportions. Never convert tiles to metres by multiplying; always go through `tileCenter` / `tileRect` / `tileAtWorld`. World size is ~661 × 270 m.
+
+**Footprints come from the lot, never from the style.** `dimsFor(style, lot)` sizes the body from the lot it stands on: party-wall kinds fill their lot exactly (so neighbours butt together and both streets get a flush facade), detached kinds (house/villa) keep gardens. Buildings therefore *cannot* interpenetrate, whatever the style rolls. `BuildingStyle` carries storeys + storey height, not pixel dimensions; total height is `bodyHeight(style)`.
+
+Party-wall flanks render as blank Brandmauern (`facadeTexture(..., 'firewall', ...)`), which is what you see where a neighbour is shorter. Faces are `front` (+z, street), `back` (−z), `side`/`firewall` (±x).
+
+**The sun must stay on the +z side.** Every lot fronts +z, so a sun with a negative z component puts every street facade in the city in permanent shade.
+
+### Rendering only what's in view
+- Filler buildings are batched per **(block, style)** so each `InstancedMesh` has a small bounding sphere; `computeBoundingSphere()` is called after filling the matrices, otherwise the frustum can't cull them.
+- `camera.far` (380 m) is the cheap occlusion budget — the frustum drops whole blocks past it and the fog (70–350 m) hides the cut. Raising `far` re-adds those draw calls.
+- The directional light's shadow camera is deliberately tiny (±48 m): shadow casting ignores the view frustum, so every metre of that box costs draw calls every frame.
+- Sanity check: looking at the ground should cost far fewer draw calls than looking down a street (~190 vs ~600). If they're equal, culling has regressed.
+
+### CSS2D labels
+Price tags / chips / district banners are `CSS2DObject`s. Two rules:
+- **Never animate `transform` in CSS on the mounted element** — `CSS2DRenderer` writes `transform` to position it, and a CSS animation silently overrides that, parking every label in the screen corner. Animate an inner element instead (see `.price-tag-3d .ptg-inner`).
+- They have no depth test, so `fadeLabelsByDistance()` distance-fades them, hides them off-screen, and raycasts for occlusion (ignoring hits on the label's own building). Labels hang over the street-facing eave, not the roof centre, or the sight line passes through their own building.
+
 ### Procedural rendering
-`three/facade.ts` paints per-style canvas facade textures (front + side) that wrap `BoxGeometry` buildings; cached by a deterministic style key, `NearestFilter` for the crisp pixel look. It ports the old 2D visual language: Altbau (Stuck-Pediments, cornice), Plattenbau (panel seams), Neubau (Bandfenster, anthracite cap), shop sign bands, office/tower glass grids, **condition patina** (tint, cracks <50, boarded windows <25, bucketed by 5), and **district skins** (Kreuzberg graffiti, Prenzlauer drainpipes, Neukoelln awnings, ...). `rollStyle(kind, seed, condition, district)` in `world/buildingStyle.ts` is deterministic given seed — same consumption order as the old 2D renderer, so styles are save-stable.
+`three/facade.ts` paints per-style canvas facade textures that wrap `BoxGeometry` buildings, storey by storey at true scale (`RES` px per metre); cached by a deterministic style key, `NearestFilter` for the crisp pixel look. It ports the old 2D visual language: Altbau (Stuck pediments, cornice, balcony rails), Plattenbau (panel seams), Neubau (Bandfenster, anthracite cap), ground-floor Ladenlokal with sign band and awning, office/tower lobbies, **condition patina** (tint, cracks <50, boarded windows <25, bucketed by 5), and **district skins** (Kreuzberg graffiti, Prenzlauer drainpipes, Neukoelln awnings, ...). `rollStyle(kind, seed, condition, district)` in `world/buildingStyle.ts` is deterministic given seed, so styles are save-stable.
+
+Roofs come from `roofPieces()`: gable (a flat-shaded prism with its ridge along the street), hip (pyramid, freestanding kinds), or a parapet band for flat roofs. Both market buildings and instanced fillers go through it, so they always match.
 
 State markers on buildings: gold sprite badge = owned, CSS2D chips = price tag / `ZU VERMIETEN` / nomad warning, 3D scaffold group = active renovation. CSS2D labels distance-fade (`fadeLabelsByDistance`) so the horizon doesn't pile up with banners.
 
